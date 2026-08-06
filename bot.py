@@ -1,7 +1,7 @@
 import os
 import re
 import asyncio
-from pyrogram import Client, filters, idle
+from pyrogram import Client, filters, compose
 from pyrogram.types import Message, InputMediaVideo, InputMediaPhoto
 from aiohttp import web
 
@@ -175,8 +175,9 @@ async def process_link(client: Client, message: Message):
     except Exception as e:
         await status.edit_text(f"❌ **Error:** `{str(e)}`")
 
-# Main Server & Client Entry Point
+# Main Entry Point
 async def main():
+    # Start web server
     app = web.Application()
     app.router.add_get("/", handle_ping)
     runner = web.AppRunner(app)
@@ -185,32 +186,13 @@ async def main():
     await site.start()
     print(f"Web server active on port {PORT}", flush=True)
 
-    bot.loop = asyncio.get_running_loop()
-    user.loop = asyncio.get_running_loop()
-
-    # Start Userbot Safely
+    # Prepare apps for Pyrogram Compose
+    apps = [bot]
     if SESSION_STRING:
-        try:
-            await user.start()
-            print(">>> USERBOT STARTED SUCCESSFULLY <<<", flush=True)
-        except Exception as e:
-            print(f"❌ Userbot failed to start! Check SESSION_STRING: {e}", flush=True)
-    else:
-        print("⚠️ Warning: SESSION_STRING environment variable is not set!", flush=True)
+        apps.append(user)
 
-    # Start Bot Safely
-    try:
-        await bot.start()
-        print(">>> BOT STARTED SUCCESSFULLY AND LISTENING <<<", flush=True)
-    except Exception as e:
-        print(f"❌ Bot failed to start! Check BOT_TOKEN: {e}", flush=True)
-
-    await idle()
-
-    if user.is_connected:
-        await user.stop()
-    if bot.is_connected:
-        await bot.stop()
+    print(">>> STARTING BOT AND USERBOT WITH PYROGRAM COMPOSE <<<", flush=True)
+    await compose(apps)
 
 if __name__ == "__main__":
     asyncio.run(main())
