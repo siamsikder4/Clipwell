@@ -1,42 +1,51 @@
-# 🚀 Clipwell Telegram Downloader Bot
+<div align="center">
 
-An advanced, multi-session Telegram media downloader bot built with **Pyrogram**, **Firebase Firestore**, and **Aiohttp**. It allows users to effortlessly download media from both public and private Telegram channels/groups without requiring them to log in.
+  # ⚡ CLIPWELL DOWNLOADER BOT ⚡
+  *A high-speed, multi-session Telegram media downloader powered by Pyrogram & Firebase.*
 
----
+  [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
+  [![Pyrogram](https://img.shields.io/badge/Pyrogram-v2.0-26A5E4?style=for-the-badge&logo=telegram&logoColor=white)](https://docs.pyrogram.org)
+  [![Firebase](https://img.shields.io/badge/Firebase-Firestore-FFCA28?style=for-the-badge&logo=firebase&logoColor=black)](https://firebase.google.com)
+  [![Render](https://img.shields.io/badge/Render-24%2F7%20Online-46E3B7?style=for-the-badge&logo=render&logoColor=black)](https://render.com)
+  [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 
-## ✨ Features
-
-- **Multi-Session Support:** Seamlessly handles multiple user session strings stored securely in Firebase.
-- **Firebase Persistence:** Zero data loss during re-deployments or server restarts.
-- **Admin Control Panel:** Interactive inline button interface to add, view, or remove sessions directly from the Telegram chat.
-- **High-Speed Processing:** Optimized media downloading and uploading equipped with real-time aesthetic progress bars.
-- **Media Group (Album) Support:** Accurately downloads and forwards entire photo/video albums simultaneously.
-- **Auto-Delete Security:** Automatically deletes user links and downloaded media after 5 minutes to maintain privacy and clean chat history.
-- **Analytics Dashboard:** Real-time tracking of total bot users and total download counts.
-- **FloodWait Protection:** Automatically catches and handles Telegram rate limits to prevent bot crashes.
-- **Render Ready:** Includes a lightweight built-in HTTP server (`aiohttp`) for seamless health checks and 24/7 deployment on Render.
+</div>
 
 ---
 
-## 🛠️ Prerequisites & Environment Variables
+## 📖 Overview
 
-To run this bot successfully, configure the following environment variables on your hosting provider (e.g., Render):
+**Clipwell** is a production-grade Telegram bot designed to fetch and download restricted photos, videos, and media albums from both **Public** and **Private** channels or groups without forcing end-users to log in.
 
-| Variable Key | Description | Example |
-| :--- | :--- | :--- |
-| `API_ID` | Your Telegram API ID | `35039821` |
-| `API_HASH` | Your Telegram API Hash | `77df805f1700eeefec...` |
-| `BOT_TOKEN` | Your Telegram Bot Token from `@BotFather` | `123456:ABC-DEF12341234...` |
-| `FIREBASE_KEY` | Entire JSON content of your Firebase Service Account | `{"type": "service_account", ...}` |
+With **Firebase Firestore integration**, your session keys and analytics are preserved permanently across server restarts, deployments, or cache purges.
 
 ---
 
-## 📦 Dependencies (`requirements.txt`)
+## ✨ Key Features
 
-Ensure your project contains a `requirements.txt` file with the following packages:
+| Feature | Description |
+| :--- | :--- |
+| 🔑 **Multi-Session Engine** | Connect multiple helper userbots to access restricted private channels. |
+| 💾 **Firebase Persistence** | Session strings and stats are safely stored in Firebase Firestore DB. |
+| ⚡ **TgCrypto Speedup** | Powered by C-based crypto extensions for ultra-fast download & upload speeds. |
+| 📊 **Real-Time Analytics** | Track total bot users and download metrics directly from `/admin`. |
+| ⏳ **5-Min Auto-Delete** | Links and downloaded media automatically self-destruct after 5 minutes. |
+| 🎛️ **Interactive Admin UI** | Manage sessions seamlessly via Telegram inline buttons (Add, Delete, View). |
+| 🛡️ **FloodWait Safe** | Catches Telegram rate limits automatically and waits without crashing. |
+| 🌐 **24/7 Render Keep-Alive** | Built-in HTTP web server (`aiohttp`) for continuous uptime health checks. |
+
+---
+
+## 🎨 In-Bot UI Preview
 
 ```text
-pyrogram
-tgcrypto
-aiohttp
-firebase-admin
+╭─ ⚙️ ADMIN CONTROL PANEL ⚙️
+│
+├ 💾 Firebase DB: 🟢 Connected
+├ 🟢 Active Sessions: 2
+├ Select an option below to manage.
+╰──────────────────────────
+[ 📊 Analytics & Stats ]
+[ ➕ Add New Session ]
+[ 📋 View All Sessions (2) ]
+[ 🗑️ Remove Session ]
