@@ -12,7 +12,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 SESSION_STRING = os.environ.get("SESSION_STRING", "").strip()
 PORT = int(os.environ.get("PORT", "8080"))
 
-# Bot Client (For receiving commands and sending videos)
+# Bot Client
 bot = Client(
     "bot_instance",
     api_id=API_ID,
@@ -21,12 +21,12 @@ bot = Client(
     in_memory=True
 )
 
-# User Client (For fetching media from private channels)
+# User Client
 user = Client(
     "user_instance",
     api_id=API_ID,
     api_hash=API_HASH,
-    session_string=SESSION_STRING,
+    session_string=SESSION_STRING if SESSION_STRING else None,
     in_memory=True
 )
 
@@ -61,6 +61,10 @@ async def process_link(client: Client, message: Message):
     if message.text.startswith("/"):
         return
 
+    if not SESSION_STRING:
+        await message.reply_text("⚠️ **Error:** `SESSION_STRING` is missing in Render Environment Variables!")
+        return
+
     link = message.text.strip()
     private_pattern = r"t\.me/c/(\d+)/(\d+)"
     public_pattern = r"t\.me/([^/]+)/(\d+)"
@@ -82,14 +86,13 @@ async def process_link(client: Client, message: Message):
             chat_id = public_match.group(1)
             msg_id = int(public_match.group(2))
 
-        # Always fetch via Userbot to ensure private/restricted access
         target_msg = await user.get_messages(chat_id, msg_id)
 
         if not target_msg:
-            await status.edit_text("❌ **Post or message not found or restricted!**")
+            await status.edit_text("❌ **Post not found or restricted! Make sure your account is a member of the private channel.**")
             return
 
-        # Case 1: Media Group / Album
+        # Case 1: Album
         if target_msg.media_group_id:
             await status.edit_text("🖼️ **Album detected! Fetching media group...**")
             group_messages = await user.get_media_group(chat_id, msg_id)
@@ -122,20 +125,18 @@ async def process_link(client: Client, message: Message):
                 await status.edit_text("⬆️ **Uploading album to chat...**")
                 sent_msgs = await client.send_media_group(chat_id=message.chat.id, media=media_list)
                 
-                # Clean up local files
                 for path in downloaded_files:
                     if os.path.exists(path):
                         os.remove(path)
                 
                 await status.delete()
 
-                # Schedule auto-delete after 10 minutes
                 delete_msg_ids = [message.id] + [m.id for m in sent_msgs]
                 asyncio.create_task(auto_delete_messages(message.chat.id, delete_msg_ids, delay_seconds=600))
             else:
                 await status.edit_text("❌ **No supported video or photo found in the album.**")
 
-        # Case 2: Single Video / Media
+        # Case 2: Single Video
         else:
             if not (target_msg.video or target_msg.photo or target_msg.document or target_msg.animation):
                 await status.edit_text("❌ **No downloadable video or media found at this link.**")
@@ -156,11 +157,11 @@ async def process_link(client: Client, message: Message):
             if target_msg.video:
                 sent_msg = await client.send_video(chat_id=message.chat.id, video=file_path, caption=final_caption, supports_streaming=True)
             elif target_msg.photo:
-                sent_msg = await client.send_photo(chat_id=message.chat.id, photo=file_path, caption=final_caption)
+                sent_msg = await client.send_photo(chat_id=message.chat.id, photo=final_caption)
             elif target_msg.document:
                 sent_msg = await client.send_document(chat_id=message.chat.id, document=file_path, caption=final_caption)
             elif target_msg.animation:
-                sent_msg = await client.send_animation(chat_id=message.chat.id, animation=final_caption, caption=final_caption)
+                sent_msg = await client.send_animation(chat_id=message.chat.id, animation=file_path, caption=final_caption)
 
             if os.path.exists(file_path):
                 os.remove(file_path)
@@ -176,7 +177,6 @@ async def process_link(client: Client, message: Message):
 
 # Main Server & Client Entry Point
 async def main():
-    # Start web server
     app = web.Application()
     app.router.add_get("/", handle_ping)
     runner = web.AppRunner(app)
@@ -185,20 +185,32 @@ async def main():
     await site.start()
     print(f"Web server active on port {PORT}", flush=True)
 
-    # Sync asyncio loop with Pyrogram
     bot.loop = asyncio.get_running_loop()
     user.loop = asyncio.get_running_loop()
 
-    # Start both clients
-    await user.start()
-    await bot.start()
-    print(">>> BOT AND USERBOT ARE ONLINE AND WORKING <<<", flush=True)
+    # Start Userbot Safely
+    if SESSION_STRING:
+        try:
+            await user.start()
+            print(">>> USERBOT STARTED SUCCESSFULLY <<<", flush=True)
+        except Exception as e:
+            print(f"❌ Userbot failed to start! Check SESSION_STRING: {e}", flush=True)
+    else:
+        print("⚠️ Warning: SESSION_STRING environment variable is not set!", flush=True)
 
-    # Keep app running
+    # Start Bot Safely
+    try:
+        await bot.start()
+        print(">>> BOT STARTED SUCCESSFULLY AND LISTENING <<<", flush=True)
+    except Exception as e:
+        print(f"❌ Bot failed to start! Check BOT_TOKEN: {e}", flush=True)
+
     await idle()
 
-    await bot.stop()
-    await user.stop()
+    if user.is_connected:
+        await user.stop()
+    if bot.is_connected:
+        await bot.stop()
 
 if __name__ == "__main__":
     asyncio.run(main())
