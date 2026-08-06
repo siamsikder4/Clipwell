@@ -14,10 +14,10 @@ from pyrogram.types import Message, InputMediaVideo, InputMediaPhoto
 from pyrogram.errors import SessionPasswordNeeded
 from aiohttp import web
 
-# Environment Credentials with Fallback Values
+# Environment Credentials
 API_ID = int(os.environ.get("API_ID", "35039821"))
 API_HASH = os.environ.get("API_HASH", "77df805f1700eeefec861de6c93ee2ae").strip()
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8952918726:AAFvPyDqsQTy8cPsxTH8EyrbTwsff2Wne8g").strip()
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_NEW_BOT_TOKEN_HERE").strip()
 PORT = int(os.environ.get("PORT", "8080"))
 
 # SQLite Database Setup
@@ -318,7 +318,6 @@ async def process_link(client: Client, message: Message):
 
 # Server & Bot Entry Point
 async def main():
-    # Web server for Render health checks
     app = web.Application()
     app.router.add_get("/", handle_ping)
     runner = web.AppRunner(app)
@@ -327,12 +326,9 @@ async def main():
     await site.start()
     print(f"Web server active on port {PORT}", flush=True)
 
-    # Clean old webhooks to allow long polling
     await bot.start()
-    await bot.delete_webhook(drop_pending_updates=True)
     print(">>> BOT IS ONLINE AND LISTENING FOR MESSAGES <<<", flush=True)
 
-    # Keep loop running reliably
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
