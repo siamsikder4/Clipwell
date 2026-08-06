@@ -4,14 +4,17 @@ import time
 import sqlite3
 import asyncio
 from pyrogram import Client, filters, idle
-from pyrogram.types import Message, InputMediaVideo, InputMediaPhoto
+from pyrogram.types import (
+    Message, InputMediaVideo, InputMediaPhoto, 
+    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ForceReply
+)
 from aiohttp import web
 
 # Environment Credentials
 API_ID = int(os.environ.get("API_ID", "35039821"))
 API_HASH = os.environ.get("API_HASH", "77df805f1700eeefec861de6c93ee2ae").strip()
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
-OWNER_ID = int(os.environ.get("OWNER_ID", "0"))  # আপনার টেলিগ্রাম ইউজার আইডি (ঐচ্ছিক)
+OWNER_ID = 6142774415  # Fixed Admin ID
 PORT = int(os.environ.get("PORT", "8080"))
 
 # SQLite Database Setup
@@ -23,17 +26,18 @@ def init_db():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS admin_sessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_string TEXT UNIQUE NOT NULL
+            session_string TEXT UNIQUE NOT NULL,
+            account_name TEXT
         )
     """)
     conn.commit()
     conn.close()
 
-def add_session_to_db(session_str: str):
+def add_session_to_db(session_str: str, name: str):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     try:
-        cursor.execute("INSERT INTO admin_sessions (session_string) VALUES (?)", (session_str,))
+        cursor.execute("INSERT INTO admin_sessions (session_string, account_name) VALUES (?, ?)", (session_str, name))
         conn.commit()
         res = True
     except sqlite3.IntegrityError:
@@ -44,7 +48,7 @@ def add_session_to_db(session_str: str):
 def get_all_sessions():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, session_string FROM admin_sessions")
+    cursor.execute("SELECT id, session_string, account_name FROM admin_sessions")
     rows = cursor.fetchall()
     conn.close()
     return rows
@@ -59,19 +63,20 @@ def delete_session_from_db(session_id: int):
 # Initialize Database
 init_db()
 
-# Tracker for UI updates
+# Admin state tracker for interactive input
+admin_states = {}
 last_update_time = {}
 
 # Render Health Check Endpoint
 async def handle_ping(request):
-    return web.Response(text="Clipwell Multi-Session Engine Active!")
+    return web.Response(text="Clipwell Engine Online & Secure!")
 
-# Real-time Animated Progress Callback
+# Aesthetic Progress Bar Callback
 async def progress_bar(current, total, status_msg, action_name, user_id):
     now = time.time()
     last_time = last_update_time.get(user_id, 0)
     
-    if (now - last_time < 3.5) and current < total:
+    if (now - last_time < 3.0) and current < total:
         return
         
     last_update_time[user_id] = now
@@ -83,9 +88,11 @@ async def progress_bar(current, total, status_msg, action_name, user_id):
     tot_mb = total / (1024 * 1024)
     
     text = (
-        f"⚡ **{action_name}**\n\n"
-        f"[{bar}] {percentage:.1f}%\n"
-        f"📊 `{curr_mb:.1f} MB / {tot_mb:.1f} MB`"
+        f"╭─ ⚡ **{action_name.upper()}** ⚡\n"
+        f"│\n"
+        f"├ 📊 `[{bar}] {percentage:.1f}%`\n"
+        f"├ 📁 `📦 {curr_mb:.1f} MB / {tot_mb:.1f} MB`\n"
+        f"╰──────────────────────────"
     )
     try:
         await status_msg.edit_text(text)
@@ -109,89 +116,142 @@ async def main():
     )
 
     # Command: /start
-    @bot.on_message(filters.command(["start", "Start"]) & filters.private)
+    @bot.on_message(filters.command(["start"]) & filters.private)
     async def start_cmd(client: Client, message: Message):
         text = (
-            "✨ **Clipwell Downloader Bot** ✨\n\n"
-            "📥 যেকোনো পাবলিক বা প্রাইভেট চ্যানেলের ভিডিও বা অ্যালবামের লিংক পাঠান।"
+            "╭─ 🚀 **CLIPWELL DOWNLOADER** 🚀\n"
+            "│\n"
+            "├ 📥 Send any **Public** or **Private** Telegram link.\n"
+            "├ ⚡ Fast download with live progress bar.\n"
+            "╰──────────────────────────"
         )
         await message.reply_text(text)
 
-    # Admin Command: /addsession <SESSION_STRING>
-    @bot.on_message(filters.command(["addsession"]) & filters.private)
-    async def add_session_cmd(client: Client, message: Message):
-        if OWNER_ID != 0 and message.from_user.id != OWNER_ID:
-            await message.reply_text("❌ আপনি এই কমান্ডটি ব্যবহারের অনুমতি পাননি।")
+    # Command: /admin (Admin Panel with Buttons)
+    @bot.on_message(filters.command(["admin", "panel"]) & filters.private)
+    async def admin_panel(client: Client, message: Message):
+        if message.from_user.id != OWNER_ID:
+            await message.reply_text("❌ **Access Denied:** You are not authorized.")
             return
 
-        args = message.text.split(maxsplit=1)
-        if len(args) < 2:
-            await message.reply_text("❌ **ব্যবহার পদ্ধতি:** `/addsession <SESSION_STRING>`")
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Add New Session", callback_data="btn_add_session")],
+            [InlineKeyboardButton("📋 View Sessions", callback_data="btn_list_sessions")],
+            [InlineKeyboardButton("🗑️ Remove Session", callback_data="btn_del_menu")]
+        ])
+        
+        text = (
+            "╭─ ⚙️ **ADMIN CONTROL PANEL** ⚙️\n"
+            "│\n"
+            "├ Select an option below to manage your bot sessions.\n"
+            "╰──────────────────────────"
+        )
+        await message.reply_text(text, reply_markup=keyboard)
+
+    # Callback Query Handler for Buttons
+    @bot.on_callback_query()
+    async def callback_handler(client: Client, callback_query: CallbackQuery):
+        user_id = callback_query.from_user.id
+        if user_id != OWNER_ID:
+            await callback_query.answer("❌ Unauthorized!", show_alert=True)
             return
 
-        session_str = args[1].strip()
-        success = add_session_to_db(session_str)
+        data = callback_query.data
 
-        if success:
-            await message.reply_text("✅ **সেশন সফলভাবে ডেটাবেজে যুক্ত করা হয়েছে!**")
-        else:
-            await message.reply_text("⚠️ এই সেশনটি ইতিমধ্যেই যুক্ত আছে।")
+        if data == "btn_add_session":
+            admin_states[user_id] = "WAITING_SESSION"
+            await callback_query.message.reply(
+                "╭─ ➕ **ADD SESSION STRING** ➕\n"
+                "│\n"
+                "├ Please **reply to this message** with your Pyrogram `SESSION_STRING`:\n"
+                "╰──────────────────────────",
+                reply_markup=ForceReply(selective=True)
+            )
+            await callback_query.answer()
 
-    # Admin Command: /sessions
-    @bot.on_message(filters.command(["sessions"]) & filters.private)
-    async def list_sessions_cmd(client: Client, message: Message):
-        if OWNER_ID != 0 and message.from_user.id != OWNER_ID:
-            return
+        elif data == "btn_list_sessions":
+            sessions = get_all_sessions()
+            if not sessions:
+                await callback_query.message.edit_text("ℹ️ **No active sessions found in database.**")
+            else:
+                text = "╭─ 📋 **ACTIVE SESSIONS** 📋\n│\n"
+                for s_id, _, name in sessions:
+                    text += f"├ ID: `{s_id}` | Name: **{name}**\n"
+                text += "╰──────────────────────────"
+                await callback_query.message.edit_text(text)
+            await callback_query.answer()
 
-        sessions = get_all_sessions()
-        if not sessions:
-            await message.reply_text("ℹ️ কোনো অ্যাক্টিভ সেশন পাওয়া যায়নি। `/addsession` দিয়ে সেশন যুক্ত করুন।")
-            return
+        elif data == "btn_del_menu":
+            sessions = get_all_sessions()
+            if not sessions:
+                await callback_query.answer("No sessions to delete!", show_alert=True)
+                return
+            
+            buttons = []
+            for s_id, _, name in sessions:
+                buttons.append([InlineKeyboardButton(f"❌ Delete: {name} (ID: {s_id})", callback_data=f"del_{s_id}")])
+            
+            await callback_query.message.edit_text(
+                "╭─ 🗑️ **DELETE SESSION** 🗑️\n│\n├ Select the session you want to remove:\n╰──────────────────────────",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+            await callback_query.answer()
 
-        text = "<b>📋 যুক্ত থাকা সেশনসমূহ:</b>\n\n"
-        for s_id, _ in sessions:
-            text += f"• **Session ID:** `{s_id}` (রিমুভ করতে: `/delsession {s_id}`)\n"
-        await message.reply_text(text)
+        elif data.startswith("del_"):
+            s_id = int(data.split("_")[1])
+            delete_session_from_db(s_id)
+            await callback_query.message.edit_text(f"✅ **Successfully deleted session ID:** `{s_id}`")
+            await callback_query.answer()
 
-    # Admin Command: /delsession <ID>
-    @bot.on_message(filters.command(["delsession"]) & filters.private)
-    async def del_session_cmd(client: Client, message: Message):
-        if OWNER_ID != 0 and message.from_user.id != OWNER_ID:
-            return
-
-        args = message.text.split()
-        if len(args) < 2 or not args[1].isdigit():
-            await message.reply_text("❌ **ব্যবহার পদ্ধতি:** `/delsession <Session_ID>`")
-            return
-
-        s_id = int(args[1])
-        delete_session_from_db(s_id)
-        await message.reply_text(f"🗑️ Session ID `{s_id}` মুছে ফেলা হয়েছে।")
-
-    # Link Processing for Everyone
+    # Text Input Handler (For Admin Session Input & Links)
     @bot.on_message(filters.text & filters.private)
-    async def process_link(client: Client, message: Message):
-        if message.text.startswith("/"):
+    async def text_handler(client: Client, message: Message):
+        user_id = message.from_user.id
+        text_str = message.text.strip()
+
+        if text_str.startswith("/"):
             return
 
-        link = message.text.strip()
-        user_id = message.from_user.id
+        # 1. Check if Admin is providing Session String via ForceReply
+        if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_SESSION":
+            admin_states.pop(user_id, None)
+            status_msg = await message.reply_text("⏳ **Validating session string with Telegram...**")
+
+            # Test session validity
+            test_client = Client(f"test_session_{time.time()}", api_id=API_ID, api_hash=API_HASH, session_string=text_str, in_memory=True)
+            try:
+                await test_client.start()
+                me = await test_client.get_me()
+                acc_name = f"{me.first_name} (@{me.username})" if me.username else me.first_name
+                await test_client.stop()
+
+                # Save to database
+                success = add_session_to_db(text_str, acc_name)
+                if success:
+                    await status_msg.edit_text(f"✅ **Session added successfully!**\n👤 **Account:** `{acc_name}`")
+                else:
+                    await status_msg.edit_text("⚠️ **Warning:** This session string already exists in database.")
+            except Exception as e:
+                await status_msg.edit_text(f"❌ **Invalid Session String!**\nError: `{str(e)}`")
+            return
+
+        # 2. Regular User Link Processing
         private_pattern = r"t\.me/c/(\d+)/(\d+)"
         public_pattern = r"t\.me/([^/]+)/(\d+)"
 
-        private_match = re.search(private_pattern, link)
-        public_match = re.search(public_pattern, link)
+        private_match = re.search(private_pattern, text_str)
+        public_match = re.search(public_pattern, text_str)
 
         if not (private_match or public_match):
-            await message.reply_text("⚠️ **অনুগ্রহ করে একটি বৈধ টেলিগ্রাম পোস্ট লিংক পাঠান।**")
+            await message.reply_text("⚠️ **Invalid Link:** Please send a valid Telegram post or media link.")
             return
 
         saved_sessions = get_all_sessions()
         if not saved_sessions:
-            await message.reply_text("⚠️ **কোনো সেশন যুক্ত করা নেই!**\nঅ্যাডমিনকে `/addsession` দিয়ে সেশন যুক্ত করতে বলুন।")
+            await message.reply_text("⚠️ **Bot Error:** No active user sessions configured by admin.")
             return
 
-        status = await message.reply_text("🔍 **মেসেজ চেক করা হচ্ছে...**")
+        status = await message.reply_text("🔍 **Checking post link...**")
 
         if private_match:
             chat_id = int("-100" + private_match.group(1))
@@ -203,9 +263,9 @@ async def main():
         target_msg = None
         working_user_client = None
 
-        # Loop through saved sessions to find one with access to the channel
-        for s_id, s_str in saved_sessions:
-            temp_client = Client(f"user_session_{s_id}", api_id=API_ID, api_hash=API_HASH, session_string=s_str, in_memory=True)
+        # Check sessions one by one to find which account has access to this channel
+        for s_id, s_str, name in saved_sessions:
+            temp_client = Client(f"user_session_{s_id}_{time.time()}", api_id=API_ID, api_hash=API_HASH, session_string=s_str, in_memory=True)
             try:
                 await temp_client.start()
                 msg = await temp_client.get_messages(chat_id, msg_id)
@@ -220,11 +280,14 @@ async def main():
                     await temp_client.stop()
 
         if not target_msg or not working_user_client:
-            await status.edit_text("❌ **পোস্ট পাওয়া যায়নি! নিশ্চিত হন যুক্ত থাকা কোনো একাউন্ট ওই চ্যানেলে জয়েন আছে।**")
+            await status.edit_text(
+                "❌ **Post Not Found!**\n"
+                "Make sure at least one connected account in admin sessions has **joined** that private channel."
+            )
             return
 
         try:
-            # Case 1: Album
+            # Case 1: Album / Media Group
             if target_msg.media_group_id:
                 group_messages = await working_user_client.get_media_group(chat_id, msg_id)
                 downloaded_files = []
@@ -235,7 +298,7 @@ async def main():
                         file_path = await working_user_client.download_media(
                             msg,
                             progress=progress_bar,
-                            progress_args=(status, f"ডাউনলোড হচ্ছে অ্যালবাম ({idx+1}/{len(group_messages)})", user_id)
+                            progress_args=(status, f"Downloading album ({idx+1}/{len(group_messages)})", user_id)
                         )
                         downloaded_files.append(file_path)
 
@@ -245,7 +308,7 @@ async def main():
                             media_list.append(InputMediaPhoto(file_path))
 
                 if media_list:
-                    await status.edit_text("⬆️ **অ্যালবাম আপলোড হচ্ছে...**")
+                    await status.edit_text("⬆️ **Uploading album...**")
                     await client.send_media_group(chat_id=message.chat.id, media=media_list)
                     
                     for path in downloaded_files:
@@ -254,14 +317,14 @@ async def main():
                     
                     await status.delete()
                 else:
-                    await status.edit_text("❌ **অ্যালবামে কোনো ফাইল পাওয়া যায়নি।**")
+                    await status.edit_text("❌ **No downloadable media found in this album.**")
 
-            # Case 2: Single Video / Media
+            # Case 2: Single Media / Video
             else:
                 file_path = await working_user_client.download_media(
                     target_msg,
                     progress=progress_bar,
-                    progress_args=(status, "ভিডিও ডাউনলোড হচ্ছে", user_id)
+                    progress_args=(status, "Downloading video", user_id)
                 )
 
                 last_update_time[user_id] = 0
@@ -272,7 +335,7 @@ async def main():
                         video=file_path,
                         supports_streaming=True,
                         progress=progress_bar,
-                        progress_args=(status, "ভিডিও আপলোড হচ্ছে", user_id)
+                        progress_args=(status, "Uploading video", user_id)
                     )
                 elif target_msg.photo:
                     await client.send_photo(chat_id=message.chat.id, photo=file_path)
@@ -281,7 +344,7 @@ async def main():
                         chat_id=message.chat.id,
                         document=file_path,
                         progress=progress_bar,
-                        progress_args=(status, "ফাইল আপলোড হচ্ছে", user_id)
+                        progress_args=(status, "Uploading document", user_id)
                     )
                 elif target_msg.animation:
                     await client.send_animation(chat_id=message.chat.id, animation=file_path)
@@ -292,14 +355,14 @@ async def main():
                 await status.delete()
 
         except Exception as e:
-            await status.edit_text(f"❌ **এরর:** `{str(e)}`")
+            await status.edit_text(f"❌ **Error:** `{str(e)}`")
         finally:
             if working_user_client and working_user_client.is_connected:
                 await working_user_client.stop()
 
     # Start Main Bot
     await bot.start()
-    print(">>> MULTI-SESSION ADMIN BOT STARTED SUCCESSFULLY <<<", flush=True)
+    print(">>> ADVANCED ADMIN PANEL BOT STARTED SUCCESSFULLY <<<", flush=True)
 
     await idle()
 
