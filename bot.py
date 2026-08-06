@@ -1,6 +1,6 @@
 import asyncio
 
-# Asyncio event loop initialization for Python 3.12+
+# Python 3.12+ Asyncio Loop Fix
 try:
     asyncio.get_event_loop()
 except RuntimeError:
@@ -9,18 +9,18 @@ except RuntimeError:
 import os
 import re
 import sqlite3
-from pyrogram import Client, filters, idle
+from pyrogram import Client, filters
 from pyrogram.types import Message, InputMediaVideo, InputMediaPhoto
 from pyrogram.errors import SessionPasswordNeeded
 from aiohttp import web
 
-# Environment Variables
-API_ID = int(os.environ.get("API_ID", "0"))
-API_HASH = os.environ.get("API_HASH", "")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+# Environment Credentials with Fallback Values
+API_ID = int(os.environ.get("API_ID", "35039821"))
+API_HASH = os.environ.get("API_HASH", "77df805f1700eeefec861de6c93ee2ae").strip()
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8952918726:AAFvPyDqsQTy8cPsxTH8EyrbTwsff2Wne8g").strip()
 PORT = int(os.environ.get("PORT", "8080"))
 
-# Database Configuration
+# SQLite Database Setup
 DB_PATH = "sessions.db"
 
 def init_db():
@@ -50,10 +50,9 @@ def get_session(user_id: int) -> str:
     conn.close()
     return row[0] if row else None
 
-# Initialize Database
 init_db()
 
-# Main Bot Client with in_memory=True to prevent Render database file lock
+# Main Bot Client
 bot = Client(
     "bot_instance",
     api_id=API_ID,
@@ -64,19 +63,19 @@ bot = Client(
 
 login_state = {}
 
-# Auto-delete messages helper (10 minutes = 600 seconds)
+# Auto-delete Helper Function (10 minutes)
 async def auto_delete_messages(chat_id: int, message_ids: list, delay_seconds: int = 600):
     await asyncio.sleep(delay_seconds)
     try:
         await bot.delete_messages(chat_id=chat_id, message_ids=message_ids)
     except Exception as e:
-        print(f"Auto delete error: {e}")
+        print(f"Auto delete error: {e}", flush=True)
 
-# Render Health Check Endpoint
+# Render Health Check
 async def handle_ping(request):
-    return web.Response(text="Bot is online and active!")
+    return web.Response(text="Clipwell Bot is live and active!")
 
-# Start Command
+# Command Handlers
 @bot.on_message(filters.command(["start", "Start"]) & filters.private)
 async def start_cmd(client: Client, message: Message):
     user_id = message.from_user.id
@@ -101,7 +100,6 @@ async def start_cmd(client: Client, message: Message):
         )
     await message.reply_text(text)
 
-# Step 1: Login Phone Number
 @bot.on_message(filters.command(["login", "Login"]) & filters.private)
 async def login_cmd(client: Client, message: Message):
     user_id = message.from_user.id
@@ -126,7 +124,6 @@ async def login_cmd(client: Client, message: Message):
     except Exception as e:
         await message.reply_text(f"❌ **Error:** `{str(e)}`")
 
-# Step 2: Input OTP
 @bot.on_message(filters.command(["otp", "Otp"]) & filters.private)
 async def otp_cmd(client: Client, message: Message):
     user_id = message.from_user.id
@@ -158,7 +155,6 @@ async def otp_cmd(client: Client, message: Message):
     except Exception as e:
         await message.reply_text(f"❌ **Error:** `{str(e)}`")
 
-# Step 3: Input Password (if 2FA enabled)
 @bot.on_message(filters.command(["password", "Password"]) & filters.private)
 async def password_cmd(client: Client, message: Message):
     user_id = message.from_user.id
@@ -188,7 +184,7 @@ async def password_cmd(client: Client, message: Message):
     except Exception as e:
         await message.reply_text(f"❌ **Error:** `{str(e)}`")
 
-# Download & Auto-delete Link Processor
+# Download & Auto-delete Processor
 @bot.on_message(filters.text & filters.private)
 async def process_link(client: Client, message: Message):
     if message.text.startswith("/"):
@@ -235,7 +231,6 @@ async def process_link(client: Client, message: Message):
             await user_client.stop()
             return
 
-        # Case 1: Media Group / Album
         if target_msg.media_group_id:
             await status.edit_text("🖼️ **Album detected! Fetching media group...**")
             group_messages = await fetch_client.get_media_group(chat_id, msg_id)
@@ -268,20 +263,17 @@ async def process_link(client: Client, message: Message):
                 await status.edit_text("⬆️ **Uploading album to chat...**")
                 sent_msgs = await client.send_media_group(chat_id=message.chat.id, media=media_list)
                 
-                # Local cleanup
                 for path in downloaded_files:
                     if os.path.exists(path):
                         os.remove(path)
                 
                 await status.delete()
 
-                # Auto delete after 10 minutes
                 delete_msg_ids = [message.id] + [m.id for m in sent_msgs]
                 asyncio.create_task(auto_delete_messages(message.chat.id, delete_msg_ids, delay_seconds=600))
             else:
                 await status.edit_text("❌ **No supported video or photo found in the album.**")
 
-        # Case 2: Single Video / Media
         else:
             if not (target_msg.video or target_msg.photo or target_msg.document or target_msg.animation):
                 await status.edit_text("❌ **No downloadable video or media found at this link.**")
@@ -315,7 +307,6 @@ async def process_link(client: Client, message: Message):
             await status.delete()
 
             if sent_msg:
-                # Auto delete after 10 minutes
                 delete_msg_ids = [message.id, sent_msg.id]
                 asyncio.create_task(auto_delete_messages(message.chat.id, delete_msg_ids, delay_seconds=600))
 
@@ -325,19 +316,24 @@ async def process_link(client: Client, message: Message):
         if user_client.is_connected:
             await user_client.stop()
 
-# Main Entry Point
+# Server & Bot Entry Point
 async def main():
+    # Web server for Render health checks
     app = web.Application()
     app.router.add_get("/", handle_ping)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
+    print(f"Web server active on port {PORT}", flush=True)
 
+    # Clean old webhooks to allow long polling
     await bot.start()
-    print(">>> BOT IS ONLINE AND LISTENING FOR MESSAGES <<<")
-    await idle()
-    await bot.stop()
+    await bot.delete_webhook(drop_pending_updates=True)
+    print(">>> BOT IS ONLINE AND LISTENING FOR MESSAGES <<<", flush=True)
+
+    # Keep loop running reliably
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
     asyncio.run(main())
