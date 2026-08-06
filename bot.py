@@ -1,6 +1,6 @@
 import asyncio
 
-# Python 3.12+ asyncio event loop fix for Pyrogram
+# Asyncio event loop initialization for Python 3.12+
 try:
     asyncio.get_event_loop()
 except RuntimeError:
@@ -9,7 +9,7 @@ except RuntimeError:
 import os
 import re
 import sqlite3
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InputMediaVideo, InputMediaPhoto
 from pyrogram.errors import SessionPasswordNeeded
 from aiohttp import web
@@ -53,10 +53,18 @@ def get_session(user_id: int) -> str:
 # Initialize Database
 init_db()
 
-bot = Client("bot_instance", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# Main Bot Client with in_memory=True to prevent Render database file lock
+bot = Client(
+    "bot_instance",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    in_memory=True
+)
+
 login_state = {}
 
-# Auto-delete messages helper (10 minutes default = 600 seconds)
+# Auto-delete messages helper (10 minutes = 600 seconds)
 async def auto_delete_messages(chat_id: int, message_ids: list, delay_seconds: int = 600):
     await asyncio.sleep(delay_seconds)
     try:
@@ -69,7 +77,7 @@ async def handle_ping(request):
     return web.Response(text="Bot is online and active!")
 
 # Start Command
-@bot.on_message(filters.command("start") & filters.private)
+@bot.on_message(filters.command(["start", "Start"]) & filters.private)
 async def start_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     saved_session = get_session(user_id)
@@ -94,7 +102,7 @@ async def start_cmd(client: Client, message: Message):
     await message.reply_text(text)
 
 # Step 1: Login Phone Number
-@bot.on_message(filters.command("login") & filters.private)
+@bot.on_message(filters.command(["login", "Login"]) & filters.private)
 async def login_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     args = message.text.split()
@@ -119,7 +127,7 @@ async def login_cmd(client: Client, message: Message):
         await message.reply_text(f"❌ **Error:** `{str(e)}`")
 
 # Step 2: Input OTP
-@bot.on_message(filters.command("otp") & filters.private)
+@bot.on_message(filters.command(["otp", "Otp"]) & filters.private)
 async def otp_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     state = login_state.get(user_id)
@@ -151,7 +159,7 @@ async def otp_cmd(client: Client, message: Message):
         await message.reply_text(f"❌ **Error:** `{str(e)}`")
 
 # Step 3: Input Password (if 2FA enabled)
-@bot.on_message(filters.command("password") & filters.private)
+@bot.on_message(filters.command(["password", "Password"]) & filters.private)
 async def password_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     state = login_state.get(user_id)
@@ -267,7 +275,7 @@ async def process_link(client: Client, message: Message):
                 
                 await status.delete()
 
-                # Auto delete after 10 minutes (User request + sent media)
+                # Auto delete after 10 minutes
                 delete_msg_ids = [message.id] + [m.id for m in sent_msgs]
                 asyncio.create_task(auto_delete_messages(message.chat.id, delete_msg_ids, delay_seconds=600))
             else:
@@ -327,8 +335,9 @@ async def main():
     await site.start()
 
     await bot.start()
-    print("Bot is running with English UI, Album support & Auto-delete...")
-    await asyncio.Event().wait()
+    print(">>> BOT IS ONLINE AND LISTENING FOR MESSAGES <<<")
+    await idle()
+    await bot.stop()
 
 if __name__ == "__main__":
     asyncio.run(main())
