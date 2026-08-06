@@ -1,15 +1,8 @@
-import asyncio
-
-# Python 3.12+ Asyncio Loop Fix
-try:
-    asyncio.get_event_loop()
-except RuntimeError:
-    asyncio.set_event_loop(asyncio.new_event_loop())
-
 import os
 import re
 import sqlite3
-from pyrogram import Client, filters
+import asyncio
+from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InputMediaVideo, InputMediaPhoto
 from pyrogram.errors import SessionPasswordNeeded
 from aiohttp import web
@@ -17,7 +10,7 @@ from aiohttp import web
 # Environment Credentials
 API_ID = int(os.environ.get("API_ID", "35039821"))
 API_HASH = os.environ.get("API_HASH", "77df805f1700eeefec861de6c93ee2ae").strip()
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_NEW_BOT_TOKEN_HERE").strip()
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8952918726:AAFV51gEux1UOAPipaKrKuo8tNQodm9euhg").strip()
 PORT = int(os.environ.get("PORT", "8080"))
 
 # SQLite Database Setup
@@ -50,6 +43,7 @@ def get_session(user_id: int) -> str:
     conn.close()
     return row[0] if row else None
 
+# Initialize Database
 init_db()
 
 # Main Bot Client
@@ -318,6 +312,7 @@ async def process_link(client: Client, message: Message):
 
 # Server & Bot Entry Point
 async def main():
+    # ১. aiohttp ওয়েব সার্ভার চালু
     app = web.Application()
     app.router.add_get("/", handle_ping)
     runner = web.AppRunner(app)
@@ -326,10 +321,16 @@ async def main():
     await site.start()
     print(f"Web server active on port {PORT}", flush=True)
 
+    # ২. বর্তমান সক্রিয় Event Loop-এর সাথে Pyrogram সিঙ্ক করা (Crucial Fix)
+    bot.loop = asyncio.get_running_loop()
+
+    # ৩. বট চালু করা
     await bot.start()
     print(">>> BOT IS ONLINE AND LISTENING FOR MESSAGES <<<", flush=True)
 
-    await asyncio.Event().wait()
+    # ৪. লুপ সার্ভিস রানিং রাখা
+    await idle()
+    await bot.stop()
 
 if __name__ == "__main__":
     asyncio.run(main())
