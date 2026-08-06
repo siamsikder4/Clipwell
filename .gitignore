@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.venv/
+
+# Environment Variables
+.env
+.env.*
+
+# Telegram Sessions & Databases
+*.session
+*.session-journal
+*.db
+*.sqlite3
+
+# Firebase Key
+firebase-key.json
+*.json
+
+# IDE
+.vscode/
+.idea/
