@@ -79,13 +79,54 @@ def delete_session_from_db(doc_id: str):
         print(f"Error deleting session: {e}", flush=True)
         return False
 
+# Analytics & User Tracking Functions
+def track_user_in_db(user_id: int, username: str, name: str):
+    if not db:
+        return
+    try:
+        doc_ref = db.collection("bot_users").document(str(user_id))
+        doc_ref.set({
+            "user_id": user_id,
+            "username": username or "N/A",
+            "name": name,
+            "last_active": time.time()
+        }, merge=True)
+    except Exception as e:
+        print(f"User track error: {e}", flush=True)
+
+def increment_download_count():
+    if not db:
+        return
+    try:
+        doc_ref = db.collection("bot_stats").document("global_analytics")
+        doc_ref.set({"total_downloads": firestore.Increment(1)}, merge=True)
+    except Exception as e:
+        print(f"Download stat error: {e}", flush=True)
+
+def get_analytics_stats():
+    if not db:
+        return 0, 0
+    try:
+        # Get total registered users
+        users_docs = db.collection("bot_users").stream()
+        total_users = sum(1 for _ in users_docs)
+        
+        # Get total download counts
+        stat_doc = db.collection("bot_stats").document("global_analytics").get()
+        total_downloads = stat_doc.to_dict().get("total_downloads", 0) if stat_doc.exists else 0
+        
+        return total_users, total_downloads
+    except Exception as e:
+        print(f"Analytics fetch error: {e}", flush=True)
+        return 0, 0
+
 # UI & State Trackers
 admin_states = {}
 last_update_time = {}
 
 # Health Check Endpoint
 async def handle_ping(request):
-    return web.Response(text="Clipwell Multi-Session Engine Active!")
+    return web.Response(text="Clipwell Analytics Engine Active!")
 
 # Aesthetic Progress Bar Callback
 async def progress_bar(current, total, status_msg, action_name, user_id):
@@ -134,6 +175,9 @@ async def main():
     # Command: /start
     @bot.on_message(filters.command(["start"]) & filters.private)
     async def start_cmd(client: Client, message: Message):
+        user = message.from_user
+        track_user_in_db(user.id, user.username, user.first_name)
+        
         text = (
             "╭─ 🚀 **CLIPWELL DOWNLOADER** 🚀\n"
             "│\n"
@@ -143,7 +187,7 @@ async def main():
         )
         await message.reply_text(text)
 
-    # Command: /admin (Admin Control Panel)
+    # Command: /admin (Admin Control Panel with Analytics)
     @bot.on_message(filters.command(["admin", "panel"]) & filters.private)
     async def admin_panel(client: Client, message: Message):
         if message.from_user.id != OWNER_ID:
@@ -152,6 +196,7 @@ async def main():
 
         all_sess = get_all_sessions()
         keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 Analytics & Stats", callback_data="btn_stats")],
             [InlineKeyboardButton("➕ Add New Session", callback_data="btn_add_session")],
             [InlineKeyboardButton(f"📋 View All Sessions ({len(all_sess)})", callback_data="btn_list_sessions")],
             [InlineKeyboardButton("🗑️ Remove Session", callback_data="btn_del_menu")]
@@ -178,7 +223,24 @@ async def main():
 
         data = callback_query.data
 
-        if data == "btn_add_session":
+        if data == "btn_stats":
+            total_users, total_downloads = get_analytics_stats()
+            all_sess = get_all_sessions()
+            
+            text = (
+                "╭─ 📊 **BOT REAL-TIME ANALYTICS** 📊\n"
+                "│\n"
+                f"├ 👥 **Total Users:** `{total_users}`\n"
+                f"├ 📥 **Total Downloads:** `{total_downloads}`\n"
+                f"├ 🔑 **Active Sessions:** `{len(all_sess)}`\n"
+                f"├ 💾 **Firebase DB:** `Connected`\n"
+                "╰──────────────────────────"
+            )
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menu", callback_data="btn_back_admin")]])
+            await callback_query.message.edit_text(text, reply_markup=keyboard)
+            await callback_query.answer()
+
+        elif data == "btn_add_session":
             admin_states[user_id] = "WAITING_SESSION"
             await callback_query.message.reply(
                 "╭─ ➕ **ADD SESSION STRING** ➕\n"
@@ -207,6 +269,7 @@ async def main():
         elif data == "btn_back_admin":
             all_sess = get_all_sessions()
             keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📊 Analytics & Stats", callback_data="btn_stats")],
                 [InlineKeyboardButton("➕ Add New Session", callback_data="btn_add_session")],
                 [InlineKeyboardButton(f"📋 View All Sessions ({len(all_sess)})", callback_data="btn_list_sessions")],
                 [InlineKeyboardButton("🗑️ Remove Session", callback_data="btn_del_menu")]
@@ -257,6 +320,8 @@ async def main():
 
         if text_str.startswith("/"):
             return
+
+        track_user_in_db(user_id, message.from_user.username, message.from_user.first_name)
 
         # 1. Handle Admin Session Input
         if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_SESSION":
@@ -318,7 +383,7 @@ async def main():
             try:
                 await temp_client.start()
 
-                # Pre-resolve chat peer to fix PeerIdInvalid error
+                # Pre-resolve chat peer
                 try:
                     await temp_client.get_chat(chat_id)
                 except Exception as chat_err:
@@ -339,7 +404,7 @@ async def main():
         if not target_msg or not working_user_client:
             await status.edit_text(
                 "❌ **Post Not Found!**\n"
-                "Make sure at least one connected account (`@ZOXOTP` or `@developerBYsiam`) is an active **member** of that private channel."
+                "Make sure at least one connected account in Firebase sessions is an active **member** of that private channel."
             )
             return
 
@@ -372,6 +437,7 @@ async def main():
                         if os.path.exists(path):
                             os.remove(path)
                     
+                    increment_download_count()
                     await status.delete()
                 else:
                     await status.edit_text("❌ **No downloadable media found in this album.**")
@@ -409,6 +475,7 @@ async def main():
                 if os.path.exists(file_path):
                     os.remove(file_path)
 
+                increment_download_count()
                 await status.delete()
 
         except Exception as e:
@@ -420,12 +487,12 @@ async def main():
     # Start Main Bot with FloodWait Protection
     try:
         await bot.start()
-        print(">>> CLIPWELL FIREBASE BOT STARTED SUCCESSFULLY <<<", flush=True)
+        print(">>> CLIPWELL ANALYTICS BOT STARTED SUCCESSFULLY <<<", flush=True)
     except FloodWait as e:
         print(f"⚠️ Telegram FloodWait detected! Waiting for {e.value} seconds...", flush=True)
         await asyncio.sleep(e.value + 5)
         await bot.start()
-        print(">>> CLIPWELL FIREBASE BOT STARTED SUCCESSFULLY AFTER FLOODWAIT <<<", flush=True)
+        print(">>> CLIPWELL ANALYTICS BOT STARTED SUCCESSFULLY AFTER FLOODWAIT <<<", flush=True)
 
     await idle()
 
