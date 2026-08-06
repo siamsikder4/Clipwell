@@ -3,16 +3,17 @@ import re
 import asyncio
 import sqlite3
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.types import Message, InputMediaVideo, InputMediaPhoto
 from pyrogram.errors import SessionPasswordNeeded
 from aiohttp import web
 
+# Environment Variables
 API_ID = int(os.environ.get("API_ID", "0"))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 PORT = int(os.environ.get("PORT", "8080"))
 
-# ডাটাবেজ সেটআপ (Session Storage)
+# Database Configuration
 DB_PATH = "sessions.db"
 
 def init_db():
@@ -42,39 +43,57 @@ def get_session(user_id: int) -> str:
     conn.close()
     return row[0] if row else None
 
-# ইনিশিয়ালাইজেশন
+# Initialize Database
 init_db()
+
 bot = Client("bot_instance", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 login_state = {}
 
-async def handle_ping(request):
-    return web.Response(text="Multi-user Bot is online!")
+# Auto-delete messages helper (10 minutes default = 600 seconds)
+async def auto_delete_messages(chat_id: int, message_ids: list, delay_seconds: int = 600):
+    await asyncio.sleep(delay_seconds)
+    try:
+        await bot.delete_messages(chat_id=chat_id, message_ids=message_ids)
+    except Exception as e:
+        print(f"Auto delete error: {e}")
 
+# Render Health Check Endpoint
+async def handle_ping(request):
+    return web.Response(text="Bot is online and active!")
+
+# Start Command
 @bot.on_message(filters.command("start") & filters.private)
 async def start_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     saved_session = get_session(user_id)
     
     if not saved_session:
-        await message.reply_text(
-            "👋 **টেলিগ্রাম প্রাইভেট ভিডিও ডাউনলোডার বট**\n\n"
-            "⚠️ আপনি এখনো লগইন করেননি। আপনার অ্যাকাউন্ট কানেক্ট করতে লিখুন:\n"
-            "`/login +8801XXXXXXXXX`"
+        text = (
+            "🚀 **Telegram Private Media Downloader**\n\n"
+            "⚠️ **You are not logged in!**\n"
+            "Connect your account to download videos from restricted or private channels.\n\n"
+            "📲 **To log in, send:**\n"
+            "`/login +1234567890`"
         )
     else:
-        await message.reply_text(
-            "👋 **বট তৈরি আছে!**\n\n"
-            "আপনি সফলভাবে কানেক্টেড আছেন। প্রাইভেট বা পাবলিক চ্যানেলের ভিডিও লিংক পাঠান।"
+        text = (
+            "✨ **Bot is Ready!** ✨\n\n"
+            "📥 Send me any video or media group link from a public or private channel.\n\n"
+            "📌 **Features:**\n"
+            "• Single Video & Media Album Support\n"
+            "• Original link attached in caption\n"
+            "• ⏳ **Auto-deletes messages after 10 minutes for privacy**"
         )
+    await message.reply_text(text)
 
-# ১. লগইন শুরু (নম্বর দেওয়া)
+# Step 1: Login Phone Number
 @bot.on_message(filters.command("login") & filters.private)
 async def login_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     args = message.text.split()
     
     if len(args) < 2:
-        await message.reply_text("❌ ফোন নম্বর দিন।\nউদাহরণ: `/login +8801700000000`")
+        await message.reply_text("❌ **Please provide your phone number!**\nExample: `/login +1234567890`")
         return
 
     phone_number = args[1]
@@ -88,23 +107,23 @@ async def login_cmd(client: Client, message: Message):
             "phone": phone_number,
             "hash": code_info.phone_code_hash
         }
-        await message.reply_text("📩 আপনার টেলিগ্রামে ওটিপি (OTP) পাঠানো হয়েছে।\nকোড পাঠাতে লিখুন: `/otp 12345`")
+        await message.reply_text("📩 **OTP code sent to your Telegram account!**\n\nTo verify, send: `/otp 12345`")
     except Exception as e:
-        await message.reply_text(f"❌ এরর: `{str(e)}`")
+        await message.reply_text(f"❌ **Error:** `{str(e)}`")
 
-# ২. ওটিপি ইনপুট দেওয়া
+# Step 2: Input OTP
 @bot.on_message(filters.command("otp") & filters.private)
 async def otp_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     state = login_state.get(user_id)
     
     if not state:
-        await message.reply_text("⚠️ আগে `/login +8801...` দিয়ে নম্বর পাঠান।")
+        await message.reply_text("⚠️ Please send your phone number first using `/login +1234567890`.")
         return
 
     args = message.text.split()
     if len(args) < 2:
-        await message.reply_text("❌ OTP দিন।\nউদাহরণ: `/otp 12345`")
+        await message.reply_text("❌ **Please provide the OTP code!**\nExample: `/otp 12345`")
         return
 
     otp = args[1]
@@ -118,25 +137,25 @@ async def otp_cmd(client: Client, message: Message):
         await temp_user.disconnect()
         login_state.pop(user_id, None)
 
-        await message.reply_text("🎉 **আপনার আইডি সফলভাবে লগইন হয়েছে!**\nএখন প্রাইভেট চ্যানেলের ভিডিও লিংক পাঠালে ডাউনলোড করে দেওয়া হবে।")
+        await message.reply_text("🎉 **Account connected successfully!**\nYou can now send private media or album links.")
     except SessionPasswordNeeded:
-        await message.reply_text("🔐 টু-স্টেপ ভেরিফিকেশন পাসওয়ার্ড দিন:\n`/password আপনার_পাসওয়ার্ড`")
+        await message.reply_text("🔐 **Two-Step Verification Password Required!**\nSend: `/password your_password`")
     except Exception as e:
-        await message.reply_text(f"❌ এরর: `{str(e)}`")
+        await message.reply_text(f"❌ **Error:** `{str(e)}`")
 
-# ৩. পাসওয়ার্ড ইনপুট দেওয়া (যদি টু-স্টেপ থাকে)
+# Step 3: Input Password (if 2FA enabled)
 @bot.on_message(filters.command("password") & filters.private)
 async def password_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     state = login_state.get(user_id)
     
     if not state:
-        await message.reply_text("⚠️ লগইন প্রসেস চালু নেই।")
+        await message.reply_text("⚠️ No active login session found.")
         return
 
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        await message.reply_text("❌ পাসওয়ার্ড দিন।\nউদাহরণ: `/password mypass123`")
+        await message.reply_text("❌ **Please provide your password!**\nExample: `/password mypassword123`")
         return
 
     password = args[1]
@@ -150,11 +169,11 @@ async def password_cmd(client: Client, message: Message):
         await temp_user.disconnect()
         login_state.pop(user_id, None)
 
-        await message.reply_text("🎉 **আপনার আইডি সফলভাবে লগইন হয়েছে!**")
+        await message.reply_text("🎉 **Account connected successfully!**")
     except Exception as e:
-        await message.reply_text(f"❌ এরর: `{str(e)}`")
+        await message.reply_text(f"❌ **Error:** `{str(e)}`")
 
-# ভিডিও ডাউনলোড প্রসেসিং
+# Download & Auto-delete Link Processor
 @bot.on_message(filters.text & filters.private)
 async def process_link(client: Client, message: Message):
     if message.text.startswith("/"):
@@ -164,7 +183,7 @@ async def process_link(client: Client, message: Message):
     user_session_str = get_session(user_id)
 
     if not user_session_str:
-        await message.reply_text("⚠️ প্রাইভেট ভিডিও ডাউনলোড করতে আপনার নিজের টেলিগ্রাম অ্যাকাউন্ট লগইন করতে হবে।\nলগইন করতে লিখুন: `/login +8801XXXXXXXXX`")
+        await message.reply_text("⚠️ **Not Logged In!**\nPlease connect your account first: `/login +1234567890`")
         return
 
     link = message.text.strip()
@@ -175,12 +194,11 @@ async def process_link(client: Client, message: Message):
     public_match = re.search(public_pattern, link)
 
     if not (private_match or public_match):
-        await message.reply_text("⚠️ সঠিক টেলিগ্রাম মেসেজ লিংক দিন।")
+        await message.reply_text("⚠️ **Please send a valid Telegram message link.**")
         return
 
-    status = await message.reply_text("🔄 লিংক চেক করা হচ্ছে...")
+    status = await message.reply_text("🔍 **Checking message link...**")
 
-    # ইউজারের সেশন দিয়ে ক্লায়েন্ট চালু করা
     user_client = Client(f"user_{user_id}", api_id=API_ID, api_hash=API_HASH, session_string=user_session_str, in_memory=True)
 
     try:
@@ -197,35 +215,102 @@ async def process_link(client: Client, message: Message):
 
         target_msg = await fetch_client.get_messages(chat_id, msg_id)
 
-        if not target_msg or not (target_msg.video or target_msg.document or target_msg.animation):
-            await status.edit_text("❌ লিংকে কোনো ভিডিও পাওয়া যায়নি (অথবা এই চ্যানেল বা পোস্টে আপনার অ্যাকাউন্টের অ্যাক্সেস নেই)।")
+        if not target_msg:
+            await status.edit_text("❌ **Post or message not found!**")
             await user_client.stop()
             return
 
-        await status.edit_text("⬇️ ডাউনলোড হচ্ছে...")
-        file_path = await fetch_client.download_media(target_msg)
+        # Case 1: Media Group / Album
+        if target_msg.media_group_id:
+            await status.edit_text("🖼️ **Album detected! Fetching media group...**")
+            group_messages = await fetch_client.get_media_group(chat_id, msg_id)
+            
+            downloaded_files = []
+            media_list = []
+            
+            await status.edit_text(f"⬇️ **Downloading {len(group_messages)} files from album...**")
 
-        await status.edit_text("⬆️ চ্যাটে আপলোড করা হচ্ছে...")
-        caption = target_msg.caption or ""
+            for idx, msg in enumerate(group_messages):
+                if msg.video or msg.photo or msg.document or msg.animation:
+                    file_path = await fetch_client.download_media(msg)
+                    downloaded_files.append(file_path)
 
-        await client.send_video(
-            chat_id=message.chat.id,
-            video=file_path,
-            caption=caption,
-            supports_streaming=True
-        )
+                    caption_text = ""
+                    if len(media_list) == 0:
+                        orig_caption = msg.caption or ""
+                        caption_text = (
+                            (f"📄 {orig_caption}\n\n" if orig_caption else "") +
+                            f"🔗 **Original Link:** {link}\n"
+                            f"⏳ *This post will be automatically deleted in 10 minutes.*"
+                        )
 
-        if os.path.exists(file_path):
-            os.remove(file_path)
+                    if msg.video or (msg.document and msg.document.mime_type and "video" in msg.document.mime_type):
+                        media_list.append(InputMediaVideo(file_path, caption=caption_text))
+                    elif msg.photo or (msg.document and msg.document.mime_type and "image" in msg.document.mime_type):
+                        media_list.append(InputMediaPhoto(file_path, caption=caption_text))
 
-        await status.delete()
+            if media_list:
+                await status.edit_text("⬆️ **Uploading album to chat...**")
+                sent_msgs = await client.send_media_group(chat_id=message.chat.id, media=media_list)
+                
+                # Local cleanup
+                for path in downloaded_files:
+                    if os.path.exists(path):
+                        os.remove(path)
+                
+                await status.delete()
+
+                # Auto delete after 10 minutes (User request + sent media)
+                delete_msg_ids = [message.id] + [m.id for m in sent_msgs]
+                asyncio.create_task(auto_delete_messages(message.chat.id, delete_msg_ids, delay_seconds=600))
+            else:
+                await status.edit_text("❌ **No supported video or photo found in the album.**")
+
+        # Case 2: Single Video / Media
+        else:
+            if not (target_msg.video or target_msg.photo or target_msg.document or target_msg.animation):
+                await status.edit_text("❌ **No downloadable video or media found at this link.**")
+                await user_client.stop()
+                return
+
+            await status.edit_text("⬇️ **Downloading video...**")
+            file_path = await fetch_client.download_media(target_msg)
+
+            await status.edit_text("⬆️ **Uploading video to chat...**")
+            orig_caption = target_msg.caption or ""
+            final_caption = (
+                (f"📄 {orig_caption}\n\n" if orig_caption else "") +
+                f"🔗 **Original Link:** {link}\n"
+                f"⏳ *This video will be automatically deleted in 10 minutes.*"
+            )
+
+            sent_msg = None
+            if target_msg.video:
+                sent_msg = await client.send_video(chat_id=message.chat.id, video=file_path, caption=final_caption, supports_streaming=True)
+            elif target_msg.photo:
+                sent_msg = await client.send_photo(chat_id=message.chat.id, photo=file_path, caption=final_caption)
+            elif target_msg.document:
+                sent_msg = await client.send_document(chat_id=message.chat.id, document=file_path, caption=final_caption)
+            elif target_msg.animation:
+                sent_msg = await client.send_animation(chat_id=message.chat.id, animation=final_caption, caption=final_caption)
+
+            if os.path.exists(file_path):
+                os.remove(file_path)
+
+            await status.delete()
+
+            if sent_msg:
+                # Auto delete after 10 minutes
+                delete_msg_ids = [message.id, sent_msg.id]
+                asyncio.create_task(auto_delete_messages(message.chat.id, delete_msg_ids, delay_seconds=600))
 
     except Exception as e:
-        await status.edit_text(f"❌ এরর: `{str(e)}`")
+        await status.edit_text(f"❌ **Error:** `{str(e)}`")
     finally:
         if user_client.is_connected:
             await user_client.stop()
 
+# Main Entry Point
 async def main():
     app = web.Application()
     app.router.add_get("/", handle_ping)
@@ -235,7 +320,7 @@ async def main():
     await site.start()
 
     await bot.start()
-    print("Multi-user Bot running...")
+    print("Bot is running with English UI, Album support & Auto-delete...")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
