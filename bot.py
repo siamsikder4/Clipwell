@@ -3,7 +3,7 @@ import re
 import sqlite3
 import asyncio
 from pyrogram import Client, filters, idle
-from pyrogram.types import Message, InputMediaVideo, InputMediaPhoto
+from pyrogram.types import Message, InputMediaVideo, InputMediaPhoto, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from pyrogram.errors import SessionPasswordNeeded
 from aiohttp import web
 
@@ -53,12 +53,12 @@ def delete_session(user_id: int):
 # Initialize Database
 init_db()
 
-# Temp Login State Tracker
-login_state = {}
+# State Tracker for Interactive Login
+user_states = {}
 
 # Render Health Check Endpoint
 async def handle_ping(request):
-    return web.Response(text="Clipwell Multi-User Bot is live!")
+    return web.Response(text="Clipwell Smart Bot is active!")
 
 # Auto-delete helper (10 minutes)
 async def auto_delete_messages(bot_client, chat_id: int, message_ids: list, delay_seconds: int = 600):
@@ -68,8 +68,40 @@ async def auto_delete_messages(bot_client, chat_id: int, message_ids: list, dela
     except Exception as e:
         print(f"Auto delete error: {e}", flush=True)
 
+# Helper function to send OTP Code
+async def request_otp_code(bot_client, message: Message, phone_number: str):
+    user_id = message.from_user.id
+    
+    # Auto-format phone number (Convert 017XXXXXXXX to +88017XXXXXXXX)
+    phone_clean = re.sub(r"[^\d+]", "", phone_number)
+    if phone_clean.startswith("01"):
+        phone_clean = "+88" + phone_clean
+    elif not phone_clean.startswith("+"):
+        phone_clean = "+" + phone_clean
+
+    status_msg = await message.reply_text("⏳ **ওটিপি কোড পাঠানো হচ্ছে...**", reply_markup=ReplyKeyboardRemove())
+
+    temp_user = Client(f"temp_{user_id}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
+    await temp_user.connect()
+
+    try:
+        code_info = await temp_user.send_code(phone_clean)
+        user_states[user_id] = {
+            "state": "WAITING_OTP",
+            "client": temp_user,
+            "phone": phone_clean,
+            "hash": code_info.phone_code_hash
+        }
+        await status_msg.edit_text(
+            f"📩 **`{phone_clean}` নম্বরে টেলিগ্রাম ওটিপি কোড পাঠানো হয়েছে!**\n\n"
+            "👇 **নিচে সরাসরি ওটিপি কোডটি টাইপ করে পাঠান (যেমন: 12345):**"
+        )
+    except Exception as e:
+        await temp_user.disconnect()
+        user_states.pop(user_id, None)
+        await status_msg.edit_text(f"❌ **এরর:** `{str(e)}`\n\nপুনরায় চেষ্টা করতে আবার ফোন নম্বর পাঠান।")
+
 async def main():
-    # 1. Web Server for Render
     app = web.Application()
     app.router.add_get("/", handle_ping)
     runner = web.AppRunner(app)
@@ -78,7 +110,6 @@ async def main():
     await site.start()
     print(f"Web server active on port {PORT}", flush=True)
 
-    # 2. Main Bot Client (Inside active asyncio loop)
     bot = Client(
         "bot_instance",
         api_id=API_ID,
@@ -94,137 +125,139 @@ async def main():
         saved_session = get_session(user_id)
         
         if not saved_session:
-            text = (
-                "🚀 **Clipwell Multi-User Downloader Bot**\n\n"
-                "⚠️ **আপনি লগইন করেননি!**\n"
-                "প্রাইভেট বা রেস্ট্রিক্টেড চ্যানেল থেকে ভিডিও ডাউনলোড করতে আপনার টেলিগ্রাম অ্যাকাউন্ট যুক্ত করুন।\n\n"
-                "📲 **লগইন করতে পাঠান:**\n"
-                "`/login +8801XXXXXXXXX` (আপনার ফোন নম্বর)"
+            contact_btn = ReplyKeyboardMarkup(
+                [[KeyboardButton("📱 শেয়ার করুন ফোন নম্বর", request_contact=True)]],
+                resize_keyboard=True,
+                one_time_keyboard=True
             )
+            text = (
+                "🚀 **Clipwell Downloader Bot**\n\n"
+                "⚠️ **আপনি এখনও লগইন করেননি!**\n"
+                "প্রাইভেট চ্যানেল থেকে ভিডিও ডাউনলোড করতে আপনার অ্যাকাউন্ট যুক্ত করুন।\n\n"
+                "👉 **নিচের বাটনে চাপ দিয়ে নম্বর শেয়ার করুন অথবা সরাসরি 017XXXXXXXX নম্বরটি মেসেজে লিখে পাঠান:**"
+            )
+            await message.reply_text(text, reply_markup=contact_btn)
         else:
             text = (
-                "✨ **আপনার অ্যাকাউন্ট যুক্ত রয়েছে!** ✨\n\n"
+                "✨ **আপনার অ্যাকাউন্ট কানেক্ট রয়েছে!** ✨\n\n"
                 "📥 যেকোনো পাবলিক বা প্রাইভেট চ্যানেলের ভিডিও বা অ্যালবামের লিংক পাঠান।\n\n"
                 "📌 **কমান্ডস:**\n"
                 "• `/logout` - আপনার অ্যাকাউন্ট রিমুভ করতে\n"
                 "• ⏳ **প্রাইভেসি রক্ষায় ১০ মিনিট পর অটো-ডিলিট হবে।**"
             )
-        await message.reply_text(text)
-
-    # Command: /login
-    @bot.on_message(filters.command(["login", "Login"]) & filters.private)
-    async def login_cmd(client: Client, message: Message):
-        user_id = message.from_user.id
-        args = message.text.split()
-        
-        if len(args) < 2:
-            await message.reply_text("❌ **অনুগ্রহ করে ফোন নম্বর দিন!**\nউদাহরণ: `/login +8801XXXXXXXXX`")
-            return
-
-        phone_number = args[1]
-        temp_user = Client(f"temp_{user_id}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
-        await temp_user.connect()
-
-        try:
-            code_info = await temp_user.send_code(phone_number)
-            login_state[user_id] = {
-                "client": temp_user,
-                "phone": phone_number,
-                "hash": code_info.phone_code_hash
-            }
-            await message.reply_text("📩 **আপনার টেলিগ্রাম অ্যাকাউন্টে OTP কোড পাঠানো হয়েছে!**\n\nযাচাই করতে পাঠান: `/otp 12345`")
-        except Exception as e:
-            await temp_user.disconnect()
-            await message.reply_text(f"❌ **এরর:** `{str(e)}`")
-
-    # Command: /otp
-    @bot.on_message(filters.command(["otp", "Otp"]) & filters.private)
-    async def otp_cmd(client: Client, message: Message):
-        user_id = message.from_user.id
-        state = login_state.get(user_id)
-        
-        if not state:
-            await message.reply_text("⚠️ প্রথমে নম্বর দিন: `/login +8801XXXXXXXXX`")
-            return
-
-        args = message.text.split()
-        if len(args) < 2:
-            await message.reply_text("❌ **অনুগ্রহ করে OTP কোডটি দিন!**\nউদাহরণ: `/otp 12345`")
-            return
-
-        otp = args[1]
-        temp_user = state["client"]
-
-        try:
-            await temp_user.sign_in(state["phone"], state["hash"], otp)
-            session_str = await temp_user.export_session_string()
-            
-            save_session(user_id, session_str)
-            await temp_user.disconnect()
-            login_state.pop(user_id, None)
-
-            await message.reply_text("🎉 **অ্যালকাউন্ট সফলভাবে কানেক্ট হয়েছে!**\nএখন প্রাইভেট বা পাবলিক যেকোনো ভিডিও লিংক পাঠাতে পারেন।")
-        except SessionPasswordNeeded:
-            await message.reply_text("🔐 **টু-স্টেপ ভেরিফিকেশন পাসওয়ার্ড প্রয়োজন!**\nপাঠান: `/password আপনার_পাসওয়ার্ড`")
-        except Exception as e:
-            await message.reply_text(f"❌ **এরর:** `{str(e)}`")
-
-    # Command: /password
-    @bot.on_message(filters.command(["password", "Password"]) & filters.private)
-    async def password_cmd(client: Client, message: Message):
-        user_id = message.from_user.id
-        state = login_state.get(user_id)
-        
-        if not state:
-            await message.reply_text("⚠️ কোনো সেশন পাওয়া যায়নি।")
-            return
-
-        args = message.text.split(maxsplit=1)
-        if len(args) < 2:
-            await message.reply_text("❌ **পাসওয়ার্ড দিন!**\nউদাহরণ: `/password mypassword123`")
-            return
-
-        password = args[1]
-        temp_user = state["client"]
-
-        try:
-            await temp_user.check_password(password)
-            session_str = await temp_user.export_session_string()
-            
-            save_session(user_id, session_str)
-            await temp_user.disconnect()
-            login_state.pop(user_id, None)
-
-            await message.reply_text("🎉 **অ্যালকাউন্ট সফলভাবে কানেক্ট হয়েছে!**")
-        except Exception as e:
-            await message.reply_text(f"❌ **এরর:** `{str(e)}`")
+            await message.reply_text(text, reply_markup=ReplyKeyboardRemove())
 
     # Command: /logout
     @bot.on_message(filters.command(["logout", "Logout"]) & filters.private)
     async def logout_cmd(client: Client, message: Message):
         user_id = message.from_user.id
         delete_session(user_id)
-        await message.reply_text("🚪 **আপনার অ্যাকাউন্ট রিমুভ করা হয়েছে!**")
+        user_states.pop(user_id, None)
+        await message.reply_text("🚪 **আপনার অ্যাকাউন্ট সফলভাবে রিমুভ করা হয়েছে!**\nপুনরায় যুক্ত করতে /start চাপুন।", reply_markup=ReplyKeyboardRemove())
 
-    # Link Processing
+    # Handle Contact Button Click
+    @bot.on_message(filters.contact & filters.private)
+    async def contact_handler(client: Client, message: Message):
+        phone_number = message.contact.phone_number
+        await request_otp_code(client, message, phone_number)
+
+    # Text Handler (Handles Phone numbers, OTP, Passwords & Download Links)
     @bot.on_message(filters.text & filters.private)
-    async def process_link(client: Client, message: Message):
-        if message.text.startswith("/"):
+    async def text_handler(client: Client, message: Message):
+        text_str = message.text.strip()
+        if text_str.startswith("/"):
             return
 
         user_id = message.from_user.id
-        user_session_str = get_session(user_id)
+        state_data = user_states.get(user_id)
 
-        if not user_session_str:
-            await message.reply_text("⚠️ **আপনি লগইন করেননি!**\nভিডিও ডাউনলোড করতে প্রথমে কানেক্ট করুন: `/login +8801XXXXXXXXX`")
+        # 1. Handling OTP Submission
+        if state_data and state_data.get("state") == "WAITING_OTP":
+            otp = re.sub(r"\D", "", text_str)
+            if not otp:
+                await message.reply_text("❌ **অনুগ্রহ করে সঠিক সংখ্যা ওটিপি কোডটি পাঠান (যেমন: 12345):**")
+                return
+
+            temp_user = state_data["client"]
+            status_msg = await message.reply_text("⏳ **ওটিপি যাচাই করা হচ্ছে...**")
+
+            try:
+                try:
+                    await temp_user.sign_in(state_data["phone"], state_data["hash"], otp)
+                except SessionPasswordNeeded:
+                    user_states[user_id]["state"] = "WAITING_PASSWORD"
+                    await status_msg.edit_text("🔐 **টু-স্টেপ ভেরিফিকেশন অন করা আছে!**\n\n👇 আপনার পাসওয়ার্ডটি মেসেজে লিখে পাঠান:")
+                    return
+                except Exception as login_err:
+                    if await temp_user.get_me():
+                        pass
+                    else:
+                        raise login_err
+
+                session_str = await temp_user.export_session_string()
+                save_session(user_id, session_str)
+
+                await temp_user.disconnect()
+                user_states.pop(user_id, None)
+
+                await status_msg.edit_text(
+                    "🎉 **অ্যালকাউন্ট সফলভাবে কানেক্ট হয়েছে!**\n\n"
+                    "📥 এখন যেকোনো পাবলিক বা প্রাইভেট ভিডিও লিংক পাঠালে তা ডাউনলোড হয়ে যাবে।"
+                )
+
+            except Exception as e:
+                if temp_user.is_connected:
+                    await temp_user.disconnect()
+                user_states.pop(user_id, None)
+                await status_msg.edit_text(f"❌ **ভুল ওটিপি বা এরর:** `{str(e)}`\n\nপুনরায় চেষ্টা করতে আপনার নম্বরটি আবার লিখে পাঠান।")
             return
 
-        link = message.text.strip()
+        # 2. Handling 2FA Password Submission
+        if state_data and state_data.get("state") == "WAITING_PASSWORD":
+            password = text_str
+            temp_user = state_data["client"]
+            status_msg = await message.reply_text("⏳ **পাসওয়ার্ড যাচাই করা হচ্ছে...**")
+
+            try:
+                await temp_user.check_password(password)
+                session_str = await temp_user.export_session_string()
+                save_session(user_id, session_str)
+
+                await temp_user.disconnect()
+                user_states.pop(user_id, None)
+
+                await status_msg.edit_text("🎉 **অ্যালকাউন্ট সফলভাবে কানেক্ট হয়েছে!**")
+            except Exception as e:
+                await status_msg.edit_text(f"❌ **ভুল পাসওয়ার্ড:** `{str(e)}`\n\nপাসওয়ার্ডটি আবার চেষ্টা করুন:")
+            return
+
+        # 3. Check if User is Logged In
+        user_session_str = get_session(user_id)
+
+        # 4. If Not Logged In -> Check if text is a phone number
+        if not user_session_str:
+            clean_text = re.sub(r"[^\d+]", "", text_str)
+            if clean_text.startswith("01") or clean_text.startswith("+8801") or clean_text.startswith("8801"):
+                await request_otp_code(client, message, clean_text)
+            else:
+                contact_btn = ReplyKeyboardMarkup(
+                    [[KeyboardButton("📱 শেয়ার করুন ফোন নম্বর", request_contact=True)]],
+                    resize_keyboard=True,
+                    one_time_keyboard=True
+                )
+                await message.reply_text(
+                    "⚠️ **আপনি লগইন করেননি!**\n\n"
+                    "ভিডিও ডাউনলোড করতে নিচের বাটনে চাপ দিন অথবা আপনার ফোন নম্বরটি লিখে পাঠান (যেমন: `017XXXXXXXX`):",
+                    reply_markup=contact_btn
+                )
+            return
+
+        # 5. Download Video / Album Link Processor (If Logged In)
         private_pattern = r"t\.me/c/(\d+)/(\d+)"
         public_pattern = r"t\.me/([^/]+)/(\d+)"
 
-        private_match = re.search(private_pattern, link)
-        public_match = re.search(public_pattern, link)
+        private_match = re.search(private_pattern, text_str)
+        public_match = re.search(public_pattern, text_str)
 
         if not (private_match or public_match):
             await message.reply_text("⚠️ **অনুগ্রহ করে একটি বৈধ টেলিগ্রাম লিংক পাঠান।**")
@@ -251,7 +284,7 @@ async def main():
                 await user_client.stop()
                 return
 
-            # Album Case
+            # Case: Album
             if target_msg.media_group_id:
                 await status.edit_text("🖼️ **অ্যালবাম ডিটেক্ট হয়েছে! ফালসমূহ আনা হচ্ছে...**")
                 group_messages = await user_client.get_media_group(chat_id, msg_id)
@@ -271,7 +304,7 @@ async def main():
                             orig_caption = msg.caption or ""
                             caption_text = (
                                 (f"📄 {orig_caption}\n\n" if orig_caption else "") +
-                                f"🔗 **মূল লিংক:** {link}\n"
+                                f"🔗 **মূল লিংক:** {text_str}\n"
                                 f"⏳ *এই পোস্টটি ১০ মিনিট পর স্বয়ংক্রিয়ভাবে মুছে যাবে।*"
                             )
 
@@ -295,7 +328,7 @@ async def main():
                 else:
                     await status.edit_text("❌ **অ্যালবামে কোনো সাপোর্টেড ভিডিও বা ফটো পাওয়া যায়নি।**")
 
-            # Single Media Case
+            # Case: Single Video/Media
             else:
                 if not (target_msg.video or target_msg.photo or target_msg.document or target_msg.animation):
                     await status.edit_text("❌ **এই লিংকে ডাউনলোডযোগ্য কোনো মিডিয়া নেই।**")
@@ -309,7 +342,7 @@ async def main():
                 orig_caption = target_msg.caption or ""
                 final_caption = (
                     (f"📄 {orig_caption}\n\n" if orig_caption else "") +
-                    f"🔗 **মূল লিংক:** {link}\n"
+                    f"🔗 **মূল লিংক:** {text_str}\n"
                     f"⏳ *এই পোস্টটি ১০ মিনিট পর স্বয়ংক্রিয়ভাবে মুছে যাবে।*"
                 )
 
@@ -338,9 +371,9 @@ async def main():
             if user_client.is_connected:
                 await user_client.stop()
 
-    # 3. Start main bot
+    # Start main bot
     await bot.start()
-    print(">>> MULTI-USER BOT IS ONLINE AND LISTENING <<<", flush=True)
+    print(">>> SMART MULTI-USER BOT IS ONLINE AND LISTENING <<<", flush=True)
 
     await idle()
 
