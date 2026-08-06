@@ -308,9 +308,22 @@ async def main():
         working_user_client = None
 
         for sess in active_sessions:
-            temp_client = Client(f"sess_run_{time.time()}", api_id=API_ID, api_hash=API_HASH, session_string=sess['session_string'], in_memory=True)
+            temp_client = Client(
+                f"sess_run_{time.time()}",
+                api_id=API_ID,
+                api_hash=API_HASH,
+                session_string=sess['session_string'],
+                in_memory=True
+            )
             try:
                 await temp_client.start()
+
+                # Pre-resolve chat peer to fix PeerIdInvalid error
+                try:
+                    await temp_client.get_chat(chat_id)
+                except Exception as chat_err:
+                    print(f"Chat resolve notice for {sess['account_name']}: {chat_err}", flush=True)
+
                 msg = await temp_client.get_messages(chat_id, msg_id)
                 if msg and (msg.video or msg.photo or msg.document or msg.animation or msg.media_group_id):
                     target_msg = msg
@@ -318,14 +331,15 @@ async def main():
                     break
                 else:
                     await temp_client.stop()
-            except Exception:
+            except Exception as e:
+                print(f"Session {sess['account_name']} error: {e}", flush=True)
                 if temp_client.is_connected:
                     await temp_client.stop()
 
         if not target_msg or not working_user_client:
             await status.edit_text(
                 "❌ **Post Not Found!**\n"
-                "Make sure at least one connected account in Firebase sessions has **joined** that private channel."
+                "Make sure at least one connected account (`@ZOXOTP` or `@developerBYsiam`) is an active **member** of that private channel."
             )
             return
 
