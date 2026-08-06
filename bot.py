@@ -33,7 +33,7 @@ if FIREBASE_KEY_RAW:
     except Exception as e:
         print(f"❌ Firebase Connection Error: {e}", flush=True)
 
-# Firebase Database Helper Functions
+# Firebase Helper Functions
 def add_session_to_db(session_str: str, name: str):
     if not db:
         return False, "Firebase is not connected!"
@@ -107,11 +107,9 @@ def get_analytics_stats():
     if not db:
         return 0, 0
     try:
-        # Get total registered users
         users_docs = db.collection("bot_users").stream()
         total_users = sum(1 for _ in users_docs)
         
-        # Get total download counts
         stat_doc = db.collection("bot_stats").document("global_analytics").get()
         total_downloads = stat_doc.to_dict().get("total_downloads", 0) if stat_doc.exists else 0
         
@@ -126,14 +124,22 @@ last_update_time = {}
 
 # Health Check Endpoint
 async def handle_ping(request):
-    return web.Response(text="Clipwell Analytics Engine Active!")
+    return web.Response(text="Clipwell High-Speed Engine Active!")
+
+# Auto-delete helper (5 minutes = 300 seconds)
+async def auto_delete_messages(bot_client, chat_id: int, message_ids: list, delay_seconds: int = 300):
+    await asyncio.sleep(delay_seconds)
+    try:
+        await bot_client.delete_messages(chat_id=chat_id, message_ids=message_ids)
+    except Exception as e:
+        print(f"Auto delete error: {e}", flush=True)
 
 # Aesthetic Progress Bar Callback
 async def progress_bar(current, total, status_msg, action_name, user_id):
     now = time.time()
     last_time = last_update_time.get(user_id, 0)
     
-    if (now - last_time < 3.0) and current < total:
+    if (now - last_time < 2.5) and current < total:
         return
         
     last_update_time[user_id] = now
@@ -183,11 +189,12 @@ async def main():
             "│\n"
             "├ 📥 Send any **Public** or **Private** Telegram link.\n"
             "├ ⚡ Fast download with live progress bar.\n"
+            "├ ⏳ **Auto-Delete:** Links & videos auto-delete after 5 minutes.\n"
             "╰──────────────────────────"
         )
         await message.reply_text(text)
 
-    # Command: /admin (Admin Control Panel with Analytics)
+    # Command: /admin (Admin Control Panel)
     @bot.on_message(filters.command(["admin", "panel"]) & filters.private)
     async def admin_panel(client: Client, message: Message):
         if message.from_user.id != OWNER_ID:
@@ -213,7 +220,7 @@ async def main():
         )
         await message.reply_text(text, reply_markup=keyboard)
 
-    # Callback Query Handler (Buttons)
+    # Callback Query Handler
     @bot.on_callback_query()
     async def callback_handler(client: Client, callback_query: CallbackQuery):
         user_id = callback_query.from_user.id
@@ -383,7 +390,6 @@ async def main():
             try:
                 await temp_client.start()
 
-                # Pre-resolve chat peer
                 try:
                     await temp_client.get_chat(chat_id)
                 except Exception as chat_err:
@@ -409,6 +415,8 @@ async def main():
             return
 
         try:
+            caption_note = "⏳ *This media and link will auto-delete in 5 minutes.*"
+
             # Case 1: Album
             if target_msg.media_group_id:
                 group_messages = await working_user_client.get_media_group(chat_id, msg_id)
@@ -424,14 +432,15 @@ async def main():
                         )
                         downloaded_files.append(file_path)
 
+                        cap = caption_note if len(media_list) == 0 else ""
                         if msg.video or (msg.document and msg.document.mime_type and "video" in msg.document.mime_type):
-                            media_list.append(InputMediaVideo(file_path))
+                            media_list.append(InputMediaVideo(file_path, caption=cap))
                         elif msg.photo or (msg.document and msg.document.mime_type and "image" in msg.document.mime_type):
-                            media_list.append(InputMediaPhoto(file_path))
+                            media_list.append(InputMediaPhoto(file_path, caption=cap))
 
                 if media_list:
                     await status.edit_text("⬆️ **Uploading album...**")
-                    await client.send_media_group(chat_id=message.chat.id, media=media_list)
+                    sent_msgs = await client.send_media_group(chat_id=message.chat.id, media=media_list)
                     
                     for path in downloaded_files:
                         if os.path.exists(path):
@@ -439,6 +448,10 @@ async def main():
                     
                     increment_download_count()
                     await status.delete()
+
+                    # Schedule 5-minute Auto-Delete (Deletes User Link + Sent Album)
+                    delete_msg_ids = [message.id] + [m.id for m in sent_msgs]
+                    asyncio.create_task(auto_delete_messages(bot, message.chat.id, delete_msg_ids, delay_seconds=300))
                 else:
                     await status.edit_text("❌ **No downloadable media found in this album.**")
 
@@ -452,25 +465,28 @@ async def main():
 
                 last_update_time[user_id] = 0
 
+                sent_msg = None
                 if target_msg.video:
-                    await client.send_video(
+                    sent_msg = await client.send_video(
                         chat_id=message.chat.id,
                         video=file_path,
+                        caption=caption_note,
                         supports_streaming=True,
                         progress=progress_bar,
                         progress_args=(status, "Uploading video", user_id)
                     )
                 elif target_msg.photo:
-                    await client.send_photo(chat_id=message.chat.id, photo=file_path)
+                    sent_msg = await client.send_photo(chat_id=message.chat.id, photo=file_path, caption=caption_note)
                 elif target_msg.document:
-                    await client.send_document(
+                    sent_msg = await client.send_document(
                         chat_id=message.chat.id,
                         document=file_path,
+                        caption=caption_note,
                         progress=progress_bar,
                         progress_args=(status, "Uploading document", user_id)
                     )
                 elif target_msg.animation:
-                    await client.send_animation(chat_id=message.chat.id, animation=file_path)
+                    sent_msg = await client.send_animation(chat_id=message.chat.id, animation=file_path, caption=caption_note)
 
                 if os.path.exists(file_path):
                     os.remove(file_path)
@@ -478,21 +494,26 @@ async def main():
                 increment_download_count()
                 await status.delete()
 
+                # Schedule 5-minute Auto-Delete (Deletes User Link + Sent Media)
+                if sent_msg:
+                    delete_msg_ids = [message.id, sent_msg.id]
+                    asyncio.create_task(auto_delete_messages(bot, message.chat.id, delete_msg_ids, delay_seconds=300))
+
         except Exception as e:
             await status.edit_text(f"❌ **Error:** `{str(e)}`")
         finally:
             if working_user_client and working_user_client.is_connected:
                 await working_user_client.stop()
 
-    # Start Main Bot with FloodWait Protection
+    # Start Main Bot
     try:
         await bot.start()
-        print(">>> CLIPWELL ANALYTICS BOT STARTED SUCCESSFULLY <<<", flush=True)
+        print(">>> CLIPWELL FAST DOWNLOADER STARTED SUCCESSFULLY <<<", flush=True)
     except FloodWait as e:
         print(f"⚠️ Telegram FloodWait detected! Waiting for {e.value} seconds...", flush=True)
         await asyncio.sleep(e.value + 5)
         await bot.start()
-        print(">>> CLIPWELL ANALYTICS BOT STARTED SUCCESSFULLY AFTER FLOODWAIT <<<", flush=True)
+        print(">>> CLIPWELL FAST DOWNLOADER STARTED SUCCESSFULLY AFTER FLOODWAIT <<<", flush=True)
 
     await idle()
 
