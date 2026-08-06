@@ -1,6 +1,13 @@
+import asyncio
+
+# Python 3.12+ asyncio event loop fix for Pyrogram
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
 import os
 import re
-import asyncio
 import sqlite3
 from pyrogram import Client, filters
 from pyrogram.types import Message, InputMediaVideo, InputMediaPhoto
