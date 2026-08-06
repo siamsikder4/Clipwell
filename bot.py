@@ -10,9 +10,10 @@ from pyrogram.types import (
     Message, InputMediaVideo, InputMediaPhoto, 
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ForceReply
 )
+from pyrogram.errors import FloodWait
 from aiohttp import web
 
-# Environment Credentials
+# Credentials & Constants
 API_ID = int(os.environ.get("API_ID", "35039821"))
 API_HASH = os.environ.get("API_HASH", "77df805f1700eeefec861de6c93ee2ae").strip()
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
@@ -35,9 +36,8 @@ if FIREBASE_KEY_RAW:
 # Firebase Database Helper Functions
 def add_session_to_db(session_str: str, name: str):
     if not db:
-        return False, "Firebase is not configured!"
+        return False, "Firebase is not connected!"
     try:
-        # Check if session already exists
         docs = db.collection("telegram_sessions").where("session_string", "==", session_str).stream()
         if any(docs):
             return False, "Session already exists in Firebase!"
@@ -66,7 +66,7 @@ def get_all_sessions():
             })
         return sessions
     except Exception as e:
-        print(f"Error fetching sessions from Firebase: {e}", flush=True)
+        print(f"Error fetching sessions: {e}", flush=True)
         return []
 
 def delete_session_from_db(doc_id: str):
@@ -79,13 +79,13 @@ def delete_session_from_db(doc_id: str):
         print(f"Error deleting session: {e}", flush=True)
         return False
 
-# Tracker for UI updates
+# UI & State Trackers
 admin_states = {}
 last_update_time = {}
 
-# Render Health Check Endpoint
+# Health Check Endpoint
 async def handle_ping(request):
-    return web.Response(text="Clipwell Firebase Engine Active!")
+    return web.Response(text="Clipwell Multi-Session Engine Active!")
 
 # Aesthetic Progress Bar Callback
 async def progress_bar(current, total, status_msg, action_name, user_id):
@@ -151,7 +151,6 @@ async def main():
             return
 
         all_sess = get_all_sessions()
-
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("➕ Add New Session", callback_data="btn_add_session")],
             [InlineKeyboardButton(f"📋 View All Sessions ({len(all_sess)})", callback_data="btn_list_sessions")],
@@ -169,7 +168,7 @@ async def main():
         )
         await message.reply_text(text, reply_markup=keyboard)
 
-    # Callback Query Handler
+    # Callback Query Handler (Buttons)
     @bot.on_callback_query()
     async def callback_handler(client: Client, callback_query: CallbackQuery):
         user_id = callback_query.from_user.id
@@ -198,7 +197,7 @@ async def main():
                 text = f"╭─ 📋 **FIREBASE SESSIONS ({len(all_sess)})** 📋\n│\n"
                 for idx, s in enumerate(all_sess, 1):
                     text += f"├ **#{idx} Account:** `{s['account_name']}`\n"
-                    text += f"│  🔑 **ID:** `{s['doc_id']}`\n│\n"
+                    text += f"│  🔑 **Doc ID:** `{s['doc_id']}`\n│\n"
                 text += "╰──────────────────────────"
                 
                 keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menu", callback_data="btn_back_admin")]])
@@ -250,7 +249,7 @@ async def main():
                 await callback_query.message.edit_text("❌ **Failed to delete session.**")
             await callback_query.answer()
 
-    # Text Handler for Admin Input & Links
+    # Text Input & Link Handler
     @bot.on_message(filters.text & filters.private)
     async def text_handler(client: Client, message: Message):
         user_id = message.from_user.id
@@ -259,7 +258,7 @@ async def main():
         if text_str.startswith("/"):
             return
 
-        # 1. Admin Session Submission
+        # 1. Handle Admin Session Input
         if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_SESSION":
             admin_states.pop(user_id, None)
             status_msg = await message.reply_text("⏳ **Validating session string with Telegram...**")
@@ -280,7 +279,7 @@ async def main():
                 await status_msg.edit_text(f"❌ **Invalid Session String!**\nError: `{str(e)}`")
             return
 
-        # 2. Telegram Media Link Processing
+        # 2. Process Telegram Links
         private_pattern = r"t\.me/c/(\d+)/(\d+)"
         public_pattern = r"t\.me/([^/]+)/(\d+)"
 
@@ -308,7 +307,6 @@ async def main():
         target_msg = None
         working_user_client = None
 
-        # Loop through Firebase sessions
         for sess in active_sessions:
             temp_client = Client(f"sess_run_{time.time()}", api_id=API_ID, api_hash=API_HASH, session_string=sess['session_string'], in_memory=True)
             try:
@@ -332,7 +330,7 @@ async def main():
             return
 
         try:
-            # Case 1: Album / Media Group
+            # Case 1: Album
             if target_msg.media_group_id:
                 group_messages = await working_user_client.get_media_group(chat_id, msg_id)
                 downloaded_files = []
@@ -405,9 +403,15 @@ async def main():
             if working_user_client and working_user_client.is_connected:
                 await working_user_client.stop()
 
-    # Start Main Bot
-    await bot.start()
-    print(">>> CLIPWELL FIREBASE BOT STARTED SUCCESSFULLY <<<", flush=True)
+    # Start Main Bot with FloodWait Protection
+    try:
+        await bot.start()
+        print(">>> CLIPWELL FIREBASE BOT STARTED SUCCESSFULLY <<<", flush=True)
+    except FloodWait as e:
+        print(f"⚠️ Telegram FloodWait detected! Waiting for {e.value} seconds...", flush=True)
+        await asyncio.sleep(e.value + 5)
+        await bot.start()
+        print(">>> CLIPWELL FIREBASE BOT STARTED SUCCESSFULLY AFTER FLOODWAIT <<<", flush=True)
 
     await idle()
 
