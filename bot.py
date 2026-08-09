@@ -7,7 +7,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from pyrogram import Client, filters, idle
 from pyrogram.types import (
-    Message, InputMediaVideo, InputMediaPhoto, 
+    Message, InputMediaVideo, InputMediaPhoto,
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ForceReply
 )
 from pyrogram.errors import FloodWait
@@ -41,7 +41,7 @@ def add_session_to_db(session_str: str, name: str):
         docs = db.collection("telegram_sessions").where("session_string", "==", session_str).stream()
         if any(docs):
             return False, "Session already exists in Firebase!"
-            
+
         db.collection("telegram_sessions").add({
             "session_string": session_str,
             "account_name": name,
@@ -109,10 +109,10 @@ def get_analytics_stats():
     try:
         users_docs = db.collection("bot_users").stream()
         total_users = sum(1 for _ in users_docs)
-        
+
         stat_doc = db.collection("bot_stats").document("global_analytics").get()
         total_downloads = stat_doc.to_dict().get("total_downloads", 0) if stat_doc.exists else 0
-        
+
         return total_users, total_downloads
     except Exception as e:
         print(f"Analytics fetch error: {e}", flush=True)
@@ -134,22 +134,40 @@ async def auto_delete_messages(bot_client, chat_id: int, message_ids: list, dela
     except Exception as e:
         print(f"Auto delete error: {e}", flush=True)
 
+# --- GIF Detection Helper -------------------------------------------------
+# A "GIF" on Telegram can arrive either as a native `animation` object, or
+# as a plain `document` whose mime_type is image/gif (common when users
+# forward .gif files instead of letting Telegram auto-convert them).
+def is_gif_message(msg):
+    if not msg:
+        return False
+    if msg.animation:
+        return True
+    if msg.document and msg.document.mime_type and "gif" in msg.document.mime_type.lower():
+        return True
+    return False
+
+def has_downloadable_media(msg):
+    return bool(
+        msg and (msg.video or msg.photo or msg.document or msg.animation or msg.media_group_id)
+    )
+
 # Aesthetic Progress Bar Callback
 async def progress_bar(current, total, status_msg, action_name, user_id):
     now = time.time()
     last_time = last_update_time.get(user_id, 0)
-    
+
     if (now - last_time < 2.5) and current < total:
         return
-        
+
     last_update_time[user_id] = now
     percentage = (current / total) * 100
     filled = int(percentage // 10)
     bar = "█" * filled + "░" * (10 - filled)
-    
+
     curr_mb = current / (1024 * 1024)
     tot_mb = total / (1024 * 1024)
-    
+
     text = (
         f"╭─ ⚡ **{action_name.upper()}** ⚡\n"
         f"│\n"
@@ -183,13 +201,14 @@ async def main():
     async def start_cmd(client: Client, message: Message):
         user = message.from_user
         track_user_in_db(user.id, user.username, user.first_name)
-        
+
         text = (
             "╭─ 🚀 **CLIPWELL DOWNLOADER** 🚀\n"
             "│\n"
             "├ 📥 Send any **Public** or **Private** Telegram link.\n"
+            "├ 🎞️ Supports Video, Photo, Document & **GIF**.\n"
             "├ ⚡ Fast download with live progress bar.\n"
-            "├ ⏳ **Auto-Delete:** Links & videos auto-delete after 5 minutes.\n"
+            "├ ⏳ **Auto-Delete:** Links & media auto-delete after 5 minutes.\n"
             "╰──────────────────────────"
         )
         await message.reply_text(text)
@@ -208,7 +227,7 @@ async def main():
             [InlineKeyboardButton(f"📋 View All Sessions ({len(all_sess)})", callback_data="btn_list_sessions")],
             [InlineKeyboardButton("🗑️ Remove Session", callback_data="btn_del_menu")]
         ])
-        
+
         db_status = "🟢 Connected" if db else "🔴 Not Configured"
         text = (
             "╭─ ⚙️ **ADMIN CONTROL PANEL** ⚙️\n"
@@ -233,7 +252,7 @@ async def main():
         if data == "btn_stats":
             total_users, total_downloads = get_analytics_stats()
             all_sess = get_all_sessions()
-            
+
             text = (
                 "╭─ 📊 **BOT REAL-TIME ANALYTICS** 📊\n"
                 "│\n"
@@ -268,7 +287,7 @@ async def main():
                     text += f"├ **#{idx} Account:** `{s['account_name']}`\n"
                     text += f"│  🔑 **Doc ID:** `{s['doc_id']}`\n│\n"
                 text += "╰──────────────────────────"
-                
+
                 keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menu", callback_data="btn_back_admin")]])
                 await callback_query.message.edit_text(text, reply_markup=keyboard)
             await callback_query.answer()
@@ -298,12 +317,12 @@ async def main():
             if not all_sess:
                 await callback_query.answer("No sessions found in Firebase!", show_alert=True)
                 return
-            
+
             buttons = []
             for s in all_sess:
                 buttons.append([InlineKeyboardButton(f"❌ {s['account_name']}", callback_data=f"del_{s['doc_id']}")])
             buttons.append([InlineKeyboardButton("🔙 Back", callback_data="btn_back_admin")])
-            
+
             await callback_query.message.edit_text(
                 "╭─ 🗑️ **DELETE SESSION FROM FIREBASE** 🗑️\n│\n├ Select the account to remove:\n╰──────────────────────────",
                 reply_markup=InlineKeyboardMarkup(buttons)
@@ -396,7 +415,7 @@ async def main():
                     print(f"Chat resolve notice for {sess['account_name']}: {chat_err}", flush=True)
 
                 msg = await temp_client.get_messages(chat_id, msg_id)
-                if msg and (msg.video or msg.photo or msg.document or msg.animation or msg.media_group_id):
+                if has_downloadable_media(msg):
                     target_msg = msg
                     working_user_client = temp_client
                     break
@@ -422,7 +441,8 @@ async def main():
                 group_messages = await working_user_client.get_media_group(chat_id, msg_id)
                 downloaded_files = []
                 media_list = []
-                
+                gif_files = []  # GIFs can't go inside sendMediaGroup, sent separately below
+
                 for idx, msg in enumerate(group_messages):
                     if msg.video or msg.photo or msg.document or msg.animation:
                         file_path = await working_user_client.download_media(
@@ -432,41 +452,68 @@ async def main():
                         )
                         downloaded_files.append(file_path)
 
-                        cap = caption_note if len(media_list) == 0 else ""
+                        if is_gif_message(msg):
+                            gif_files.append(file_path)
+                            continue
+
+                        cap = caption_note if (len(media_list) == 0 and not gif_files) else ""
                         if msg.video or (msg.document and msg.document.mime_type and "video" in msg.document.mime_type):
                             media_list.append(InputMediaVideo(file_path, caption=cap))
                         elif msg.photo or (msg.document and msg.document.mime_type and "image" in msg.document.mime_type):
                             media_list.append(InputMediaPhoto(file_path, caption=cap))
 
+                sent_msgs = []
                 if media_list:
                     await status.edit_text("⬆️ **Uploading album...**")
                     sent_msgs = await client.send_media_group(chat_id=message.chat.id, media=media_list)
-                    
-                    for path in downloaded_files:
-                        if os.path.exists(path):
-                            os.remove(path)
-                    
+
+                if gif_files:
+                    await status.edit_text("⬆️ **Uploading GIF(s)...**")
+                    for g_idx, gpath in enumerate(gif_files):
+                        gcap = caption_note if (not media_list and g_idx == 0) else ""
+                        gif_msg = await client.send_animation(
+                            chat_id=message.chat.id,
+                            animation=gpath,
+                            caption=gcap
+                        )
+                        sent_msgs.append(gif_msg)
+
+                for path in downloaded_files:
+                    if os.path.exists(path):
+                        os.remove(path)
+
+                if media_list or gif_files:
                     increment_download_count()
                     await status.delete()
 
-                    # Schedule 5-minute Auto-Delete (Deletes User Link + Sent Album)
+                    # Schedule 5-minute Auto-Delete (Deletes User Link + Sent Album/GIFs)
                     delete_msg_ids = [message.id] + [m.id for m in sent_msgs]
                     asyncio.create_task(auto_delete_messages(bot, message.chat.id, delete_msg_ids, delay_seconds=300))
                 else:
                     await status.edit_text("❌ **No downloadable media found in this album.**")
 
-            # Case 2: Single Media
+            # Case 2: Single Media (Video / Photo / Document / GIF)
             else:
+                is_gif = is_gif_message(target_msg)
+
                 file_path = await working_user_client.download_media(
                     target_msg,
                     progress=progress_bar,
-                    progress_args=(status, "Downloading video", user_id)
+                    progress_args=(status, "Downloading GIF" if is_gif else "Downloading media", user_id)
                 )
 
                 last_update_time[user_id] = 0
 
                 sent_msg = None
-                if target_msg.video:
+                if is_gif:
+                    sent_msg = await client.send_animation(
+                        chat_id=message.chat.id,
+                        animation=file_path,
+                        caption=caption_note,
+                        progress=progress_bar,
+                        progress_args=(status, "Uploading GIF", user_id)
+                    )
+                elif target_msg.video:
                     sent_msg = await client.send_video(
                         chat_id=message.chat.id,
                         video=file_path,
@@ -485,8 +532,6 @@ async def main():
                         progress=progress_bar,
                         progress_args=(status, "Uploading document", user_id)
                     )
-                elif target_msg.animation:
-                    sent_msg = await client.send_animation(chat_id=message.chat.id, animation=file_path, caption=caption_note)
 
                 if os.path.exists(file_path):
                     os.remove(file_path)
