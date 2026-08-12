@@ -134,10 +134,7 @@ async def auto_delete_messages(bot_client, chat_id: int, message_ids: list, dela
     except Exception as e:
         print(f"Auto delete error: {e}", flush=True)
 
-# --- GIF Detection Helper -------------------------------------------------
-# A "GIF" on Telegram can arrive either as a native `animation` object, or
-# as a plain `document` whose mime_type is image/gif (common when users
-# forward .gif files instead of letting Telegram auto-convert them).
+# Helper: Detect GIF
 def is_gif_message(msg):
     if not msg:
         return False
@@ -151,6 +148,12 @@ def has_downloadable_media(msg):
     return bool(
         msg and (msg.video or msg.photo or msg.document or msg.animation or msg.media_group_id)
     )
+
+# Caption Helper (Returns strictly original caption if present)
+def get_original_caption(original_caption: str) -> str:
+    if original_caption and original_caption.strip():
+        return original_caption.strip()
+    return ""
 
 # Aesthetic Progress Bar Callback
 async def progress_bar(current, total, status_msg, action_name, user_id):
@@ -206,7 +209,7 @@ async def main():
             "╭─ 🚀 **CLIPWELL DOWNLOADER** 🚀\n"
             "│\n"
             "├ 📥 Send any **Public** or **Private** Telegram link.\n"
-            "├ 🎞️ Supports Video, Photo, Document & **GIF**.\n"
+            "├ 🖼️ Supports Photo, Video, Album, Document & GIF.\n"
             "├ ⚡ Fast download with live progress bar.\n"
             "├ ⏳ **Auto-Delete:** Links & media auto-delete after 5 minutes.\n"
             "╰──────────────────────────"
@@ -434,43 +437,42 @@ async def main():
             return
 
         try:
-            caption_note = "⏳ *This media and link will auto-delete in 5 minutes.*"
-
-            # Case 1: Album
+            # Case 1: Album (Media Group)
             if target_msg.media_group_id:
                 group_messages = await working_user_client.get_media_group(chat_id, msg_id)
                 downloaded_files = []
                 media_list = []
-                gif_files = []  # GIFs can't go inside sendMediaGroup, sent separately below
+                gif_files = []
 
                 for idx, msg in enumerate(group_messages):
                     if msg.video or msg.photo or msg.document or msg.animation:
                         file_path = await working_user_client.download_media(
                             msg,
                             progress=progress_bar,
-                            progress_args=(status, f"Downloading album ({idx+1}/{len(group_messages)})", user_id)
+                            progress_args=(status, f"Downloading Album 📚 ({idx+1}/{len(group_messages)})", user_id)
                         )
                         downloaded_files.append(file_path)
 
                         if is_gif_message(msg):
-                            gif_files.append(file_path)
+                            gif_files.append((file_path, msg.caption))
                             continue
 
-                        cap = caption_note if (len(media_list) == 0 and not gif_files) else ""
+                        orig_cap = get_original_caption(msg.caption)
+
                         if msg.video or (msg.document and msg.document.mime_type and "video" in msg.document.mime_type):
-                            media_list.append(InputMediaVideo(file_path, caption=cap))
+                            media_list.append(InputMediaVideo(file_path, caption=orig_cap))
                         elif msg.photo or (msg.document and msg.document.mime_type and "image" in msg.document.mime_type):
-                            media_list.append(InputMediaPhoto(file_path, caption=cap))
+                            media_list.append(InputMediaPhoto(file_path, caption=orig_cap))
 
                 sent_msgs = []
                 if media_list:
-                    await status.edit_text("⬆️ **Uploading album...**")
+                    await status.edit_text("⬆️ **Uploading Album 📚...**")
                     sent_msgs = await client.send_media_group(chat_id=message.chat.id, media=media_list)
 
                 if gif_files:
-                    await status.edit_text("⬆️ **Uploading GIF(s)...**")
-                    for g_idx, gpath in enumerate(gif_files):
-                        gcap = caption_note if (not media_list and g_idx == 0) else ""
+                    await status.edit_text("⬆️ **Uploading GIF(s) 🎞️...**")
+                    for g_idx, (gpath, gcap_orig) in enumerate(gif_files):
+                        gcap = get_original_caption(gcap_orig)
                         gif_msg = await client.send_animation(
                             chat_id=message.chat.id,
                             animation=gpath,
@@ -486,7 +488,7 @@ async def main():
                     increment_download_count()
                     await status.delete()
 
-                    # Schedule 5-minute Auto-Delete (Deletes User Link + Sent Album/GIFs)
+                    # Schedule 5-minute Auto-Delete
                     delete_msg_ids = [message.id] + [m.id for m in sent_msgs]
                     asyncio.create_task(auto_delete_messages(bot, message.chat.id, delete_msg_ids, delay_seconds=300))
                 else:
@@ -495,11 +497,21 @@ async def main():
             # Case 2: Single Media (Video / Photo / Document / GIF)
             else:
                 is_gif = is_gif_message(target_msg)
+                final_caption = get_original_caption(target_msg.caption)
+
+                if is_gif:
+                    media_type_str = "GIF 🎞️"
+                elif target_msg.video:
+                    media_type_str = "Video 🎬"
+                elif target_msg.photo:
+                    media_type_str = "Photo 🖼️"
+                else:
+                    media_type_str = "Document 📁"
 
                 file_path = await working_user_client.download_media(
                     target_msg,
                     progress=progress_bar,
-                    progress_args=(status, "Downloading GIF" if is_gif else "Downloading media", user_id)
+                    progress_args=(status, f"Downloading {media_type_str}", user_id)
                 )
 
                 last_update_time[user_id] = 0
@@ -509,28 +521,34 @@ async def main():
                     sent_msg = await client.send_animation(
                         chat_id=message.chat.id,
                         animation=file_path,
-                        caption=caption_note,
+                        caption=final_caption,
                         progress=progress_bar,
-                        progress_args=(status, "Uploading GIF", user_id)
+                        progress_args=(status, f"Uploading {media_type_str}", user_id)
                     )
                 elif target_msg.video:
                     sent_msg = await client.send_video(
                         chat_id=message.chat.id,
                         video=file_path,
-                        caption=caption_note,
+                        caption=final_caption,
                         supports_streaming=True,
                         progress=progress_bar,
-                        progress_args=(status, "Uploading video", user_id)
+                        progress_args=(status, f"Uploading {media_type_str}", user_id)
                     )
                 elif target_msg.photo:
-                    sent_msg = await client.send_photo(chat_id=message.chat.id, photo=file_path, caption=caption_note)
+                    sent_msg = await client.send_photo(
+                        chat_id=message.chat.id,
+                        photo=file_path,
+                        caption=final_caption,
+                        progress=progress_bar,
+                        progress_args=(status, f"Uploading {media_type_str}", user_id)
+                    )
                 elif target_msg.document:
                     sent_msg = await client.send_document(
                         chat_id=message.chat.id,
                         document=file_path,
-                        caption=caption_note,
+                        caption=final_caption,
                         progress=progress_bar,
-                        progress_args=(status, "Uploading document", user_id)
+                        progress_args=(status, f"Uploading {media_type_str}", user_id)
                     )
 
                 if os.path.exists(file_path):
@@ -539,7 +557,7 @@ async def main():
                 increment_download_count()
                 await status.delete()
 
-                # Schedule 5-minute Auto-Delete (Deletes User Link + Sent Media)
+                # Schedule 5-minute Auto-Delete
                 if sent_msg:
                     delete_msg_ids = [message.id, sent_msg.id]
                     asyncio.create_task(auto_delete_messages(bot, message.chat.id, delete_msg_ids, delay_seconds=300))
