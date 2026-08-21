@@ -14,7 +14,7 @@ from pyrogram.errors import FloodWait
 from aiohttp import web
 import yt_dlp
 
-# Configuration
+# Configuration & Environment Variables
 API_ID = int(os.environ.get("API_ID", "35039821"))
 API_HASH = os.environ.get("API_HASH", "77df805f1700eeefec861de6c93ee2ae").strip()
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
@@ -22,7 +22,7 @@ FIREBASE_KEY_RAW = os.environ.get("FIREBASE_KEY", "").strip()
 OWNER_ID = 6142774415
 PORT = int(os.environ.get("PORT", "8080"))
 
-# Ensure download directory exists
+# Temp Downloads Directory
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
@@ -38,7 +38,7 @@ if FIREBASE_KEY_RAW:
     except Exception as e:
         print(f"Firebase Error: {e}", flush=True)
 
-# Database Operations
+# Database Helpers
 def add_session_to_db(session_str: str, name: str):
     if not db:
         return False, "Database offline"
@@ -119,7 +119,7 @@ def get_stats():
         print(f"Stats Error: {e}", flush=True)
         return 0, 0
 
-# UI State & Progress Tracker
+# UI State & Rate Limiters
 admin_states = {}
 progress_status = {}
 
@@ -179,7 +179,6 @@ def is_gif_message(msg):
 def has_media(msg):
     return bool(msg and (msg.video or msg.photo or msg.document or msg.animation or msg.media_group_id))
 
-# yt-dlp Core Downloader Worker
 def extract_and_download_social(url: str, user_id: int):
     timestamp = int(time.time())
     out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_%(id)s.%(ext)s")
@@ -190,20 +189,19 @@ def extract_and_download_social(url: str, user_id: int):
         'merge_output_format': 'mp4',
         'quiet': True,
         'no_warnings': True,
-        'max_filesize': 1900 * 1024 * 1024,  # Under 2GB for Telegram limit
+        'max_filesize': 1900 * 1024 * 1024,
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         file_path = ydl.prepare_filename(info)
         
-        # In case merging produced .mp4 extension
         if not os.path.exists(file_path):
             base, _ = os.path.splitext(file_path)
             if os.path.exists(base + ".mp4"):
                 file_path = base + ".mp4"
 
-        title = info.get('title', 'Downloaded Media')
+        title = info.get('title', 'Downloaded Video')
         duration = int(info.get('duration', 0) or 0)
         return file_path, title, duration
 
@@ -280,7 +278,7 @@ async def main():
                 "**How to use:**\n\n"
                 "1. Copy video URL (Telegram, YouTube, TikTok, Instagram, Facebook).\n"
                 "2. Send it directly here.\n"
-                "3. The bot will process and send the file.",
+                "3. The bot will download and forward the media.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_home")]])
             )
             await callback_query.answer()
@@ -412,15 +410,14 @@ async def main():
                 await status_msg.edit_text(f"Invalid session: `{str(e)}`")
             return
 
-        # 2. Social Media Links (YouTube, TikTok, Instagram, Facebook, etc.)
-        social_pattern = r"(https?://(?:www\.)?(?:youtube\.com|youtu\.be|instagram\.com|tiktok\.com|facebook\.com|fb\.watch)/[^\s]+)"
+        # 2. Social Media Links (YouTube, TikTok, Instagram, Facebook)
+        social_pattern = r"(https?://(?:[a-zA-Z0-9-_]+\.)*(?:youtube\.com|youtu\.be|instagram\.com|instagr\.am|tiktok\.com|facebook\.com|fb\.watch)/[^\s]+)"
         social_match = re.search(social_pattern, text_str)
 
         if social_match:
             target_url = social_match.group(0)
             status = await message.reply_text("Processing media URL...")
             try:
-                # Run download in a separate thread to prevent blocking
                 file_path, title, duration = await asyncio.to_thread(extract_and_download_social, target_url, user_id)
                 
                 if not file_path or not os.path.exists(file_path):
