@@ -6,7 +6,7 @@ import asyncio
 import logging
 import urllib.request
 from aiohttp import web
-from hydrogram import Client, filters, idle
+from hydrogram import Client, filters
 from hydrogram.types import (
     Message, InputMediaVideo, InputMediaPhoto,
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ForceReply
@@ -15,10 +15,10 @@ from hydrogram.errors import FloodWait
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# Enable full logging to see all telegram updates in Railway logs
+# Logging setup
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -33,14 +33,14 @@ PORT = int(os.environ.get("PORT", "8080"))
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# Auto Purge Webhook & Clear pending updates directly
+# Purge any stuck webhooks
 if BOT_TOKEN:
     try:
         purge_url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true"
         req = urllib.request.urlopen(purge_url, timeout=10)
-        logger.info(f"Telegram Webhook Purge: {req.read().decode('utf-8')}")
+        logger.info(f"Webhook Purge: {req.read().decode('utf-8')}")
     except Exception as e:
-        logger.warning(f"Webhook Purge Warning: {e}")
+        logger.warning(f"Webhook Warning: {e}")
 
 # Database Initialization
 db = None
@@ -54,6 +54,7 @@ if FIREBASE_KEY_RAW:
     except Exception as e:
         logger.error(f"Firebase Init Error: {e}")
 
+# Bot Client
 bot = Client(
     "bot_instance",
     api_id=API_ID,
@@ -62,7 +63,7 @@ bot = Client(
     in_memory=True
 )
 
-# Database Operations (Thread-safe)
+# Non-blocking Database Helpers
 def sync_add_session(session_str: str, name: str):
     if not db:
         return False, "Database offline"
@@ -557,28 +558,17 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
         )
         await callback_query.answer()
 
-async def handle_ping(request):
-    return web.Response(text="Bot is running.")
-
-async def main():
+# Background Web Server (Dummy Healthcheck)
+async def start_web_server():
     app = web.Application()
-    app.router.add_get("/", handle_ping)
+    app.router.add_get("/", lambda r: web.Response(text="Bot is running."))
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
 
-    try:
-        await bot.start()
-        logger.info("Telegram Downloader Bot is fully LIVE and listening for messages.")
-    except FloodWait as e:
-        logger.warning(f"FloodWait: Sleeping {e.value}s")
-        await asyncio.sleep(e.value + 5)
-        await bot.start()
-
-    await idle()
-    if bot.is_connected:
-        await bot.stop()
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    loop.create_task(start_web_server())
+    logger.info("Starting Telegram Bot Runner...")
+    bot.run()
