@@ -270,7 +270,7 @@ def extract_and_download_social(url: str, user_id: int, quality_format: str = "b
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         if not info:
-            return None, None, None, 0, None, None
+            return None, None, None, 0, 0, 0
 
         file_path = ydl.prepare_filename(info)
         
@@ -290,9 +290,9 @@ def extract_and_download_social(url: str, user_id: int, quality_format: str = "b
                 break
 
         title = info.get('title', 'Downloaded Media')
-        duration = int(info.get('duration', 0) or 0)
-        width = info.get('width')
-        height = info.get('height')
+        duration = int(info.get('duration') or 0)
+        width = int(info.get('width') or 0)
+        height = int(info.get('height') or 0)
 
         return file_path, thumb_path, title, duration, width, height
 
@@ -420,7 +420,7 @@ async def main():
                         audio=file_path,
                         thumb=thumb_path if (thumb_path and os.path.exists(thumb_path)) else None,
                         caption=f"**{title[:60]}**",
-                        duration=duration,
+                        duration=int(duration or 0),
                         progress=progress_bar,
                         progress_args=(status, "Uploading Audio", user_id)
                     )
@@ -431,9 +431,9 @@ async def main():
                         video=file_path,
                         thumb=thumb_path if (thumb_path and os.path.exists(thumb_path)) else None,
                         caption=f"**{title[:60]}** `[{actual_res}]`",
-                        duration=duration,
-                        width=width,
-                        height=height,
+                        duration=int(duration or 0),
+                        width=int(width or 0) if width > 0 else None,
+                        height=int(height or 0) if height > 0 else None,
                         supports_streaming=True,
                         progress=progress_bar,
                         progress_args=(status, f"Uploading ({actual_res})", user_id)
@@ -585,7 +585,7 @@ async def main():
                 try:
                     info = await asyncio.to_thread(extract_media_info, target_url)
                     title = info.get("title", "YouTube Video")
-                    duration = int(info.get("duration", 0) or 0)
+                    duration = int(info.get("duration") or 0)
                     dur_str = format_time(duration)
 
                     available_heights = set()
@@ -643,9 +643,9 @@ async def main():
                     video=file_path,
                     thumb=thumb_path if (thumb_path and os.path.exists(thumb_path)) else None,
                     caption=f"**{title[:60]}**" if title else "",
-                    duration=duration,
-                    width=width,
-                    height=height,
+                    duration=int(duration or 0),
+                    width=int(width or 0) if width > 0 else None,
+                    height=int(height or 0) if height > 0 else None,
                     supports_streaming=True,
                     progress=progress_bar,
                     progress_args=(status, "Uploading Video", user_id)
