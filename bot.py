@@ -7,12 +7,11 @@ import logging
 import urllib.request
 from aiohttp import web
 import yt_dlp
-from hydrogram import Client, filters, idle
+from hydrogram import Client, filters
 from hydrogram.types import (
     Message, InputMediaVideo, InputMediaPhoto,
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ForceReply
 )
-from hydrogram.errors import FloodWait
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -33,22 +32,13 @@ logger = logging.getLogger(__name__)
 # Configuration
 API_ID = int(os.environ.get("API_ID", "35039821"))
 API_HASH = os.environ.get("API_HASH", "77df805f1700eeefec861de6c93ee2ae").strip()
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8952918726:AAGnKZm-S8hmBaWzltPfrdWRcyVHGVx44d0").strip()
 FIREBASE_KEY_RAW = os.environ.get("FIREBASE_KEY", "").strip()
 OWNER_ID = 6142774415
 PORT = int(os.environ.get("PORT", "8080"))
 
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
-# Purge any stuck webhooks
-if BOT_TOKEN:
-    try:
-        purge_url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true"
-        req = urllib.request.urlopen(purge_url, timeout=10)
-        logger.info(f"Webhook Purge: {req.read().decode('utf-8')}")
-    except Exception as e:
-        logger.warning(f"Webhook Warning: {e}")
 
 # Database Initialization
 db = None
@@ -62,9 +52,9 @@ if FIREBASE_KEY_RAW:
     except Exception as e:
         logger.error(f"Firebase Init Error: {e}")
 
-# Bot Client with clean session
+# Bot Client
 bot = Client(
-    "bot_session",
+    "bot_instance",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
@@ -246,7 +236,6 @@ def detect_social_platform(url: str) -> str:
         return "facebook"
     return "others"
 
-# Universal Social Media Extractor
 def extract_and_download_social(url: str, user_id: int):
     real_url = unshorten_url(url)
     timestamp = int(time.time())
@@ -301,7 +290,7 @@ def extract_and_download_social(url: str, user_id: int):
 
         return file_path, title, duration, width, height
 
-# Primary Message Handler (Direct Private Filter)
+# Message Router
 @bot.on_message(filters.private)
 async def private_message_handler(client: Client, message: Message):
     user = message.from_user
@@ -350,7 +339,7 @@ async def private_message_handler(client: Client, message: Message):
         await message.reply_text(text, reply_markup=keyboard)
         return
 
-    # Waiting for Session Input
+    # Session State
     if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_SESSION":
         admin_states.pop(user_id, None)
         status_msg = await message.reply_text("Validating session...")
@@ -371,7 +360,7 @@ async def private_message_handler(client: Client, message: Message):
             await status_msg.edit_text(f"Invalid session: `{str(e)}`")
         return
 
-    # Social Media URL Pattern
+    # Social Media URL
     social_pattern = r"(https?://(?:[a-zA-Z0-9-_]+\.)*(?:youtube\.com|youtu\.be|instagram\.com|instagr\.am|tiktok\.com|facebook\.com|fb\.watch)/[^\s]+)"
     social_match = re.search(social_pattern, text_str)
 
@@ -423,7 +412,7 @@ async def private_message_handler(client: Client, message: Message):
             await status.edit_text(f"Download Error: `{str(e)[:120]}`")
         return
 
-    # Telegram URL Pattern
+    # Telegram URL
     private_match = re.search(r"t\.me/c/(\d+)/(\d+)", text_str)
     public_match = re.search(r"t\.me/([a-zA-Z0-9_]+)/(\d+)", text_str)
 
@@ -725,25 +714,8 @@ async def start_web_server():
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
 
-async def main():
-    await start_web_server()
-
-    while True:
-        try:
-            await bot.start()
-            me = await bot.get_me()
-            logger.info(f"===> Bot is LIVE: @{me.username} (ID: {me.id}) <===")
-            break
-        except FloodWait as e:
-            logger.warning(f"Telegram FloodWait encountered: Sleeping for {e.value} seconds...")
-            await asyncio.sleep(e.value + 5)
-        except Exception as e:
-            logger.error(f"Bot start error: {e}")
-            await asyncio.sleep(5)
-
-    await idle()
-    if bot.is_connected:
-        await bot.stop()
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    loop.create_task(start_web_server())
+    logger.info("Starting bot using native runner...")
+    bot.run()
