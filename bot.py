@@ -62,7 +62,7 @@ if FIREBASE_KEY_RAW:
     except Exception as e:
         logger.error(f"Firebase Init Error: {e}")
 
-# Bot Client
+# Persistent Bot Client (Saves session locally to prevent FloodWait on restarts)
 bot = Client(
     "bot_persistent_session",
     api_id=API_ID,
@@ -70,7 +70,7 @@ bot = Client(
     bot_token=BOT_TOKEN
 )
 
-# Database Helpers
+# Database Helpers (Non-blocking)
 def sync_add_session(session_str: str, name: str):
     if not db:
         return False, "Database offline"
