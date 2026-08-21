@@ -6,6 +6,7 @@ import asyncio
 import logging
 import urllib.request
 from aiohttp import web
+import yt_dlp
 from hydrogram import Client, filters
 from hydrogram.types import (
     Message, InputMediaVideo, InputMediaPhoto,
@@ -14,6 +15,13 @@ from hydrogram.types import (
 from hydrogram.errors import FloodWait
 import firebase_admin
 from firebase_admin import credentials, firestore
+
+# Setup FFmpeg automatically
+try:
+    import static_ffmpeg
+    static_ffmpeg.add_paths()
+except ImportError:
+    pass
 
 # Logging setup
 logging.basicConfig(
@@ -122,29 +130,42 @@ def sync_track_user(user_id: int, username: str, name: str):
     except Exception as e:
         logger.error(f"Tracking Error: {e}")
 
-def sync_increment_downloads():
+def sync_increment_downloads(platform: str):
     if not db:
         return
     try:
         doc_ref = db.collection("bot_stats").document("global_analytics")
         doc_ref.set({
             "total_downloads": firestore.Increment(1),
-            "count_telegram": firestore.Increment(1)
+            f"count_{platform}": firestore.Increment(1)
         }, merge=True)
     except Exception as e:
         logger.error(f"Metric Error: {e}")
 
 def sync_get_stats():
     if not db:
-        return 0, 0
+        return 0, 0, {}
     try:
         users = sum(1 for _ in db.collection("bot_users").stream())
         stat_doc = db.collection("bot_stats").document("global_analytics").get()
-        total_dl = stat_doc.to_dict().get("total_downloads", 0) if stat_doc.exists else 0
-        return users, total_dl
+        if stat_doc.exists:
+            data = stat_doc.to_dict()
+            total_dl = data.get("total_downloads", 0)
+            platform_counts = {
+                "Telegram": data.get("count_telegram", 0),
+                "YouTube": data.get("count_youtube", 0),
+                "TikTok": data.get("count_tiktok", 0),
+                "Instagram": data.get("count_instagram", 0),
+                "Facebook": data.get("count_facebook", 0),
+                "Others": data.get("count_others", 0)
+            }
+        else:
+            total_dl = 0
+            platform_counts = {}
+        return users, total_dl, platform_counts
     except Exception as e:
         logger.error(f"Stats Error: {e}")
-        return 0, 0
+        return 0, 0, {}
 
 admin_states = {}
 progress_status = {}
@@ -202,6 +223,71 @@ def is_gif_message(msg):
 def has_media(msg):
     return bool(msg and (msg.video or msg.photo or msg.document or msg.audio or msg.voice or msg.animation or msg.media_group_id))
 
+def detect_social_platform(url: str) -> str:
+    url_lower = url.lower()
+    if "tiktok.com" in url_lower:
+        return "tiktok"
+    elif "youtube.com" in url_lower or "youtu.be" in url_lower:
+        return "youtube"
+    elif "instagram.com" in url_lower or "instagr.am" in url_lower:
+        return "instagram"
+    elif "facebook.com" in url_lower or "fb.watch" in url_lower:
+        return "facebook"
+    return "others"
+
+# Cookie-less Social Media Extractor
+def extract_and_download_social(url: str, user_id: int):
+    timestamp = int(time.time())
+    out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_%(id)s.%(ext)s")
+
+    ydl_opts = {
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
+        'outtmpl': out_template,
+        'merge_output_format': 'mp4',
+        'writethumbnail': True,
+        'quiet': True,
+        'no_warnings': True,
+        'max_filesize': 1900 * 1024 * 1024,
+        # Cookie-less trick: Android & iOS client emulation for YouTube
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios', 'tv_embedded']
+            }
+        },
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        if not info:
+            return None, None, None, 0, None, None
+
+        file_path = ydl.prepare_filename(info)
+        if not os.path.exists(file_path):
+            base, _ = os.path.splitext(file_path)
+            if os.path.exists(base + ".mp4"):
+                file_path = base + ".mp4"
+
+        base_path, _ = os.path.splitext(file_path)
+        thumb_path = None
+        for ext in [".jpg", ".jpeg", ".webp", ".png"]:
+            if os.path.exists(base_path + ext):
+                thumb_path = base_path + ext
+                break
+
+        title = info.get('title', 'Downloaded Media')
+        duration = int(info.get('duration') or 0)
+        width = info.get('width')
+        height = info.get('height')
+
+        width_val = int(width) if (width and str(width).isdigit() and int(width) > 0) else None
+        height_val = int(height) if (height and str(height).isdigit() and int(height) > 0) else None
+
+        return file_path, thumb_path, title, duration, width_val, height_val
+
 # 1. /start Command Handler
 @bot.on_message(filters.command(["start"]) & filters.private)
 async def start_handler(client: Client, message: Message):
@@ -220,7 +306,8 @@ async def start_handler(client: Client, message: Message):
 
     text = (
         f"**Hello {user.first_name},**\n\n"
-        "Send any Telegram post link (Public or Private Channel) to download media.\n"
+        "Send any media link to download:\n"
+        "• **Supported:** Telegram, YouTube, TikTok, Instagram, Facebook\n"
         "• Sent media auto-deletes in 5 minutes."
     )
     await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
@@ -246,7 +333,7 @@ async def admin_handler(client: Client, message: Message):
     text = f"**Admin Panel**\n\n• DB: `{db_status}`\n• Active Sessions: `{len(all_sess)}`"
     await message.reply_text(text, reply_markup=keyboard)
 
-# 3. Message & Telegram Link Handler
+# 3. Message Router (Social Media + Telegram Links)
 @bot.on_message(filters.text & filters.private)
 async def message_handler(client: Client, message: Message):
     user = message.from_user
@@ -261,7 +348,7 @@ async def message_handler(client: Client, message: Message):
     logger.info(f"Processing message from {user_id}: {text_str}")
     asyncio.create_task(asyncio.to_thread(sync_track_user, user_id, user.username, user.first_name))
 
-    # Admin Session Input
+    # A. Admin Session Input
     if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_SESSION":
         admin_states.pop(user_id, None)
         status_msg = await message.reply_text("Validating session...")
@@ -282,187 +369,236 @@ async def message_handler(client: Client, message: Message):
             await status_msg.edit_text(f"Invalid session: `{str(e)}`")
         return
 
-    # Telegram Link Matching
-    private_match = re.search(r"t\.me/c/(\d+)/(\d+)", text_str)
-    public_match = re.search(r"t\.me/([a-zA-Z0-9_]+)/(\d+)", text_str)
+    # B. Social Media Link Matcher
+    social_pattern = r"(https?://(?:[a-zA-Z0-9-_]+\.)*(?:youtube\.com|youtu\.be|instagram\.com|instagr\.am|tiktok\.com|facebook\.com|fb\.watch)/[^\s]+)"
+    social_match = re.search(social_pattern, text_str)
 
-    if not private_match and not public_match:
-        await message.reply_text("Invalid link. Please send a valid Telegram post link (e.g. `t.me/...`).")
-        return
+    if social_match:
+        target_url = social_match.group(0)
+        platform_name = detect_social_platform(target_url)
+        status = await message.reply_text("Processing link...")
 
-    status = await message.reply_text("Fetching post...")
-    target_msg = None
-    working_client = None
-    is_temp_client = False
-
-    try:
-        # STEP 1: Public Channel handling directly via bot
-        if public_match:
-            chat_username = public_match.group(1)
-            msg_id = int(public_match.group(2))
-            try:
-                msg = await bot.get_messages(chat_username, msg_id)
-                if has_media(msg):
-                    target_msg = msg
-                    working_client = bot
-                    is_temp_client = False
-            except Exception as e:
-                logger.info(f"Bot direct fetch bypass: {e}")
-
-        # STEP 2: Private or restricted post handling via User Sessions
-        if not target_msg:
-            active_sessions = await asyncio.to_thread(sync_get_all_sessions)
-            if not active_sessions:
-                await status.edit_text("Post is private or restricted, but no User Session is connected in database. Add via /admin.")
-                return
-
-            if private_match:
-                chat_id = int("-100" + private_match.group(1))
-                msg_id = int(private_match.group(2))
-            else:
-                chat_id = public_match.group(1)
-                msg_id = int(public_match.group(2))
-
-            for sess in active_sessions:
-                temp_client = Client(
-                    f"sess_{int(time.time()*1000)}",
-                    api_id=API_ID,
-                    api_hash=API_HASH,
-                    session_string=sess['session_string'],
-                    in_memory=True
-                )
-                try:
-                    await asyncio.wait_for(temp_client.start(), timeout=10)
-                    msg = await asyncio.wait_for(temp_client.get_messages(chat_id, msg_id), timeout=10)
-                    if has_media(msg):
-                        target_msg = msg
-                        working_client = temp_client
-                        is_temp_client = True
-                        break
-                    await temp_client.stop()
-                except Exception as ex:
-                    logger.warning(f"Session failed: {ex}")
-                    if temp_client.is_connected:
-                        await temp_client.stop()
-
-        if not target_msg or not working_client:
-            await status.edit_text("Media not found. Make sure the connected session account is a member of that channel.")
-            return
-
-        # STEP 3: Download and Upload Media
-        progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
-
-        # Album Handling
-        if target_msg.media_group_id:
-            group_messages = await working_client.get_media_group(target_msg.chat.id, target_msg.id)
-            downloaded_files, media_list, gif_files = [], [], []
-
-            for idx, msg in enumerate(group_messages):
-                if has_media(msg):
-                    progress_status[user_id]["start_time"] = time.time()
-                    file_path = await working_client.download_media(
-                        msg,
-                        progress=progress_bar,
-                        progress_args=(status, f"Downloading ({idx+1}/{len(group_messages)})", user_id)
-                    )
-                    if file_path:
-                        downloaded_files.append(file_path)
-
-                        if is_gif_message(msg):
-                            gif_files.append((file_path, msg.caption or ""))
-                            continue
-
-                        cap = msg.caption.strip() if msg.caption else ""
-                        if msg.video or (msg.document and msg.document.mime_type and "video" in msg.document.mime_type):
-                            media_list.append(InputMediaVideo(file_path, caption=cap))
-                        elif msg.photo or (msg.document and msg.document.mime_type and "image" in msg.document.mime_type):
-                            media_list.append(InputMediaPhoto(file_path, caption=cap))
-
-            sent_msgs = []
-            if media_list:
-                await status.edit_text("Uploading album...")
-                sent_msgs = await client.send_media_group(chat_id=message.chat.id, media=media_list)
-
-            if gif_files:
-                await status.edit_text("Uploading GIF(s)...")
-                for gpath, gcap in gif_files:
-                    gmsg = await client.send_animation(chat_id=message.chat.id, animation=gpath, caption=gcap)
-                    sent_msgs.append(gmsg)
-
-            for path in downloaded_files:
-                if os.path.exists(path):
-                    os.remove(path)
-
-            if media_list or gif_files:
-                asyncio.create_task(asyncio.to_thread(sync_increment_downloads))
-                await status.delete()
-                del_ids = [message.id] + [m.id for m in sent_msgs]
-                asyncio.create_task(auto_delete_messages(message.chat.id, del_ids, 300))
-            else:
-                await status.edit_text("No downloadable media in this album.")
-
-        # Single Media Handling
-        else:
-            is_gif = is_gif_message(target_msg)
-            caption = target_msg.caption.strip() if target_msg.caption else ""
-            media_type = "GIF" if is_gif else ("Video" if target_msg.video else ("Photo" if target_msg.photo else "Document"))
-
-            progress_status[user_id]["start_time"] = time.time()
-            file_path = await working_client.download_media(
-                target_msg,
-                progress=progress_bar,
-                progress_args=(status, f"Downloading {media_type}", user_id)
+        try:
+            file_path, thumb_path, title, duration, width, height = await asyncio.to_thread(
+                extract_and_download_social, target_url, user_id
             )
 
             if not file_path or not os.path.exists(file_path):
-                await status.edit_text("Failed to download media file.")
+                await status.edit_text("Failed to download video. Link might be private, geo-blocked, or unsupported.")
                 return
 
-            progress_status[user_id]["start_time"] = time.time()
-            sent_msg = None
+            progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
 
-            if is_gif:
-                sent_msg = await client.send_animation(
-                    chat_id=message.chat.id, animation=file_path, caption=caption,
-                    progress=progress_bar, progress_args=(status, f"Uploading {media_type}", user_id)
-                )
-            elif target_msg.video:
-                sent_msg = await client.send_video(
-                    chat_id=message.chat.id,
-                    video=file_path,
-                    caption=caption,
-                    supports_streaming=True,
-                    progress=progress_bar,
-                    progress_args=(status, f"Uploading {media_type}", user_id)
-                )
-            elif target_msg.photo:
-                sent_msg = await client.send_photo(
-                    chat_id=message.chat.id, photo=file_path, caption=caption,
-                    progress=progress_bar, progress_args=(status, f"Uploading {media_type}", user_id)
-                )
-            elif target_msg.document or target_msg.audio or target_msg.voice:
-                sent_msg = await client.send_document(
-                    chat_id=message.chat.id, document=file_path, caption=caption,
-                    progress=progress_bar, progress_args=(status, f"Uploading {media_type}", user_id)
-                )
+            sent_msg = await client.send_video(
+                chat_id=message.chat.id,
+                video=file_path,
+                thumb=thumb_path if (thumb_path and os.path.exists(thumb_path)) else None,
+                caption=f"**{title[:60]}**" if title else "",
+                duration=int(duration or 0),
+                width=width,
+                height=height,
+                supports_streaming=True,
+                progress=progress_bar,
+                progress_args=(status, "Uploading Video", user_id)
+            )
 
             if os.path.exists(file_path):
                 os.remove(file_path)
+            if thumb_path and os.path.exists(thumb_path):
+                os.remove(thumb_path)
 
-            asyncio.create_task(asyncio.to_thread(sync_increment_downloads))
+            asyncio.create_task(asyncio.to_thread(sync_increment_downloads, platform_name))
             await status.delete()
 
             if sent_msg:
                 del_ids = [message.id, sent_msg.id]
                 asyncio.create_task(auto_delete_messages(message.chat.id, del_ids, 300))
 
-    except Exception as e:
-        logger.error(f"Download/Upload error: {e}", exc_info=True)
-        await status.edit_text(f"Error occurred: `{str(e)}`")
+        except Exception as e:
+            logger.error(f"Social download error: {e}")
+            await status.edit_text(f"Download Error: `{str(e)[:120]}`")
+        return
 
-    finally:
-        if is_temp_client and working_client and working_client.is_connected:
-            await working_client.stop()
+    # C. Telegram Link Matcher
+    private_match = re.search(r"t\.me/c/(\d+)/(\d+)", text_str)
+    public_match = re.search(r"t\.me/([a-zA-Z0-9_]+)/(\d+)", text_str)
+
+    if private_match or public_match:
+        status = await message.reply_text("Fetching post...")
+        target_msg = None
+        working_client = None
+        is_temp_client = False
+
+        try:
+            # Step 1: Try public fetch directly with bot
+            if public_match:
+                chat_username = public_match.group(1)
+                msg_id = int(public_match.group(2))
+                try:
+                    msg = await bot.get_messages(chat_username, msg_id)
+                    if has_media(msg):
+                        target_msg = msg
+                        working_client = bot
+                        is_temp_client = False
+                except Exception as e:
+                    logger.info(f"Direct bot fetch bypass: {e}")
+
+            # Step 2: Try connected User Sessions for private / restricted channels
+            if not target_msg:
+                active_sessions = await asyncio.to_thread(sync_get_all_sessions)
+                if not active_sessions:
+                    await status.edit_text("This post requires a User Session. Add via /admin.")
+                    return
+
+                if private_match:
+                    chat_id = int("-100" + private_match.group(1))
+                    msg_id = int(private_match.group(2))
+                else:
+                    chat_id = public_match.group(1)
+                    msg_id = int(public_match.group(2))
+
+                for sess in active_sessions:
+                    temp_client = Client(
+                        f"sess_{int(time.time()*1000)}",
+                        api_id=API_ID,
+                        api_hash=API_HASH,
+                        session_string=sess['session_string'],
+                        in_memory=True
+                    )
+                    try:
+                        await asyncio.wait_for(temp_client.start(), timeout=10)
+                        msg = await asyncio.wait_for(temp_client.get_messages(chat_id, msg_id), timeout=10)
+                        if has_media(msg):
+                            target_msg = msg
+                            working_client = temp_client
+                            is_temp_client = True
+                            break
+                        await temp_client.stop()
+                    except Exception as ex:
+                        logger.warning(f"Session test failed: {ex}")
+                        if temp_client.is_connected:
+                            await temp_client.stop()
+
+            if not target_msg or not working_client:
+                await status.edit_text("Media not found. Make sure the link is correct and the connected session account has joined this channel.")
+                return
+
+            progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
+
+            # Handle Album
+            if target_msg.media_group_id:
+                group_messages = await working_client.get_media_group(target_msg.chat.id, target_msg.id)
+                downloaded_files, media_list, gif_files = [], [], []
+
+                for idx, msg in enumerate(group_messages):
+                    if has_media(msg):
+                        progress_status[user_id]["start_time"] = time.time()
+                        file_path = await working_client.download_media(
+                            msg,
+                            progress=progress_bar,
+                            progress_args=(status, f"Downloading ({idx+1}/{len(group_messages)})", user_id)
+                        )
+                        if file_path:
+                            downloaded_files.append(file_path)
+
+                            if is_gif_message(msg):
+                                gif_files.append((file_path, msg.caption or ""))
+                                continue
+
+                            cap = msg.caption.strip() if msg.caption else ""
+                            if msg.video or (msg.document and msg.document.mime_type and "video" in msg.document.mime_type):
+                                media_list.append(InputMediaVideo(file_path, caption=cap))
+                            elif msg.photo or (msg.document and msg.document.mime_type and "image" in msg.document.mime_type):
+                                media_list.append(InputMediaPhoto(file_path, caption=cap))
+
+                sent_msgs = []
+                if media_list:
+                    await status.edit_text("Uploading album...")
+                    sent_msgs = await client.send_media_group(chat_id=message.chat.id, media=media_list)
+
+                if gif_files:
+                    await status.edit_text("Uploading GIF(s)...")
+                    for gpath, gcap in gif_files:
+                        gmsg = await client.send_animation(chat_id=message.chat.id, animation=gpath, caption=gcap)
+                        sent_msgs.append(gmsg)
+
+                for path in downloaded_files:
+                    if os.path.exists(path):
+                        os.remove(path)
+
+                if media_list or gif_files:
+                    asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram"))
+                    await status.delete()
+                    del_ids = [message.id] + [m.id for m in sent_msgs]
+                    asyncio.create_task(auto_delete_messages(message.chat.id, del_ids, 300))
+                else:
+                    await status.edit_text("No downloadable media in this album.")
+
+            # Handle Single File
+            else:
+                is_gif = is_gif_message(target_msg)
+                caption = target_msg.caption.strip() if target_msg.caption else ""
+                media_type = "GIF" if is_gif else ("Video" if target_msg.video else ("Photo" if target_msg.photo else "Document"))
+
+                progress_status[user_id]["start_time"] = time.time()
+                file_path = await working_client.download_media(
+                    target_msg,
+                    progress=progress_bar,
+                    progress_args=(status, f"Downloading {media_type}", user_id)
+                )
+
+                if not file_path or not os.path.exists(file_path):
+                    await status.edit_text("Failed to download media file.")
+                    return
+
+                progress_status[user_id]["start_time"] = time.time()
+                sent_msg = None
+
+                if is_gif:
+                    sent_msg = await client.send_animation(
+                        chat_id=message.chat.id, animation=file_path, caption=caption,
+                        progress=progress_bar, progress_args=(status, f"Uploading {media_type}", user_id)
+                    )
+                elif target_msg.video:
+                    sent_msg = await client.send_video(
+                        chat_id=message.chat.id,
+                        video=file_path,
+                        caption=caption,
+                        supports_streaming=True,
+                        progress=progress_bar,
+                        progress_args=(status, f"Uploading {media_type}", user_id)
+                    )
+                elif target_msg.photo:
+                    sent_msg = await client.send_photo(
+                        chat_id=message.chat.id, photo=file_path, caption=caption,
+                        progress=progress_bar, progress_args=(status, f"Uploading {media_type}", user_id)
+                    )
+                elif target_msg.document or target_msg.audio or target_msg.voice:
+                    sent_msg = await client.send_document(
+                        chat_id=message.chat.id, document=file_path, caption=caption,
+                        progress=progress_bar, progress_args=(status, f"Uploading {media_type}", user_id)
+                    )
+
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+
+                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram"))
+                await status.delete()
+
+                if sent_msg:
+                    del_ids = [message.id, sent_msg.id]
+                    asyncio.create_task(auto_delete_messages(message.chat.id, del_ids, 300))
+
+        except Exception as e:
+            logger.error(f"Download/Upload error: {e}", exc_info=True)
+            await status.edit_text(f"Error occurred: `{str(e)}`")
+
+        finally:
+            if is_temp_client and working_client and working_client.is_connected:
+                await working_client.stop()
+        return
+
+    await message.reply_text("Invalid link. Send Telegram, YouTube, TikTok, Instagram, or Facebook URL.")
 
 # 4. Callback Query Handler
 @bot.on_callback_query()
@@ -484,7 +620,7 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
     elif data == "btn_help":
         await callback_query.message.edit_text(
             "**How to use:**\n\n"
-            "Send any Telegram channel post link (public `t.me/...` or private `t.me/c/...`) to download media.",
+            "Send any supported link (Telegram, YouTube, TikTok, Instagram, Facebook) to download directly.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_home")]])
         )
         await callback_query.answer()
@@ -499,7 +635,7 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
             buttons.append([InlineKeyboardButton("Admin Panel", callback_data="btn_admin_shortcut")])
 
         await callback_query.message.edit_text(
-            "Send any Telegram post link to download media.",
+            "Send any supported link to download media.",
             reply_markup=InlineKeyboardMarkup(buttons)
         )
         await callback_query.answer()
@@ -525,15 +661,19 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
         await callback_query.answer()
 
     elif data == "btn_stats":
-        users, downloads = await asyncio.to_thread(sync_get_stats)
+        users, downloads, platforms = await asyncio.to_thread(sync_get_stats)
         all_sess = await asyncio.to_thread(sync_get_all_sessions)
 
         stats_lines = [
             "**Bot Statistics**\n",
             f"• Total Users: `{users}`",
             f"• Total Downloads: `{downloads}`",
-            f"• Active Sessions: `{len(all_sess)}`"
+            f"• Active Sessions: `{len(all_sess)}`\n",
+            "**Platform Breakdown:**"
         ]
+        for p_name, p_count in platforms.items():
+            stats_lines.append(f"• {p_name}: `{p_count}`")
+
         await callback_query.message.edit_text(
             "\n".join(stats_lines),
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
