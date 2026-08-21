@@ -52,7 +52,6 @@ def add_session_to_db(session_str: str, name: str, user_id: int):
             "user_id": user_id,
             "created_at": time.time()
         })
-        # Mark user as session user
         db.collection("bot_users").document(str(user_id)).set({"has_session": True}, merge=True)
         return True, "Success"
     except Exception as e:
@@ -85,10 +84,9 @@ def delete_session_from_db(doc_id: str):
         if doc.exists:
             uid = doc.to_dict().get("user_id")
             db.collection("telegram_sessions").document(doc_id).delete()
-            # Check if user has remaining sessions
             if uid:
                 remaining = list(db.collection("telegram_sessions").where("user_id", "==", uid).stream())
-                if not remaining:
+                if not remaining and uid != OWNER_ID:
                     db.collection("bot_users").document(str(uid)).set({"has_session": False}, merge=True)
         return True
     except Exception as e:
@@ -102,7 +100,10 @@ def user_has_session(user_id: int) -> bool:
         return False
     try:
         docs = db.collection("telegram_sessions").where("user_id", "==", user_id).stream()
-        return any(docs)
+        if any(docs):
+            return True
+        user_doc = db.collection("bot_users").document(str(user_id)).get()
+        return bool(user_doc.exists and user_doc.to_dict().get("has_session", False))
     except Exception:
         return False
 
@@ -115,7 +116,7 @@ def track_user(user_id: int, username: str, name: str):
         has_session = False
         if doc.exists:
             has_session = doc.to_dict().get("has_session", False)
-        elif user_id == OWNER_ID:
+        if user_id == OWNER_ID:
             has_session = True
 
         doc_ref.set({
@@ -145,9 +146,21 @@ def get_stats():
         return 0, 0, 0, 0, {}
     try:
         users_docs = list(db.collection("bot_users").stream())
+        sessions = get_all_sessions()
+        
+        session_user_ids = {s.get("user_id") for s in sessions if s.get("user_id")}
+        session_user_ids.add(OWNER_ID)
+
         total_users = len(users_docs)
-        session_users = sum(1 for u in users_docs if u.to_dict().get("has_session", False))
-        no_session_users = total_users - session_users
+        session_users = 0
+
+        for u in users_docs:
+            u_data = u.to_dict()
+            uid = u_data.get("user_id")
+            if uid in session_user_ids or u_data.get("has_session", False):
+                session_users += 1
+
+        regular_users = max(0, total_users - session_users)
 
         stat_doc = db.collection("bot_stats").document("global_analytics").get()
         if stat_doc.exists:
@@ -164,7 +177,8 @@ def get_stats():
         else:
             total_dl = 0
             platform_counts = {}
-        return total_users, no_session_users, session_users, total_dl, platform_counts
+
+        return total_users, regular_users, session_users, total_dl, platform_counts
     except Exception as e:
         print(f"Stats Error: {e}", flush=True)
         return 0, 0, 0, 0, {}
@@ -244,10 +258,10 @@ def extract_and_download_social(url: str, user_id: int):
     timestamp = int(time.time())
     out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_%(id)s.%(ext)s")
     
+    # Standalone stream without ffmpeg merge dependency
     ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'format': 'best[ext=mp4]/best',
         'outtmpl': out_template,
-        'merge_output_format': 'mp4',
         'quiet': True,
         'no_warnings': True,
         'max_filesize': 1900 * 1024 * 1024,
@@ -282,7 +296,7 @@ async def main():
         track_user(user.id, user.username, user.first_name)
 
         has_sess = user_has_session(user.id)
-        status_tag = "Session Active" if has_sess else "Standard User"
+        status_tag = "Session Active" if has_sess else "Regular User"
 
         buttons = [[
             InlineKeyboardButton("Ping", callback_data="btn_ping"),
@@ -351,6 +365,9 @@ async def main():
             return
 
         elif data == "btn_back_home":
+            has_sess = user_has_session(user_id)
+            status_tag = "Session Active" if has_sess else "Regular User"
+
             buttons = [[
                 InlineKeyboardButton("Ping", callback_data="btn_ping"),
                 InlineKeyboardButton("Help", callback_data="btn_help")
@@ -359,6 +376,7 @@ async def main():
                 buttons.append([InlineKeyboardButton("Admin Panel", callback_data="btn_admin_shortcut")])
 
             await callback_query.message.edit_text(
+                f"Account Status: `{status_tag}`\n\n"
                 "Send any supported link (YouTube, TikTok, Instagram, Facebook).",
                 reply_markup=InlineKeyboardMarkup(buttons)
             )
@@ -385,13 +403,13 @@ async def main():
             await callback_query.answer()
 
         elif data == "btn_stats":
-            total_u, no_sess_u, sess_u, downloads, platforms = get_stats()
+            total_u, reg_u, sess_u, downloads, platforms = get_stats()
             all_sess = get_all_sessions()
 
             stats_lines = [
                 "**Bot Statistics**\n",
                 f"• Total Users: `{total_u}`",
-                f"• Regular Users (No Session): `{no_sess_u}`",
+                f"• Regular Users: `{reg_u}`",
                 f"• Session Users: `{sess_u}`",
                 f"• Total Downloads: `{downloads}`",
                 f"• Active Sessions: `{len(all_sess)}`\n",
@@ -483,7 +501,7 @@ async def main():
                 await status_msg.edit_text(f"Invalid session: `{str(e)}`")
             return
 
-        # 2. Social Media Links (Available to All Users)
+        # 2. Social Media Links
         social_pattern = r"(https?://(?:[a-zA-Z0-9-_]+\.)*(?:youtube\.com|youtu\.be|instagram\.com|instagr\.am|tiktok\.com|facebook\.com|fb\.watch)/[^\s]+)"
         social_match = re.search(social_pattern, text_str)
 
@@ -525,7 +543,7 @@ async def main():
                 await status.edit_text(f"Download Error: `{str(e)[:100]}`")
             return
 
-        # 3. Telegram Post Links (Requires Session ID / Authorized Access)
+        # 3. Telegram Post Links
         private_pattern = r"t\.me/c/(\d+)/(\d+)"
         public_pattern = r"t\.me/([^/]+)/(\d+)"
 
@@ -533,7 +551,6 @@ async def main():
         public_match = re.search(public_pattern, text_str)
 
         if private_match or public_match:
-            # Check if user is authorized or has session ID
             if not user_has_session(user_id):
                 await message.reply_text(
                     "**Access Restricted:**\n"
