@@ -4,7 +4,6 @@ import time
 import json
 import asyncio
 from aiohttp import web
-import yt_dlp
 from pyrogram import Client, filters, idle
 from pyrogram.types import (
     Message, InputMediaVideo, InputMediaPhoto,
@@ -13,13 +12,6 @@ from pyrogram.types import (
 from pyrogram.errors import FloodWait
 import firebase_admin
 from firebase_admin import credentials, firestore
-
-# Optional FFmpeg setup
-try:
-    import static_ffmpeg
-    static_ffmpeg.add_paths()
-except ImportError:
-    pass
 
 # Configuration
 API_ID = int(os.environ.get("API_ID", "35039821"))
@@ -31,13 +23,6 @@ PORT = int(os.environ.get("PORT", "8080"))
 
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
-# Generate cookies.txt from Environment Variable if provided
-YT_COOKIES_ENV = os.environ.get("YT_COOKIES", "").strip()
-if YT_COOKIES_ENV:
-    with open("cookies.txt", "w", encoding="utf-8") as f:
-        f.write(YT_COOKIES_ENV)
-    print("Cookies: Loaded from YT_COOKIES environment variable", flush=True)
 
 # Database Initialization
 db = None
@@ -118,42 +103,29 @@ def sync_track_user(user_id: int, username: str, name: str):
     except Exception as e:
         print(f"Tracking Error: {e}", flush=True)
 
-def sync_increment_downloads(platform: str):
+def sync_increment_downloads():
     if not db:
         return
     try:
         doc_ref = db.collection("bot_stats").document("global_analytics")
         doc_ref.set({
             "total_downloads": firestore.Increment(1),
-            f"count_{platform}": firestore.Increment(1)
+            "count_telegram": firestore.Increment(1)
         }, merge=True)
     except Exception as e:
         print(f"Metric Error: {e}", flush=True)
 
 def sync_get_stats():
     if not db:
-        return 0, 0, {}
+        return 0, 0
     try:
         users = sum(1 for _ in db.collection("bot_users").stream())
         stat_doc = db.collection("bot_stats").document("global_analytics").get()
-        if stat_doc.exists:
-            data = stat_doc.to_dict()
-            total_dl = data.get("total_downloads", 0)
-            platform_counts = {
-                "Telegram": data.get("count_telegram", 0),
-                "YouTube": data.get("count_youtube", 0),
-                "TikTok": data.get("count_tiktok", 0),
-                "Instagram": data.get("count_instagram", 0),
-                "Facebook": data.get("count_facebook", 0),
-                "Others": data.get("count_others", 0)
-            }
-        else:
-            total_dl = 0
-            platform_counts = {}
-        return users, total_dl, platform_counts
+        total_dl = stat_doc.to_dict().get("total_downloads", 0) if stat_doc.exists else 0
+        return users, total_dl
     except Exception as e:
         print(f"Stats Error: {e}", flush=True)
-        return 0, 0, {}
+        return 0, 0
 
 # Progress Tracker
 admin_states = {}
@@ -209,151 +181,42 @@ def is_gif_message(msg):
 def has_media(msg):
     return bool(msg and (msg.video or msg.photo or msg.document or msg.animation or msg.media_group_id))
 
-def detect_social_platform(url: str) -> str:
-    url_lower = url.lower()
-    if "tiktok.com" in url_lower:
-        return "tiktok"
-    elif "youtube.com" in url_lower or "youtu.be" in url_lower:
-        return "youtube"
-    elif "instagram.com" in url_lower or "instagr.am" in url_lower:
-        return "instagram"
-    elif "facebook.com" in url_lower or "fb.watch" in url_lower:
-        return "facebook"
-    return "others"
-
-def extract_and_download_social(url: str, user_id: int):
-    timestamp = int(time.time())
-    out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_%(id)s.%(ext)s")
-
-    ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
-        'outtmpl': out_template,
-        'merge_output_format': 'mp4',
-        'writethumbnail': True,
-        'quiet': True,
-        'no_warnings': True,
-        'max_filesize': 1900 * 1024 * 1024,
-    }
-
-    if os.path.exists("cookies.txt"):
-        ydl_opts['cookiefile'] = "cookies.txt"
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        if not info:
-            return None, None, None, 0, None, None
-
-        file_path = ydl.prepare_filename(info)
-        if not os.path.exists(file_path):
-            base, _ = os.path.splitext(file_path)
-            if os.path.exists(base + ".mp4"):
-                file_path = base + ".mp4"
-
-        base_path, _ = os.path.splitext(file_path)
-        thumb_path = None
-        for ext in [".jpg", ".jpeg", ".webp", ".png"]:
-            if os.path.exists(base_path + ext):
-                thumb_path = base_path + ext
-                break
-
-        title = info.get('title', 'Downloaded Media')
-        duration = int(info.get('duration') or 0)
-        width = info.get('width')
-        height = info.get('height')
-
-        width_val = int(width) if (width and str(width).isdigit() and int(width) > 0) else None
-        height_val = int(height) if (height and str(height).isdigit() and int(height) > 0) else None
-
-        return file_path, thumb_path, title, duration, width_val, height_val
-
 # Handlers
-@bot.on_message(filters.command(["start"]) & filters.private)
-async def start_cmd(client: Client, message: Message):
+@bot.on_message(filters.all & filters.private)
+async def global_message_router(client: Client, message: Message):
     user = message.from_user
+    if not user:
+        return
+
+    text_str = (message.text or message.caption or "").strip()
+    print(f"[DEBUG] Message from {user.id}: {text_str}", flush=True)
+
+    # Track user
     asyncio.create_task(asyncio.to_thread(sync_track_user, user.id, user.username, user.first_name))
 
-    buttons = [[
-        InlineKeyboardButton("Ping", callback_data="btn_ping"),
-        InlineKeyboardButton("Help", callback_data="btn_help")
-    ]]
-    if user.id == OWNER_ID:
-        buttons.append([InlineKeyboardButton("Admin Panel", callback_data="btn_admin_shortcut")])
-
-    text = (
-        f"**Hello {user.first_name},**\n\n"
-        "Send any media link to download:\n"
-        "• **Supported:** Telegram, YouTube, TikTok, Instagram, Facebook\n"
-        "• Sent media auto-deletes in 5 minutes."
-    )
-    await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
-
-@bot.on_message(filters.command(["admin", "panel"]) & filters.private)
-async def admin_panel(client: Client, message: Message):
-    if message.from_user.id != OWNER_ID:
-        await message.reply_text("Access denied.")
-        return
-
-    all_sess = await asyncio.to_thread(sync_get_all_sessions)
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Stats", callback_data="btn_stats")],
-        [InlineKeyboardButton("Add Session", callback_data="btn_add_session")],
-        [InlineKeyboardButton(f"Sessions ({len(all_sess)})", callback_data="btn_list_sessions")],
-        [InlineKeyboardButton("Delete Session", callback_data="btn_del_menu")]
-    ])
-
-    db_status = "Online" if db else "Offline"
-    text = (
-        "**Admin Panel**\n\n"
-        f"• DB: `{db_status}`\n"
-        f"• Active Sessions: `{len(all_sess)}`"
-    )
-    await message.reply_text(text, reply_markup=keyboard)
-
-@bot.on_callback_query()
-async def callback_handler(client: Client, callback_query: CallbackQuery):
-    data = callback_query.data
-    user_id = callback_query.from_user.id
-
-    if data == "btn_ping":
-        start_ping = time.time()
-        msg = await callback_query.message.edit_text("Checking...")
-        latency = (time.time() - start_ping) * 1000
-        await msg.edit_text(
-            f"**Latency:** `{latency:.1f} ms`",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_home")]])
-        )
-        await callback_query.answer()
-        return
-
-    elif data == "btn_help":
-        await callback_query.message.edit_text(
-            "**How to use:**\n\n"
-            "Send any media link (Telegram, YouTube, TikTok, Instagram, Facebook) to download directly.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_home")]])
-        )
-        await callback_query.answer()
-        return
-
-    elif data == "btn_back_home":
+    # /start command
+    if text_str.startswith("/start"):
         buttons = [[
             InlineKeyboardButton("Ping", callback_data="btn_ping"),
             InlineKeyboardButton("Help", callback_data="btn_help")
         ]]
-        if user_id == OWNER_ID:
+        if user.id == OWNER_ID:
             buttons.append([InlineKeyboardButton("Admin Panel", callback_data="btn_admin_shortcut")])
 
-        await callback_query.message.edit_text(
-            "Send any supported link to download media.",
-            reply_markup=InlineKeyboardMarkup(buttons)
+        text = (
+            f"**Hello {user.first_name},**\n\n"
+            "Send any Telegram post link (Public or Private Channel) to download media.\n"
+            "• Sent media auto-deletes in 5 minutes."
         )
-        await callback_query.answer()
+        await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
 
-    if user_id != OWNER_ID:
-        await callback_query.answer("Unauthorized.", show_alert=True)
-        return
+    # /admin or /panel command
+    if text_str.startswith("/admin") or text_str.startswith("/panel"):
+        if user.id != OWNER_ID:
+            await message.reply_text("Access denied.")
+            return
 
-    if data in ["btn_admin_shortcut", "btn_back_admin"]:
         all_sess = await asyncio.to_thread(sync_get_all_sessions)
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("Stats", callback_data="btn_stats")],
@@ -361,92 +224,19 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
             [InlineKeyboardButton(f"Sessions ({len(all_sess)})", callback_data="btn_list_sessions")],
             [InlineKeyboardButton("Delete Session", callback_data="btn_del_menu")]
         ])
+
         db_status = "Online" if db else "Offline"
-        await callback_query.message.edit_text(
-            f"**Admin Panel**\n\n• DB: `{db_status}`\n• Sessions: `{len(all_sess)}`",
-            reply_markup=keyboard
+        text = (
+            "**Admin Panel**\n\n"
+            f"• DB: `{db_status}`\n"
+            f"• Active Sessions: `{len(all_sess)}`"
         )
-        await callback_query.answer()
-
-    elif data == "btn_stats":
-        users, downloads, platforms = await asyncio.to_thread(sync_get_stats)
-        all_sess = await asyncio.to_thread(sync_get_all_sessions)
-
-        stats_lines = [
-            "**Bot Statistics**\n",
-            f"• Total Users: `{users}`",
-            f"• Total Downloads: `{downloads}`",
-            f"• Active Sessions: `{len(all_sess)}`\n",
-            "**Platform Breakdown:**"
-        ]
-        for p_name, p_count in platforms.items():
-            stats_lines.append(f"• {p_name}: `{p_count}`")
-
-        await callback_query.message.edit_text(
-            "\n".join(stats_lines),
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
-        )
-        await callback_query.answer()
-
-    elif data == "btn_add_session":
-        admin_states[user_id] = "WAITING_SESSION"
-        await callback_query.message.reply(
-            "Send the Pyrogram `SESSION_STRING` in reply to this message.",
-            reply_markup=ForceReply(selective=True)
-        )
-        await callback_query.answer()
-
-    elif data == "btn_list_sessions":
-        all_sess = await asyncio.to_thread(sync_get_all_sessions)
-        if not all_sess:
-            await callback_query.message.edit_text(
-                "No active sessions found.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
-            )
-        else:
-            lines = ["**Active Sessions:**\n"]
-            for idx, s in enumerate(all_sess, 1):
-                lines.append(f"{idx}. `{s['account_name']}` (ID: `{s['doc_id']}`)")
-            await callback_query.message.edit_text(
-                "\n".join(lines),
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
-            )
-        await callback_query.answer()
-
-    elif data == "btn_del_menu":
-        all_sess = await asyncio.to_thread(sync_get_all_sessions)
-        if not all_sess:
-            await callback_query.answer("No sessions found.", show_alert=True)
-            return
-
-        buttons = [[InlineKeyboardButton(s['account_name'], callback_data=f"del_{s['doc_id']}")] for s in all_sess]
-        buttons.append([InlineKeyboardButton("Back", callback_data="btn_back_admin")])
-        await callback_query.message.edit_text("Select session to remove:", reply_markup=InlineKeyboardMarkup(buttons))
-        await callback_query.answer()
-
-    elif data.startswith("del_"):
-        doc_id = data.split("del_")[1]
-        success = await asyncio.to_thread(sync_delete_session, doc_id)
-        msg = "Session deleted." if success else "Failed to delete session."
-        await callback_query.message.edit_text(
-            msg,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
-        )
-        await callback_query.answer()
-
-@bot.on_message(filters.text & filters.private)
-async def text_handler(client: Client, message: Message):
-    user_id = message.from_user.id
-    text_str = message.text.strip()
-
-    if text_str.startswith("/"):
+        await message.reply_text(text, reply_markup=keyboard)
         return
 
-    asyncio.create_task(asyncio.to_thread(sync_track_user, user_id, message.from_user.username, message.from_user.first_name))
-
-    # 1. Admin Session Input
-    if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_SESSION":
-        admin_states.pop(user_id, None)
+    # Admin Session Input Waiter
+    if user.id == OWNER_ID and admin_states.get(user.id) == "WAITING_SESSION":
+        admin_states.pop(user.id, None)
         status_msg = await message.reply_text("Validating session...")
 
         test_client = Client(f"test_{time.time()}", api_id=API_ID, api_hash=API_HASH, session_string=text_str, in_memory=True)
@@ -465,56 +255,7 @@ async def text_handler(client: Client, message: Message):
             await status_msg.edit_text(f"Invalid session: `{str(e)}`")
         return
 
-    # 2. Social Media Links
-    social_pattern = r"(https?://(?:[a-zA-Z0-9-_]+\.)*(?:youtube\.com|youtu\.be|instagram\.com|instagr\.am|tiktok\.com|facebook\.com|fb\.watch)/[^\s]+)"
-    social_match = re.search(social_pattern, text_str)
-
-    if social_match:
-        target_url = social_match.group(0)
-        platform_name = detect_social_platform(target_url)
-        status = await message.reply_text("Processing link...")
-
-        try:
-            file_path, thumb_path, title, duration, width, height = await asyncio.to_thread(
-                extract_and_download_social, target_url, user_id
-            )
-
-            if not file_path or not os.path.exists(file_path):
-                await status.edit_text("Failed to download video. Link might be private or broken.")
-                return
-
-            progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
-
-            sent_msg = await client.send_video(
-                chat_id=message.chat.id,
-                video=file_path,
-                thumb=thumb_path if (thumb_path and os.path.exists(thumb_path)) else None,
-                caption=f"**{title[:60]}**" if title else "",
-                duration=int(duration or 0),
-                width=width,
-                height=height,
-                supports_streaming=True,
-                progress=progress_bar,
-                progress_args=(status, "Uploading Video", user_id)
-            )
-
-            if os.path.exists(file_path):
-                os.remove(file_path)
-            if thumb_path and os.path.exists(thumb_path):
-                os.remove(thumb_path)
-
-            asyncio.create_task(asyncio.to_thread(sync_increment_downloads, platform_name))
-            await status.delete()
-
-            if sent_msg:
-                del_ids = [message.id, sent_msg.id]
-                asyncio.create_task(auto_delete_messages(message.chat.id, del_ids, 300))
-
-        except Exception as e:
-            await status.edit_text(f"Download Error: `{str(e)[:100]}`")
-        return
-
-    # 3. Telegram Links
+    # Telegram Links (Public & Private)
     private_pattern = r"t\.me/c/(\d+)/(\d+)"
     public_pattern = r"t\.me/([^/]+)/(\d+)"
 
@@ -571,6 +312,7 @@ async def text_handler(client: Client, message: Message):
         progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
 
         try:
+            # Media Group (Album)
             if target_msg.media_group_id:
                 group_messages = await working_user_client.get_media_group(chat_id, msg_id)
                 downloaded_files, media_list, gif_files = [], [], []
@@ -611,13 +353,14 @@ async def text_handler(client: Client, message: Message):
                         os.remove(path)
 
                 if media_list or gif_files:
-                    asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram"))
+                    asyncio.create_task(asyncio.to_thread(sync_increment_downloads))
                     await status.delete()
                     del_ids = [message.id] + [m.id for m in sent_msgs]
                     asyncio.create_task(auto_delete_messages(message.chat.id, del_ids, 300))
                 else:
                     await status.edit_text("No downloadable media in this album.")
 
+            # Single Media
             else:
                 is_gif = is_gif_message(target_msg)
                 caption = target_msg.caption.strip() if target_msg.caption else ""
@@ -661,7 +404,7 @@ async def text_handler(client: Client, message: Message):
                 if os.path.exists(file_path):
                     os.remove(file_path)
 
-                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram"))
+                asyncio.create_task(asyncio.to_thread(sync_increment_downloads))
                 await status.delete()
 
                 if sent_msg:
@@ -675,7 +418,130 @@ async def text_handler(client: Client, message: Message):
                 await working_user_client.stop()
         return
 
-    await message.reply_text("Invalid link. Send Telegram, YouTube, TikTok, Instagram, or Facebook URL.")
+    if not text_str.startswith("/"):
+        await message.reply_text("Invalid link. Please send a valid Telegram post link (e.g. `t.me/...` or `t.me/c/...`).")
+
+@bot.on_callback_query()
+async def callback_handler(client: Client, callback_query: CallbackQuery):
+    data = callback_query.data
+    user_id = callback_query.from_user.id
+
+    if data == "btn_ping":
+        start_ping = time.time()
+        msg = await callback_query.message.edit_text("Checking...")
+        latency = (time.time() - start_ping) * 1000
+        await msg.edit_text(
+            f"**Latency:** `{latency:.1f} ms`",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_home")]])
+        )
+        await callback_query.answer()
+        return
+
+    elif data == "btn_help":
+        await callback_query.message.edit_text(
+            "**How to use:**\n\n"
+            "Send any Telegram channel post link (public `t.me/...` or private `t.me/c/...`) to download media directly.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_home")]])
+        )
+        await callback_query.answer()
+        return
+
+    elif data == "btn_back_home":
+        buttons = [[
+            InlineKeyboardButton("Ping", callback_data="btn_ping"),
+            InlineKeyboardButton("Help", callback_data="btn_help")
+        ]]
+        if user_id == OWNER_ID:
+            buttons.append([InlineKeyboardButton("Admin Panel", callback_data="btn_admin_shortcut")])
+
+        await callback_query.message.edit_text(
+            "Send any Telegram post link to download media.",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        await callback_query.answer()
+        return
+
+    if user_id != OWNER_ID:
+        await callback_query.answer("Unauthorized.", show_alert=True)
+        return
+
+    if data in ["btn_admin_shortcut", "btn_back_admin"]:
+        all_sess = await asyncio.to_thread(sync_get_all_sessions)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Stats", callback_data="btn_stats")],
+            [InlineKeyboardButton("Add Session", callback_data="btn_add_session")],
+            [InlineKeyboardButton(f"Sessions ({len(all_sess)})", callback_data="btn_list_sessions")],
+            [InlineKeyboardButton("Delete Session", callback_data="btn_del_menu")]
+        ])
+        db_status = "Online" if db else "Offline"
+        await callback_query.message.edit_text(
+            f"**Admin Panel**\n\n• DB: `{db_status}`\n• Sessions: `{len(all_sess)}`",
+            reply_markup=keyboard
+        )
+        await callback_query.answer()
+
+    elif data == "btn_stats":
+        users, downloads = await asyncio.to_thread(sync_get_stats)
+        all_sess = await asyncio.to_thread(sync_get_all_sessions)
+
+        stats_lines = [
+            "**Bot Statistics**\n",
+            f"• Total Users: `{users}`",
+            f"• Total Downloads: `{downloads}`",
+            f"• Active Sessions: `{len(all_sess)}`"
+        ]
+
+        await callback_query.message.edit_text(
+            "\n".join(stats_lines),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
+        )
+        await callback_query.answer()
+
+    elif data == "btn_add_session":
+        admin_states[user_id] = "WAITING_SESSION"
+        await callback_query.message.reply(
+            "Send the Pyrogram `SESSION_STRING` in reply to this message.",
+            reply_markup=ForceReply(selective=True)
+        )
+        await callback_query.answer()
+
+    elif data == "btn_list_sessions":
+        all_sess = await asyncio.to_thread(sync_get_all_sessions)
+        if not all_sess:
+            await callback_query.message.edit_text(
+                "No active sessions found.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
+            )
+        else:
+            lines = ["**Active Sessions:**\n"]
+            for idx, s in enumerate(all_sess, 1):
+                lines.append(f"{idx}. `{s['account_name']}` (ID: `{s['doc_id']}`)")
+            await callback_query.message.edit_text(
+                "\n".join(lines),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
+            )
+        await callback_query.answer()
+
+    elif data == "btn_del_menu":
+        all_sess = await asyncio.to_thread(sync_get_all_sessions)
+        if not all_sess:
+            await callback_query.answer("No sessions found.", show_alert=True)
+            return
+
+        buttons = [[InlineKeyboardButton(s['account_name'], callback_data=f"del_{s['doc_id']}")] for s in all_sess]
+        buttons.append([InlineKeyboardButton("Back", callback_data="btn_back_admin")])
+        await callback_query.message.edit_text("Select session to remove:", reply_markup=InlineKeyboardMarkup(buttons))
+        await callback_query.answer()
+
+    elif data.startswith("del_"):
+        doc_id = data.split("del_")[1]
+        success = await asyncio.to_thread(sync_delete_session, doc_id)
+        msg = "Session deleted." if success else "Failed to delete session."
+        await callback_query.message.edit_text(
+            msg,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
+        )
+        await callback_query.answer()
 
 async def handle_ping(request):
     return web.Response(text="Bot is running.")
@@ -690,7 +556,7 @@ async def main():
 
     try:
         await bot.start()
-        print("Bot started successfully and listening.", flush=True)
+        print("Telegram Downloader Bot started successfully.", flush=True)
     except FloodWait as e:
         print(f"FloodWait: Sleeping {e.value}s", flush=True)
         await asyncio.sleep(e.value + 5)
