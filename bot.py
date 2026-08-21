@@ -235,27 +235,27 @@ def detect_social_platform(url: str) -> str:
         return "facebook"
     return "others"
 
-# Cookie-less Social Media Extractor
+# Robust Social Media Extractor
 def extract_and_download_social(url: str, user_id: int):
     timestamp = int(time.time())
     out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_%(id)s.%(ext)s")
 
     ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'outtmpl': out_template,
         'merge_output_format': 'mp4',
-        'writethumbnail': True,
         'quiet': True,
         'no_warnings': True,
+        'noplaylist': True,
         'max_filesize': 1900 * 1024 * 1024,
-        # Cookie-less trick: Android & iOS client emulation for YouTube
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios', 'tv_embedded']
+                'player_client': ['android', 'ios', 'web']
             }
         },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
         }
     }
@@ -263,30 +263,34 @@ def extract_and_download_social(url: str, user_id: int):
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         if not info:
-            return None, None, None, 0, None, None
+            return None, None, 0, 0, 0
 
+        # Resolve File Path
         file_path = ydl.prepare_filename(info)
         if not os.path.exists(file_path):
             base, _ = os.path.splitext(file_path)
-            if os.path.exists(base + ".mp4"):
-                file_path = base + ".mp4"
+            for ext in [".mp4", ".mkv", ".webm", ".mov"]:
+                if os.path.exists(base + ext):
+                    file_path = base + ext
+                    break
 
-        base_path, _ = os.path.splitext(file_path)
-        thumb_path = None
-        for ext in [".jpg", ".jpeg", ".webp", ".png"]:
-            if os.path.exists(base_path + ext):
-                thumb_path = base_path + ext
-                break
+        if not os.path.exists(file_path):
+            # Fallback search in downloads directory
+            prefix = f"{user_id}_{timestamp}_"
+            for f in os.listdir(DOWNLOAD_DIR):
+                if f.startswith(prefix) and not f.endswith(".part"):
+                    file_path = os.path.join(DOWNLOAD_DIR, f)
+                    break
 
-        title = info.get('title', 'Downloaded Media')
+        if not os.path.exists(file_path):
+            return None, None, 0, 0, 0
+
+        title = str(info.get('title') or "Video")
         duration = int(info.get('duration') or 0)
-        width = info.get('width')
-        height = info.get('height')
+        width = int(info.get('width') or 0)
+        height = int(info.get('height') or 0)
 
-        width_val = int(width) if (width and str(width).isdigit() and int(width) > 0) else None
-        height_val = int(height) if (height and str(height).isdigit() and int(height) > 0) else None
-
-        return file_path, thumb_path, title, duration, width_val, height_val
+        return file_path, title, duration, width, height
 
 # 1. /start Command Handler
 @bot.on_message(filters.command(["start"]) & filters.private)
@@ -379,33 +383,36 @@ async def message_handler(client: Client, message: Message):
         status = await message.reply_text("Processing link...")
 
         try:
-            file_path, thumb_path, title, duration, width, height = await asyncio.to_thread(
+            file_path, title, duration, width, height = await asyncio.to_thread(
                 extract_and_download_social, target_url, user_id
             )
 
             if not file_path or not os.path.exists(file_path):
-                await status.edit_text("Failed to download video. Link might be private, geo-blocked, or unsupported.")
+                await status.edit_text("Failed to download video. Link might be private, broken, or restricted.")
                 return
 
             progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
 
-            sent_msg = await client.send_video(
-                chat_id=message.chat.id,
-                video=file_path,
-                thumb=thumb_path if (thumb_path and os.path.exists(thumb_path)) else None,
-                caption=f"**{title[:60]}**" if title else "",
-                duration=int(duration or 0),
-                width=width,
-                height=height,
-                supports_streaming=True,
-                progress=progress_bar,
-                progress_args=(status, "Uploading Video", user_id)
-            )
+            # Build safe kwargs without None values
+            send_kwargs = {
+                "chat_id": message.chat.id,
+                "video": file_path,
+                "caption": f"**{title[:60]}**" if title else "",
+                "supports_streaming": True,
+                "progress": progress_bar,
+                "progress_args": (status, "Uploading Video", user_id)
+            }
+            if duration > 0:
+                send_kwargs["duration"] = duration
+            if width > 0:
+                send_kwargs["width"] = width
+            if height > 0:
+                send_kwargs["height"] = height
+
+            sent_msg = await client.send_video(**send_kwargs)
 
             if os.path.exists(file_path):
                 os.remove(file_path)
-            if thumb_path and os.path.exists(thumb_path):
-                os.remove(thumb_path)
 
             asyncio.create_task(asyncio.to_thread(sync_increment_downloads, platform_name))
             await status.delete()
@@ -415,7 +422,7 @@ async def message_handler(client: Client, message: Message):
                 asyncio.create_task(auto_delete_messages(message.chat.id, del_ids, 300))
 
         except Exception as e:
-            logger.error(f"Social download error: {e}")
+            logger.error(f"Social download error: {e}", exc_info=True)
             await status.edit_text(f"Download Error: `{str(e)[:120]}`")
         return
 
