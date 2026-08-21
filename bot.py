@@ -202,17 +202,20 @@ def is_gif_message(msg):
 def has_media(msg):
     return bool(msg and (msg.video or msg.photo or msg.document or msg.audio or msg.voice or msg.animation or msg.media_group_id))
 
-# 1. /start Command
+# 1. /start Command Handler
 @bot.on_message(filters.command(["start"]) & filters.private)
 async def start_handler(client: Client, message: Message):
     user = message.from_user
-    logger.info(f"Received /start from {user.id} ({user.first_name})")
+    if not user:
+        return
+    user_id = user.id
+    logger.info(f"Received /start from {user_id} ({user.first_name})")
     
     buttons = [[
         InlineKeyboardButton("Ping", callback_data="btn_ping"),
         InlineKeyboardButton("Help", callback_data="btn_help")
     ]]
-    if user.id == OWNER_ID:
+    if user_id == OWNER_ID:
         buttons.append([InlineKeyboardButton("Admin Panel", callback_data="btn_admin_shortcut")])
 
     text = (
@@ -221,13 +224,13 @@ async def start_handler(client: Client, message: Message):
         "• Sent media auto-deletes in 5 minutes."
     )
     await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
-    asyncio.create_task(asyncio.to_thread(sync_track_user, user.id, user.username, user.first_name))
+    asyncio.create_task(asyncio.to_thread(sync_track_user, user_id, user.username, user.first_name))
 
-# 2. /admin Command
+# 2. /admin Command Handler
 @bot.on_message(filters.command(["admin", "panel"]) & filters.private)
 async def admin_handler(client: Client, message: Message):
     user = message.from_user
-    if user.id != OWNER_ID:
+    if not user or user.id != OWNER_ID:
         await message.reply_text("Access denied.")
         return
 
@@ -247,17 +250,20 @@ async def admin_handler(client: Client, message: Message):
 @bot.on_message(filters.text & filters.private)
 async def message_handler(client: Client, message: Message):
     user = message.from_user
+    if not user:
+        return
+    user_id = user.id
     text_str = message.text.strip()
     
     if text_str.startswith("/"):
         return
 
-    logger.info(f"Processing message from {user.id}: {text_str}")
-    asyncio.create_task(asyncio.to_thread(sync_track_user, user.id, user.username, user.first_name))
+    logger.info(f"Processing message from {user_id}: {text_str}")
+    asyncio.create_task(asyncio.to_thread(sync_track_user, user_id, user.username, user.first_name))
 
     # Admin Session Input
-    if user.id == OWNER_ID and admin_states.get(user.id) == "WAITING_SESSION":
-        admin_states.pop(user.id, None)
+    if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_SESSION":
+        admin_states.pop(user_id, None)
         status_msg = await message.reply_text("Validating session...")
 
         test_client = Client(f"test_{int(time.time())}", api_id=API_ID, api_hash=API_HASH, session_string=text_str, in_memory=True)
@@ -290,7 +296,7 @@ async def message_handler(client: Client, message: Message):
     is_temp_client = False
 
     try:
-        # STEP 1: If Public Channel, try fetching with Bot first
+        # STEP 1: Public Channel handling directly via bot
         if public_match:
             chat_username = public_match.group(1)
             msg_id = int(public_match.group(2))
@@ -301,13 +307,13 @@ async def message_handler(client: Client, message: Message):
                     working_client = bot
                     is_temp_client = False
             except Exception as e:
-                logger.info(f"Bot failed to fetch public post directly ({e}), checking User Sessions...")
+                logger.info(f"Bot direct fetch bypass: {e}")
 
-        # STEP 2: If Private or Bot failed, try connected User Sessions
+        # STEP 2: Private or restricted post handling via User Sessions
         if not target_msg:
             active_sessions = await asyncio.to_thread(sync_get_all_sessions)
             if not active_sessions:
-                await status.edit_text("Post not accessible by bot and no User Sessions found in database. Add via /admin.")
+                await status.edit_text("Post is private or restricted, but no User Session is connected in database. Add via /admin.")
                 return
 
             if private_match:
@@ -335,18 +341,18 @@ async def message_handler(client: Client, message: Message):
                         break
                     await temp_client.stop()
                 except Exception as ex:
-                    logger.warning(f"Session test failed: {ex}")
+                    logger.warning(f"Session failed: {ex}")
                     if temp_client.is_connected:
                         await temp_client.stop()
 
         if not target_msg or not working_client:
-            await status.edit_text("Media not found. Make sure the link is correct and the connected session account has joined this channel.")
+            await status.edit_text("Media not found. Make sure the connected session account is a member of that channel.")
             return
 
         # STEP 3: Download and Upload Media
         progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
 
-        # Handle Albums (Media Groups)
+        # Album Handling
         if target_msg.media_group_id:
             group_messages = await working_client.get_media_group(target_msg.chat.id, target_msg.id)
             downloaded_files, media_list, gif_files = [], [], []
@@ -395,7 +401,7 @@ async def message_handler(client: Client, message: Message):
             else:
                 await status.edit_text("No downloadable media in this album.")
 
-        # Handle Single Media
+        # Single Media Handling
         else:
             is_gif = is_gif_message(target_msg)
             caption = target_msg.caption.strip() if target_msg.caption else ""
