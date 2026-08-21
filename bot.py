@@ -14,7 +14,7 @@ from pyrogram.errors import FloodWait
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# Optional FFmpeg setup (Will not crash if missing)
+# Optional FFmpeg setup
 try:
     import static_ffmpeg
     static_ffmpeg.add_paths()
