@@ -1,6 +1,4 @@
-pyrogram
+hydrogram
 tgcrypto
 firebase-admin
 aiohttp
-yt-dlp
-static-ffmpeg
