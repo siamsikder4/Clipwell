@@ -14,7 +14,7 @@ from pyrogram.errors import FloodWait
 from aiohttp import web
 import yt_dlp
 
-# Configuration & Environment Variables
+# Configuration
 API_ID = int(os.environ.get("API_ID", "35039821"))
 API_HASH = os.environ.get("API_HASH", "77df805f1700eeefec861de6c93ee2ae").strip()
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
@@ -22,7 +22,6 @@ FIREBASE_KEY_RAW = os.environ.get("FIREBASE_KEY", "").strip()
 OWNER_ID = 6142774415
 PORT = int(os.environ.get("PORT", "8080"))
 
-# Temp Downloads Directory
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
@@ -38,7 +37,7 @@ if FIREBASE_KEY_RAW:
     except Exception as e:
         print(f"Firebase Error: {e}", flush=True)
 
-# Database Helpers
+# Database Operations
 def add_session_to_db(session_str: str, name: str):
     if not db:
         return False, "Database offline"
@@ -98,28 +97,44 @@ def track_user(user_id: int, username: str, name: str):
     except Exception as e:
         print(f"User Tracking Error: {e}", flush=True)
 
-def increment_downloads():
+def increment_downloads(platform: str = "others"):
     if not db:
         return
     try:
         doc_ref = db.collection("bot_stats").document("global_analytics")
-        doc_ref.set({"total_downloads": firestore.Increment(1)}, merge=True)
+        doc_ref.set({
+            "total_downloads": firestore.Increment(1),
+            f"count_{platform}": firestore.Increment(1)
+        }, merge=True)
     except Exception as e:
         print(f"Download Metric Error: {e}", flush=True)
 
 def get_stats():
     if not db:
-        return 0, 0
+        return 0, 0, {}
     try:
         users = sum(1 for _ in db.collection("bot_users").stream())
         stat_doc = db.collection("bot_stats").document("global_analytics").get()
-        downloads = stat_doc.to_dict().get("total_downloads", 0) if stat_doc.exists else 0
-        return users, downloads
+        if stat_doc.exists:
+            data = stat_doc.to_dict()
+            total = data.get("total_downloads", 0)
+            platform_counts = {
+                "Telegram": data.get("count_telegram", 0),
+                "YouTube": data.get("count_youtube", 0),
+                "TikTok": data.get("count_tiktok", 0),
+                "Instagram": data.get("count_instagram", 0),
+                "Facebook": data.get("count_facebook", 0),
+                "Others": data.get("count_others", 0)
+            }
+        else:
+            total = 0
+            platform_counts = {}
+        return users, total, platform_counts
     except Exception as e:
         print(f"Stats Error: {e}", flush=True)
-        return 0, 0
+        return 0, 0, {}
 
-# UI State & Rate Limiters
+# Progress Tracker
 admin_states = {}
 progress_status = {}
 
@@ -153,8 +168,7 @@ async def progress_bar(current, total, status_msg, action_name, user_id):
     text = (
         f"**{action_name}**\n"
         f"`[{bar}]` {percentage:.1f}%\n"
-        f"Size: `{curr_mb:.1f}/{tot_mb:.1f} MB`\n"
-        f"Speed: `{speed:.1f} MB/s` | ETA: `{format_time(eta)}`"
+        f"• `{curr_mb:.1f}/{tot_mb:.1f} MB` | `{speed:.1f} MB/s` | `{format_time(eta)}`"
     )
     try:
         await status_msg.edit_text(text)
@@ -178,6 +192,18 @@ def is_gif_message(msg):
 
 def has_media(msg):
     return bool(msg and (msg.video or msg.photo or msg.document or msg.animation or msg.media_group_id))
+
+def detect_social_platform(url: str) -> str:
+    url_lower = url.lower()
+    if "tiktok.com" in url_lower:
+        return "tiktok"
+    elif "youtube.com" in url_lower or "youtu.be" in url_lower:
+        return "youtube"
+    elif "instagram.com" in url_lower or "instagr.am" in url_lower:
+        return "instagram"
+    elif "facebook.com" in url_lower or "fb.watch" in url_lower:
+        return "facebook"
+    return "others"
 
 def extract_and_download_social(url: str, user_id: int):
     timestamp = int(time.time())
@@ -319,16 +345,21 @@ async def main():
             await callback_query.answer()
 
         elif data == "btn_stats":
-            users, downloads = get_stats()
+            users, downloads, platforms = get_stats()
             all_sess = get_all_sessions()
-            text = (
-                "**Bot Statistics**\n\n"
-                f"• Users: `{users}`\n"
-                f"• Downloads: `{downloads}`\n"
-                f"• Sessions: `{len(all_sess)}`"
-            )
+
+            stats_lines = [
+                "**Bot Statistics**\n",
+                f"• Users: `{users}`",
+                f"• Total Downloads: `{downloads}`",
+                f"• Sessions: `{len(all_sess)}`\n",
+                "**Platform Breakdown:**"
+            ]
+            for p_name, p_count in platforms.items():
+                stats_lines.append(f"• {p_name}: `{p_count}`")
+
             await callback_query.message.edit_text(
-                text,
+                "\n".join(stats_lines),
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
             )
             await callback_query.answer()
@@ -410,13 +441,15 @@ async def main():
                 await status_msg.edit_text(f"Invalid session: `{str(e)}`")
             return
 
-        # 2. Social Media Links (YouTube, TikTok, Instagram, Facebook)
+        # 2. Social Media Links
         social_pattern = r"(https?://(?:[a-zA-Z0-9-_]+\.)*(?:youtube\.com|youtu\.be|instagram\.com|instagr\.am|tiktok\.com|facebook\.com|fb\.watch)/[^\s]+)"
         social_match = re.search(social_pattern, text_str)
 
         if social_match:
             target_url = social_match.group(0)
-            status = await message.reply_text("Processing media URL...")
+            platform_name = detect_social_platform(target_url)
+            status = await message.reply_text("Processing link...")
+
             try:
                 file_path, title, duration = await asyncio.to_thread(extract_and_download_social, target_url, user_id)
                 
@@ -439,7 +472,7 @@ async def main():
                 if os.path.exists(file_path):
                     os.remove(file_path)
 
-                increment_downloads()
+                increment_downloads(platform_name)
                 await status.delete()
 
                 if sent_msg:
@@ -510,7 +543,7 @@ async def main():
         progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
 
         try:
-            # Telegram Media Group (Album)
+            # Telegram Album
             if target_msg.media_group_id:
                 group_messages = await working_user_client.get_media_group(chat_id, msg_id)
                 downloaded_files, media_list, gif_files = [], [], []
@@ -551,7 +584,7 @@ async def main():
                         os.remove(path)
 
                 if media_list or gif_files:
-                    increment_downloads()
+                    increment_downloads("telegram")
                     await status.delete()
                     del_ids = [message.id] + [m.id for m in sent_msgs]
                     asyncio.create_task(auto_delete_messages(bot, message.chat.id, del_ids, 300))
@@ -598,7 +631,7 @@ async def main():
                 if os.path.exists(file_path):
                     os.remove(file_path)
 
-                increment_downloads()
+                increment_downloads("telegram")
                 await status.delete()
 
                 if sent_msg:
