@@ -62,13 +62,12 @@ if FIREBASE_KEY_RAW:
     except Exception as e:
         logger.error(f"Firebase Init Error: {e}")
 
-# Bot Client
+# Persistent Bot Client (Saves session to disk to prevent FloodWait on restarts)
 bot = Client(
-    "bot_instance",
+    "bot_persistent_session",
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    in_memory=True
+    bot_token=BOT_TOKEN
 )
 
 # Database Helpers
@@ -235,12 +234,11 @@ def detect_social_platform(url: str) -> str:
         return "facebook"
     return "others"
 
-# Facebook Audio+Video Guaranteed Extractor
+# Facebook & Social Media Extractor (Combined format priority)
 def extract_and_download_social(url: str, user_id: int):
     timestamp = int(time.time())
     out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_%(id)s.%(ext)s")
 
-    # Priority to combined format (audio+video together) to prevent GIF behavior
     ydl_opts = {
         'format': 'best[ext=mp4][vcodec!=none][acodec!=none]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'outtmpl': out_template,
@@ -266,7 +264,6 @@ def extract_and_download_social(url: str, user_id: int):
         if not info:
             return None, None, 0, 0, 0
 
-        # Resolve Final File Path
         file_path = ydl.prepare_filename(info)
         if not os.path.exists(file_path):
             base, _ = os.path.splitext(file_path)
@@ -436,7 +433,6 @@ async def message_handler(client: Client, message: Message):
         is_temp_client = False
 
         try:
-            # Step 1: Try public fetch directly with bot
             if public_match:
                 chat_username = public_match.group(1)
                 msg_id = int(public_match.group(2))
@@ -449,7 +445,6 @@ async def message_handler(client: Client, message: Message):
                 except Exception as e:
                     logger.info(f"Direct bot fetch bypass: {e}")
 
-            # Step 2: Try connected User Sessions for private / restricted channels
             if not target_msg:
                 active_sessions = await asyncio.to_thread(sync_get_all_sessions)
                 if not active_sessions:
