@@ -49,10 +49,9 @@ def add_session_to_db(session_str: str, name: str, session_user_id: int):
         db.collection("telegram_sessions").add({
             "session_string": session_str,
             "account_name": name,
-            "user_id": session_user_id,
+            "user_id": int(session_user_id),
             "created_at": time.time()
         })
-        # Mark user in users list
         db.collection("bot_users").document(str(session_user_id)).set({"has_session": True}, merge=True)
         return True, "Success"
     except Exception as e:
@@ -81,21 +80,20 @@ def get_user_sessions(user_id: int):
     if not db:
         return []
     try:
-        # Owner has access to all active sessions
-        if user_id == OWNER_ID:
+        # Owner gets access to all active sessions
+        if int(user_id) == OWNER_ID:
             return get_all_sessions()
         
-        docs = db.collection("telegram_sessions").where("user_id", "==", user_id).stream()
-        sessions = []
-        for doc in docs:
-            data = doc.to_dict()
-            sessions.append({
-                "doc_id": doc.id,
-                "session_string": data.get("session_string"),
-                "account_name": data.get("account_name", "Unknown"),
-                "user_id": data.get("user_id")
-            })
-        return sessions
+        all_sess = get_all_sessions()
+        user_sess = []
+        
+        for s in all_sess:
+            raw_uid = s.get("user_id")
+            if raw_uid is not None:
+                # Match both integer and string formats
+                if str(raw_uid).strip() == str(user_id).strip():
+                    user_sess.append(s)
+        return user_sess
     except Exception as e:
         print(f"Fetch User Sessions Error: {e}", flush=True)
         return []
@@ -109,8 +107,8 @@ def delete_session_from_db(doc_id: str):
             uid = doc.to_dict().get("user_id")
             db.collection("telegram_sessions").document(doc_id).delete()
             if uid:
-                remaining = list(db.collection("telegram_sessions").where("user_id", "==", uid).stream())
-                if not remaining and uid != OWNER_ID:
+                remaining = get_user_sessions(uid)
+                if not remaining and int(uid) != OWNER_ID:
                     db.collection("bot_users").document(str(uid)).set({"has_session": False}, merge=True)
         return True
     except Exception as e:
@@ -121,13 +119,12 @@ def track_user(user_id: int, username: str, name: str):
     if not db:
         return
     try:
-        # Verify session presence directly from database
-        sessions = get_user_sessions(user_id)
-        has_session = bool(sessions) or (user_id == OWNER_ID)
+        user_sess = get_user_sessions(user_id)
+        has_session = bool(user_sess) or (int(user_id) == OWNER_ID)
 
         doc_ref = db.collection("bot_users").document(str(user_id))
         doc_ref.set({
-            "user_id": user_id,
+            "user_id": int(user_id),
             "username": username or "N/A",
             "name": name,
             "has_session": has_session,
@@ -155,15 +152,15 @@ def get_stats():
         users_docs = list(db.collection("bot_users").stream())
         sessions = get_all_sessions()
         
-        session_user_ids = {s.get("user_id") for s in sessions if s.get("user_id")}
-        session_user_ids.add(OWNER_ID)
+        session_user_ids = {str(s.get("user_id")).strip() for s in sessions if s.get("user_id") is not None}
+        session_user_ids.add(str(OWNER_ID))
 
         total_users = len(users_docs)
         session_users = 0
 
         for u in users_docs:
             u_data = u.to_dict()
-            uid = u_data.get("user_id")
+            uid = str(u_data.get("user_id")).strip()
             if uid in session_user_ids or u_data.get("has_session", False):
                 session_users += 1
 
@@ -301,7 +298,6 @@ async def main():
         user = message.from_user
         track_user(user.id, user.username, user.first_name)
 
-        # Direct database session verification
         user_sessions = get_user_sessions(user.id)
         status_tag = "Session Active" if user_sessions else "Regular User"
 
@@ -383,7 +379,7 @@ async def main():
 
             await callback_query.message.edit_text(
                 f"Account Status: `{status_tag}`\n\n"
-                "Send any supported link to download.",
+                "Send any supported video link to download.",
                 reply_markup=InlineKeyboardMarkup(buttons)
             )
             await callback_query.answer()
@@ -448,7 +444,7 @@ async def main():
             else:
                 lines = ["**Active Sessions:**\n"]
                 for idx, s in enumerate(all_sess, 1):
-                    lines.append(f"{idx}. `{s['account_name']}` (UID: `{s['user_id']}`)")
+                    lines.append(f"{idx}. `{s['account_name']}` (UID: `{s.get('user_id', 'N/A')}`)")
                 await callback_query.message.edit_text(
                     "\n".join(lines),
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
@@ -496,7 +492,7 @@ async def main():
                 await test_client.start()
                 me = await test_client.get_me()
                 acc_name = f"{me.first_name} (@{me.username})" if me.username else me.first_name
-                session_owner_id = me.id  # Extract real Telegram User ID of this session
+                session_owner_id = int(me.id)
                 await test_client.stop()
 
                 success, err_msg = add_session_to_db(text_str, acc_name, session_owner_id)
@@ -504,7 +500,7 @@ async def main():
                     await status_msg.edit_text(
                         f"Session saved permanently:\n"
                         f"• Name: `{acc_name}`\n"
-                        f"• Owner User ID: `{session_owner_id}`"
+                        f"• User ID: `{session_owner_id}`"
                     )
                 else:
                     await status_msg.edit_text(f"Error: `{err_msg}`")
@@ -512,7 +508,7 @@ async def main():
                 await status_msg.edit_text(f"Invalid session: `{str(e)}`")
             return
 
-        # 2. Social Media Links (Open to Everyone)
+        # 2. Social Media Links
         social_pattern = r"(https?://(?:[a-zA-Z0-9-_]+\.)*(?:youtube\.com|youtu\.be|instagram\.com|instagr\.am|tiktok\.com|facebook\.com|fb\.watch)/[^\s]+)"
         social_match = re.search(social_pattern, text_str)
 
@@ -554,7 +550,7 @@ async def main():
                 await status.edit_text(f"Download Error: `{str(e)[:100]}`")
             return
 
-        # 3. Telegram Post Links (Strictly checked against user's session)
+        # 3. Telegram Post Links
         private_pattern = r"t\.me/c/(\d+)/(\d+)"
         public_pattern = r"t\.me/([^/]+)/(\d+)"
 
@@ -615,7 +611,7 @@ async def main():
             progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
 
             try:
-                # Telegram Media Group (Album)
+                # Telegram Album
                 if target_msg.media_group_id:
                     group_messages = await working_user_client.get_media_group(chat_id, msg_id)
                     downloaded_files, media_list, gif_files = [], [], []
