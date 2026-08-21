@@ -38,7 +38,7 @@ if FIREBASE_KEY_RAW:
         print(f"Firebase Error: {e}", flush=True)
 
 # Database Operations
-def add_session_to_db(session_str: str, name: str, session_user_id: int):
+def add_session_to_db(session_str: str, name: str):
     if not db:
         return False, "Database offline"
     try:
@@ -49,10 +49,8 @@ def add_session_to_db(session_str: str, name: str, session_user_id: int):
         db.collection("telegram_sessions").add({
             "session_string": session_str,
             "account_name": name,
-            "user_id": int(session_user_id),
             "created_at": time.time()
         })
-        db.collection("bot_users").document(str(session_user_id)).set({"has_session": True}, merge=True)
         return True, "Success"
     except Exception as e:
         return False, str(e)
@@ -68,48 +66,18 @@ def get_all_sessions():
             sessions.append({
                 "doc_id": doc.id,
                 "session_string": data.get("session_string"),
-                "account_name": data.get("account_name", "Unknown"),
-                "user_id": data.get("user_id")
+                "account_name": data.get("account_name", "Unknown")
             })
         return sessions
     except Exception as e:
         print(f"Fetch Sessions Error: {e}", flush=True)
         return []
 
-def get_user_sessions(user_id: int):
-    if not db:
-        return []
-    try:
-        # Owner gets access to all active sessions
-        if int(user_id) == OWNER_ID:
-            return get_all_sessions()
-        
-        all_sess = get_all_sessions()
-        user_sess = []
-        
-        for s in all_sess:
-            raw_uid = s.get("user_id")
-            if raw_uid is not None:
-                # Match both integer and string formats
-                if str(raw_uid).strip() == str(user_id).strip():
-                    user_sess.append(s)
-        return user_sess
-    except Exception as e:
-        print(f"Fetch User Sessions Error: {e}", flush=True)
-        return []
-
 def delete_session_from_db(doc_id: str):
     if not db:
         return False
     try:
-        doc = db.collection("telegram_sessions").document(doc_id).get()
-        if doc.exists:
-            uid = doc.to_dict().get("user_id")
-            db.collection("telegram_sessions").document(doc_id).delete()
-            if uid:
-                remaining = get_user_sessions(uid)
-                if not remaining and int(uid) != OWNER_ID:
-                    db.collection("bot_users").document(str(uid)).set({"has_session": False}, merge=True)
+        db.collection("telegram_sessions").document(doc_id).delete()
         return True
     except Exception as e:
         print(f"Delete Session Error: {e}", flush=True)
@@ -119,15 +87,11 @@ def track_user(user_id: int, username: str, name: str):
     if not db:
         return
     try:
-        user_sess = get_user_sessions(user_id)
-        has_session = bool(user_sess) or (int(user_id) == OWNER_ID)
-
         doc_ref = db.collection("bot_users").document(str(user_id))
         doc_ref.set({
             "user_id": int(user_id),
             "username": username or "N/A",
             "name": name,
-            "has_session": has_session,
             "last_active": time.time()
         }, merge=True)
     except Exception as e:
@@ -147,25 +111,9 @@ def increment_downloads(platform: str = "others"):
 
 def get_stats():
     if not db:
-        return 0, 0, 0, 0, {}
+        return 0, 0, {}
     try:
-        users_docs = list(db.collection("bot_users").stream())
-        sessions = get_all_sessions()
-        
-        session_user_ids = {str(s.get("user_id")).strip() for s in sessions if s.get("user_id") is not None}
-        session_user_ids.add(str(OWNER_ID))
-
-        total_users = len(users_docs)
-        session_users = 0
-
-        for u in users_docs:
-            u_data = u.to_dict()
-            uid = str(u_data.get("user_id")).strip()
-            if uid in session_user_ids or u_data.get("has_session", False):
-                session_users += 1
-
-        regular_users = max(0, total_users - session_users)
-
+        users = sum(1 for _ in db.collection("bot_users").stream())
         stat_doc = db.collection("bot_stats").document("global_analytics").get()
         if stat_doc.exists:
             data = stat_doc.to_dict()
@@ -182,10 +130,10 @@ def get_stats():
             total_dl = 0
             platform_counts = {}
 
-        return total_users, regular_users, session_users, total_dl, platform_counts
+        return users, total_dl, platform_counts
     except Exception as e:
         print(f"Stats Error: {e}", flush=True)
-        return 0, 0, 0, 0, {}
+        return 0, 0, {}
 
 # Progress Tracker
 admin_states = {}
@@ -298,9 +246,6 @@ async def main():
         user = message.from_user
         track_user(user.id, user.username, user.first_name)
 
-        user_sessions = get_user_sessions(user.id)
-        status_tag = "Session Active" if user_sessions else "Regular User"
-
         buttons = [[
             InlineKeyboardButton("Ping", callback_data="btn_ping"),
             InlineKeyboardButton("Help", callback_data="btn_help")
@@ -309,11 +254,9 @@ async def main():
             buttons.append([InlineKeyboardButton("Admin Panel", callback_data="btn_admin_shortcut")])
 
         text = (
-            f"**Hello {user.first_name},**\n"
-            f"Account Status: `{status_tag}`\n\n"
-            "Send any supported link to download:\n"
-            "• **Supported:** YouTube, TikTok, Instagram, Facebook\n"
-            "• **Telegram Links:** Requires registered session\n"
+            f"**Hello {user.first_name},**\n\n"
+            "Send any supported link to download media:\n"
+            "• **Supported:** Telegram, YouTube, TikTok, Instagram, Facebook\n"
             "• Sent media auto-deletes in 5 minutes."
         )
         await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
@@ -359,17 +302,13 @@ async def main():
         elif data == "btn_help":
             await callback_query.message.edit_text(
                 "**How to use:**\n\n"
-                "1. Send video URL (YouTube, TikTok, Instagram, Facebook) to download directly.\n"
-                "2. Telegram private channel links require your account session registered in the bot.",
+                "Send any media link (Telegram, YouTube, TikTok, Instagram, Facebook) to download directly.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_home")]])
             )
             await callback_query.answer()
             return
 
         elif data == "btn_back_home":
-            user_sessions = get_user_sessions(user_id)
-            status_tag = "Session Active" if user_sessions else "Regular User"
-
             buttons = [[
                 InlineKeyboardButton("Ping", callback_data="btn_ping"),
                 InlineKeyboardButton("Help", callback_data="btn_help")
@@ -378,8 +317,7 @@ async def main():
                 buttons.append([InlineKeyboardButton("Admin Panel", callback_data="btn_admin_shortcut")])
 
             await callback_query.message.edit_text(
-                f"Account Status: `{status_tag}`\n\n"
-                "Send any supported video link to download.",
+                "Send any supported link to download media.",
                 reply_markup=InlineKeyboardMarkup(buttons)
             )
             await callback_query.answer()
@@ -405,14 +343,12 @@ async def main():
             await callback_query.answer()
 
         elif data == "btn_stats":
-            total_u, reg_u, sess_u, downloads, platforms = get_stats()
+            users, downloads, platforms = get_stats()
             all_sess = get_all_sessions()
 
             stats_lines = [
                 "**Bot Statistics**\n",
-                f"• Total Users: `{total_u}`",
-                f"• Regular Users: `{reg_u}`",
-                f"• Session Users: `{sess_u}`",
+                f"• Total Users: `{users}`",
                 f"• Total Downloads: `{downloads}`",
                 f"• Active Sessions: `{len(all_sess)}`\n",
                 "**Platform Breakdown:**"
@@ -444,7 +380,7 @@ async def main():
             else:
                 lines = ["**Active Sessions:**\n"]
                 for idx, s in enumerate(all_sess, 1):
-                    lines.append(f"{idx}. `{s['account_name']}` (UID: `{s.get('user_id', 'N/A')}`)")
+                    lines.append(f"{idx}. `{s['account_name']}` (ID: `{s['doc_id']}`)")
                 await callback_query.message.edit_text(
                     "\n".join(lines),
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
@@ -492,16 +428,11 @@ async def main():
                 await test_client.start()
                 me = await test_client.get_me()
                 acc_name = f"{me.first_name} (@{me.username})" if me.username else me.first_name
-                session_owner_id = int(me.id)
                 await test_client.stop()
 
-                success, err_msg = add_session_to_db(text_str, acc_name, session_owner_id)
+                success, err_msg = add_session_to_db(text_str, acc_name)
                 if success:
-                    await status_msg.edit_text(
-                        f"Session saved permanently:\n"
-                        f"• Name: `{acc_name}`\n"
-                        f"• User ID: `{session_owner_id}`"
-                    )
+                    await status_msg.edit_text(f"Session saved: `{acc_name}`")
                 else:
                     await status_msg.edit_text(f"Error: `{err_msg}`")
             except Exception as e:
@@ -550,7 +481,7 @@ async def main():
                 await status.edit_text(f"Download Error: `{str(e)[:100]}`")
             return
 
-        # 3. Telegram Post Links
+        # 3. Telegram Post Links (Uses all active sessions in Firebase)
         private_pattern = r"t\.me/c/(\d+)/(\d+)"
         public_pattern = r"t\.me/([^/]+)/(\d+)"
 
@@ -558,13 +489,9 @@ async def main():
         public_match = re.search(public_pattern, text_str)
 
         if private_match or public_match:
-            user_sessions = get_user_sessions(user_id)
-            if not user_sessions:
-                await message.reply_text(
-                    "**Access Restricted**\n\n"
-                    "Telegram downloads require your own registered session ID.\n"
-                    "You can download videos from YouTube, TikTok, Instagram, and Facebook freely."
-                )
+            active_sessions = get_all_sessions()
+            if not active_sessions:
+                await message.reply_text("No active sessions found in database. Add via /admin.")
                 return
 
             status = await message.reply_text("Fetching post...")
@@ -579,7 +506,7 @@ async def main():
             target_msg = None
             working_user_client = None
 
-            for sess in user_sessions:
+            for sess in active_sessions:
                 temp_client = Client(
                     f"sess_{time.time()}",
                     api_id=API_ID,
@@ -605,13 +532,13 @@ async def main():
                         await temp_client.stop()
 
             if not target_msg or not working_user_client:
-                await status.edit_text("Post not found or your session account is not a member of this channel.")
+                await status.edit_text("Post not found or none of the connected session accounts have joined this channel.")
                 return
 
             progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
 
             try:
-                # Telegram Album
+                # Telegram Media Group (Album)
                 if target_msg.media_group_id:
                     group_messages = await working_user_client.get_media_group(chat_id, msg_id)
                     downloaded_files, media_list, gif_files = [], [], []
@@ -713,7 +640,7 @@ async def main():
                     await working_user_client.stop()
             return
 
-        await message.reply_text("Invalid link. Send YouTube, TikTok, Instagram, or Facebook URL.")
+        await message.reply_text("Invalid link. Send Telegram, YouTube, TikTok, Instagram, or Facebook URL.")
 
     try:
         await bot.start()
