@@ -1,5 +1,5 @@
 pyrogram
 tgcrypto
-aiohttp
 firebase-admin
-pip install yt-dlp
+aiohttp
+yt-dlp
