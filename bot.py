@@ -3,6 +3,7 @@ import re
 import time
 import json
 import asyncio
+import static_ffmpeg
 import firebase_admin
 from firebase_admin import credentials, firestore
 from pyrogram import Client, filters, idle
@@ -13,6 +14,9 @@ from pyrogram.types import (
 from pyrogram.errors import FloodWait
 from aiohttp import web
 import yt_dlp
+
+# Automatically enable FFmpeg on cloud servers
+static_ffmpeg.add_paths()
 
 # Configuration
 API_ID = int(os.environ.get("API_ID", "35039821"))
@@ -210,9 +214,11 @@ def extract_and_download_social(url: str, user_id: int):
     timestamp = int(time.time())
     out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_%(id)s.%(ext)s")
     
+    # Allows merging video & audio smoothly via static-ffmpeg
     ydl_opts = {
-        'format': 'best[ext=mp4]/best',
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
         'outtmpl': out_template,
+        'merge_output_format': 'mp4',
         'quiet': True,
         'no_warnings': True,
         'max_filesize': 1900 * 1024 * 1024,
@@ -481,7 +487,7 @@ async def main():
                 await status.edit_text(f"Download Error: `{str(e)[:100]}`")
             return
 
-        # 3. Telegram Post Links (Uses all active sessions in Firebase)
+        # 3. Telegram Post Links
         private_pattern = r"t\.me/c/(\d+)/(\d+)"
         public_pattern = r"t\.me/([^/]+)/(\d+)"
 
