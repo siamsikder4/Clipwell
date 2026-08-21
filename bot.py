@@ -16,7 +16,7 @@ from hydrogram.errors import FloodWait
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# Auto Setup FFmpeg for audio-video merging
+# Auto Setup FFmpeg
 try:
     import static_ffmpeg
     static_ffmpeg.add_paths()
@@ -62,15 +62,16 @@ if FIREBASE_KEY_RAW:
     except Exception as e:
         logger.error(f"Firebase Init Error: {e}")
 
-# Persistent Bot Client (Saves session locally to prevent FloodWait on restarts)
+# Bot Client with clean session
 bot = Client(
-    "bot_persistent_session",
+    "bot_session",
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN
+    bot_token=BOT_TOKEN,
+    in_memory=True
 )
 
-# Database Helpers (Non-blocking)
+# Database Helpers
 def sync_add_session(session_str: str, name: str):
     if not db:
         return False, "Database offline"
@@ -222,6 +223,17 @@ def is_gif_message(msg):
 def has_media(msg):
     return bool(msg and (msg.video or msg.photo or msg.document or msg.audio or msg.voice or msg.animation or msg.media_group_id))
 
+def unshorten_url(url: str) -> str:
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            return response.geturl()
+    except Exception:
+        return url
+
 def detect_social_platform(url: str) -> str:
     url_lower = url.lower()
     if "tiktok.com" in url_lower:
@@ -234,13 +246,14 @@ def detect_social_platform(url: str) -> str:
         return "facebook"
     return "others"
 
-# Facebook & Social Media Extractor
+# Universal Social Media Extractor
 def extract_and_download_social(url: str, user_id: int):
+    real_url = unshorten_url(url)
     timestamp = int(time.time())
     out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_%(id)s.%(ext)s")
 
     ydl_opts = {
-        'format': 'best[ext=mp4][vcodec!=none][acodec!=none]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'format': 'bestvideo+bestaudio/best',
         'outtmpl': out_template,
         'merge_output_format': 'mp4',
         'quiet': True,
@@ -254,13 +267,12 @@ def extract_and_download_social(url: str, user_id: int):
         },
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
         }
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
+        info = ydl.extract_info(real_url, download=True)
         if not info:
             return None, None, 0, 0, 0
 
@@ -289,67 +301,56 @@ def extract_and_download_social(url: str, user_id: int):
 
         return file_path, title, duration, width, height
 
-# 1. /start Command Handler
-@bot.on_message(filters.command(["start"]) & filters.private)
-async def start_handler(client: Client, message: Message):
+# Primary Message Handler (Direct Private Filter)
+@bot.on_message(filters.private)
+async def private_message_handler(client: Client, message: Message):
     user = message.from_user
     if not user:
         return
     user_id = user.id
-    logger.info(f"Received /start from {user_id} ({user.first_name})")
-    
-    buttons = [[
-        InlineKeyboardButton("Ping", callback_data="btn_ping"),
-        InlineKeyboardButton("Help", callback_data="btn_help")
-    ]]
-    if user_id == OWNER_ID:
-        buttons.append([InlineKeyboardButton("Admin Panel", callback_data="btn_admin_shortcut")])
+    text_str = (message.text or message.caption or "").strip()
 
-    text = (
-        f"**Hello {user.first_name},**\n\n"
-        "Send any media link to download:\n"
-        "• **Supported:** Telegram, YouTube, TikTok, Instagram, Facebook\n"
-        "• Sent media auto-deletes in 5 minutes."
-    )
-    await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+    logger.info(f"Incoming update from {user_id} ({user.first_name}): {text_str}")
     asyncio.create_task(asyncio.to_thread(sync_track_user, user_id, user.username, user.first_name))
 
-# 2. /admin Command Handler
-@bot.on_message(filters.command(["admin", "panel"]) & filters.private)
-async def admin_handler(client: Client, message: Message):
-    user = message.from_user
-    if not user or user.id != OWNER_ID:
-        await message.reply_text("Access denied.")
+    # /start
+    if text_str.startswith("/start"):
+        buttons = [[
+            InlineKeyboardButton("Ping", callback_data="btn_ping"),
+            InlineKeyboardButton("Help", callback_data="btn_help")
+        ]]
+        if user_id == OWNER_ID:
+            buttons.append([InlineKeyboardButton("Admin Panel", callback_data="btn_admin_shortcut")])
+
+        text = (
+            f"**Hello {user.first_name},**\n\n"
+            "Send any media link to download:\n"
+            "• **Supported:** Telegram, YouTube, TikTok, Instagram, Facebook\n"
+            "• Sent media auto-deletes in 5 minutes."
+        )
+        await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
 
-    all_sess = await asyncio.to_thread(sync_get_all_sessions)
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Stats", callback_data="btn_stats")],
-        [InlineKeyboardButton("Add Session", callback_data="btn_add_session")],
-        [InlineKeyboardButton(f"Sessions ({len(all_sess)})", callback_data="btn_list_sessions")],
-        [InlineKeyboardButton("Delete Session", callback_data="btn_del_menu")]
-    ])
+    # /admin
+    if text_str.startswith("/admin") or text_str.startswith("/panel"):
+        if user_id != OWNER_ID:
+            await message.reply_text("Access denied.")
+            return
 
-    db_status = "Online" if db else "Offline"
-    text = f"**Admin Panel**\n\n• DB: `{db_status}`\n• Active Sessions: `{len(all_sess)}`"
-    await message.reply_text(text, reply_markup=keyboard)
+        all_sess = await asyncio.to_thread(sync_get_all_sessions)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Stats", callback_data="btn_stats")],
+            [InlineKeyboardButton("Add Session", callback_data="btn_add_session")],
+            [InlineKeyboardButton(f"Sessions ({len(all_sess)})", callback_data="btn_list_sessions")],
+            [InlineKeyboardButton("Delete Session", callback_data="btn_del_menu")]
+        ])
 
-# 3. Message Router (Social Media + Telegram Links)
-@bot.on_message(filters.text & filters.private)
-async def message_handler(client: Client, message: Message):
-    user = message.from_user
-    if not user:
-        return
-    user_id = user.id
-    text_str = message.text.strip()
-    
-    if text_str.startswith("/"):
+        db_status = "Online" if db else "Offline"
+        text = f"**Admin Panel**\n\n• DB: `{db_status}`\n• Active Sessions: `{len(all_sess)}`"
+        await message.reply_text(text, reply_markup=keyboard)
         return
 
-    logger.info(f"Processing message from {user_id}: {text_str}")
-    asyncio.create_task(asyncio.to_thread(sync_track_user, user_id, user.username, user.first_name))
-
-    # A. Admin Session Input
+    # Waiting for Session Input
     if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_SESSION":
         admin_states.pop(user_id, None)
         status_msg = await message.reply_text("Validating session...")
@@ -370,14 +371,14 @@ async def message_handler(client: Client, message: Message):
             await status_msg.edit_text(f"Invalid session: `{str(e)}`")
         return
 
-    # B. Social Media Link Matcher
+    # Social Media URL Pattern
     social_pattern = r"(https?://(?:[a-zA-Z0-9-_]+\.)*(?:youtube\.com|youtu\.be|instagram\.com|instagr\.am|tiktok\.com|facebook\.com|fb\.watch)/[^\s]+)"
     social_match = re.search(social_pattern, text_str)
 
     if social_match:
         target_url = social_match.group(0)
         platform_name = detect_social_platform(target_url)
-        status = await message.reply_text("Processing link...")
+        status = await message.reply_text("Processing video...")
 
         try:
             file_path, title, duration, width, height = await asyncio.to_thread(
@@ -385,7 +386,7 @@ async def message_handler(client: Client, message: Message):
             )
 
             if not file_path or not os.path.exists(file_path):
-                await status.edit_text("Failed to download video. Link might be private, broken, or unsupported.")
+                await status.edit_text("Failed to download video. Post might be private or link is expired.")
                 return
 
             progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
@@ -422,66 +423,54 @@ async def message_handler(client: Client, message: Message):
             await status.edit_text(f"Download Error: `{str(e)[:120]}`")
         return
 
-    # C. Telegram Link Matcher
+    # Telegram URL Pattern
     private_match = re.search(r"t\.me/c/(\d+)/(\d+)", text_str)
     public_match = re.search(r"t\.me/([a-zA-Z0-9_]+)/(\d+)", text_str)
 
     if private_match or public_match:
-        status = await message.reply_text("Fetching post...")
+        status = await message.reply_text("Fetching Telegram post...")
         target_msg = None
         working_client = None
         is_temp_client = False
 
         try:
-            if public_match:
-                chat_username = public_match.group(1)
+            active_sessions = await asyncio.to_thread(sync_get_all_sessions)
+
+            if private_match:
+                chat_id = int("-100" + private_match.group(1))
+                msg_id = int(private_match.group(2))
+            else:
+                chat_id = public_match.group(1)
                 msg_id = int(public_match.group(2))
+
+            if not active_sessions:
+                await status.edit_text("To download from Telegram channels, you must add a User Session via /admin first.")
+                return
+
+            for sess in active_sessions:
+                temp_client = Client(
+                    f"sess_{int(time.time()*1000)}",
+                    api_id=API_ID,
+                    api_hash=API_HASH,
+                    session_string=sess['session_string'],
+                    in_memory=True
+                )
                 try:
-                    msg = await bot.get_messages(chat_username, msg_id)
+                    await asyncio.wait_for(temp_client.start(), timeout=8)
+                    msg = await asyncio.wait_for(temp_client.get_messages(chat_id, msg_id), timeout=8)
                     if has_media(msg):
                         target_msg = msg
-                        working_client = bot
-                        is_temp_client = False
-                except Exception as e:
-                    logger.info(f"Direct bot fetch bypass: {e}")
-
-            if not target_msg:
-                active_sessions = await asyncio.to_thread(sync_get_all_sessions)
-                if not active_sessions:
-                    await status.edit_text("This post requires a User Session. Add via /admin.")
-                    return
-
-                if private_match:
-                    chat_id = int("-100" + private_match.group(1))
-                    msg_id = int(private_match.group(2))
-                else:
-                    chat_id = public_match.group(1)
-                    msg_id = int(public_match.group(2))
-
-                for sess in active_sessions:
-                    temp_client = Client(
-                        f"sess_{int(time.time()*1000)}",
-                        api_id=API_ID,
-                        api_hash=API_HASH,
-                        session_string=sess['session_string'],
-                        in_memory=True
-                    )
-                    try:
-                        await asyncio.wait_for(temp_client.start(), timeout=10)
-                        msg = await asyncio.wait_for(temp_client.get_messages(chat_id, msg_id), timeout=10)
-                        if has_media(msg):
-                            target_msg = msg
-                            working_client = temp_client
-                            is_temp_client = True
-                            break
+                        working_client = temp_client
+                        is_temp_client = True
+                        break
+                    await temp_client.stop()
+                except Exception as ex:
+                    logger.warning(f"Session test failed: {ex}")
+                    if temp_client.is_connected:
                         await temp_client.stop()
-                    except Exception as ex:
-                        logger.warning(f"Session test failed: {ex}")
-                        if temp_client.is_connected:
-                            await temp_client.stop()
 
             if not target_msg or not working_client:
-                await status.edit_text("Media not found. Make sure the link is correct and the connected session account has joined this channel.")
+                await status.edit_text("Media not found. Make sure the connected session account has joined this channel.")
                 return
 
             progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
@@ -601,7 +590,7 @@ async def message_handler(client: Client, message: Message):
 
     await message.reply_text("Invalid link. Send Telegram, YouTube, TikTok, Instagram, or Facebook URL.")
 
-# 4. Callback Query Handler
+# Callback Query Handler
 @bot.on_callback_query()
 async def callback_handler(client: Client, callback_query: CallbackQuery):
     data = callback_query.data
@@ -739,11 +728,11 @@ async def start_web_server():
 async def main():
     await start_web_server()
 
-    # Resilient bot startup loop to handle FloodWait automatically
     while True:
         try:
             await bot.start()
-            logger.info("Telegram Downloader Bot is fully LIVE and listening for messages.")
+            me = await bot.get_me()
+            logger.info(f"===> Bot is LIVE: @{me.username} (ID: {me.id}) <===")
             break
         except FloodWait as e:
             logger.warning(f"Telegram FloodWait encountered: Sleeping for {e.value} seconds...")
