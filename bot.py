@@ -15,7 +15,7 @@ from pyrogram.errors import FloodWait
 from aiohttp import web
 import yt_dlp
 
-# Automatically enable FFmpeg on cloud servers
+# Enable FFmpeg binaries automatically
 static_ffmpeg.add_paths()
 
 # Configuration
@@ -214,7 +214,6 @@ def extract_and_download_social(url: str, user_id: int):
     timestamp = int(time.time())
     out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_%(id)s.%(ext)s")
     
-    # Allows merging video & audio smoothly via static-ffmpeg
     ydl_opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
         'outtmpl': out_template,
@@ -222,7 +221,17 @@ def extract_and_download_social(url: str, user_id: int):
         'quiet': True,
         'no_warnings': True,
         'max_filesize': 1900 * 1024 * 1024,
+        # YouTube Bot Check Bypass Client
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios']
+            }
+        }
     }
+
+    # Automatically load cookies.txt if present
+    if os.path.exists("cookies.txt"):
+        ydl_opts['cookiefile'] = "cookies.txt"
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
