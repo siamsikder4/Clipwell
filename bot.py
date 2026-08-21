@@ -218,10 +218,10 @@ def extract_and_download_social(url: str, user_id: int):
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
         'outtmpl': out_template,
         'merge_output_format': 'mp4',
+        'writethumbnail': True,
         'quiet': True,
         'no_warnings': True,
         'max_filesize': 1900 * 1024 * 1024,
-        # YouTube Bot Check Bypass Client
         'extractor_args': {
             'youtube': {
                 'player_client': ['android', 'ios']
@@ -229,7 +229,6 @@ def extract_and_download_social(url: str, user_id: int):
         }
     }
 
-    # Automatically load cookies.txt if present
     if os.path.exists("cookies.txt"):
         ydl_opts['cookiefile'] = "cookies.txt"
 
@@ -242,9 +241,19 @@ def extract_and_download_social(url: str, user_id: int):
             if os.path.exists(base + ".mp4"):
                 file_path = base + ".mp4"
 
+        base_path, _ = os.path.splitext(file_path)
+        thumb_path = None
+        for ext in [".jpg", ".jpeg", ".webp", ".png"]:
+            if os.path.exists(base_path + ext):
+                thumb_path = base_path + ext
+                break
+
         title = info.get('title', 'Downloaded Video')
         duration = int(info.get('duration', 0) or 0)
-        return file_path, title, duration
+        width = info.get('width')
+        height = info.get('height')
+
+        return file_path, thumb_path, title, duration, width, height
 
 async def main():
     app = web.Application()
@@ -464,7 +473,9 @@ async def main():
             status = await message.reply_text("Processing link...")
 
             try:
-                file_path, title, duration = await asyncio.to_thread(extract_and_download_social, target_url, user_id)
+                file_path, thumb_path, title, duration, width, height = await asyncio.to_thread(
+                    extract_and_download_social, target_url, user_id
+                )
                 
                 if not file_path or not os.path.exists(file_path):
                     await status.edit_text("Failed to download video.")
@@ -475,8 +486,11 @@ async def main():
                 sent_msg = await client.send_video(
                     chat_id=message.chat.id,
                     video=file_path,
+                    thumb=thumb_path if (thumb_path and os.path.exists(thumb_path)) else None,
                     caption=f"**{title[:60]}**",
                     duration=duration,
+                    width=width,
+                    height=height,
                     supports_streaming=True,
                     progress=progress_bar,
                     progress_args=(status, "Uploading Video", user_id)
@@ -484,6 +498,8 @@ async def main():
 
                 if os.path.exists(file_path):
                     os.remove(file_path)
+                if thumb_path and os.path.exists(thumb_path):
+                    os.remove(thumb_path)
 
                 increment_downloads(platform_name)
                 await status.delete()
@@ -624,8 +640,12 @@ async def main():
                         )
                     elif target_msg.video:
                         sent_msg = await client.send_video(
-                            chat_id=message.chat.id, video=file_path, caption=caption, supports_streaming=True,
-                            progress=progress_bar, progress_args=(status, f"Uploading {media_type}", user_id)
+                            chat_id=message.chat.id,
+                            video=file_path,
+                            caption=caption,
+                            supports_streaming=True,
+                            progress=progress_bar,
+                            progress_args=(status, f"Uploading {media_type}", user_id)
                         )
                     elif target_msg.photo:
                         sent_msg = await client.send_photo(
