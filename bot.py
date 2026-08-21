@@ -2,7 +2,9 @@ import os
 import re
 import time
 import json
+import uuid
 import asyncio
+import static_ffmpeg
 import firebase_admin
 from firebase_admin import credentials, firestore
 from pyrogram import Client, filters, idle
@@ -14,12 +16,8 @@ from pyrogram.errors import FloodWait
 from aiohttp import web
 import yt_dlp
 
-# Optional FFmpeg setup (Will not crash if missing)
-try:
-    import static_ffmpeg
-    static_ffmpeg.add_paths()
-except ImportError:
-    pass
+# Enable FFmpeg binaries automatically
+static_ffmpeg.add_paths()
 
 # Configuration
 API_ID = int(os.environ.get("API_ID", "35039821"))
@@ -31,6 +29,9 @@ PORT = int(os.environ.get("PORT", "8080"))
 
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+# Temporary memory cache for YouTube requests
+yt_link_cache = {}
 
 # Database Initialization
 db = None
@@ -142,7 +143,7 @@ def get_stats():
         print(f"Stats Error: {e}", flush=True)
         return 0, 0, {}
 
-# Progress Tracker
+# Progress Tracker & Utilities
 admin_states = {}
 progress_status = {}
 
@@ -213,22 +214,55 @@ def detect_social_platform(url: str) -> str:
         return "facebook"
     return "others"
 
-def extract_and_download_social(url: str, user_id: int):
+def extract_media_info(url: str):
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
+    }
+    if os.path.exists("cookies.txt"):
+        ydl_opts['cookiefile'] = "cookies.txt"
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        return ydl.extract_info(url, download=False)
+
+def extract_and_download_social(url: str, user_id: int, quality_format: str = "best"):
     timestamp = int(time.time())
     out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_%(id)s.%(ext)s")
     
+    if quality_format == "audio":
+        format_rule = "bestaudio/best"
+        merge_fmt = "mp3"
+    elif quality_format in ["144", "240", "360", "480", "720", "1080", "1440", "2160"]:
+        h = quality_format
+        format_rule = (
+            f"bestvideo[height={h}][ext=mp4]+bestaudio[ext=m4a]/"
+            f"bestvideo[height={h}]+bestaudio/"
+            f"bestvideo[height<={h}]+bestaudio/"
+            f"best[height<={h}]/best"
+        )
+        merge_fmt = "mp4"
+    else:
+        format_rule = "bestvideo+bestaudio/best"
+        merge_fmt = "mp4"
+
     ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
+        'format': format_rule,
         'outtmpl': out_template,
-        'merge_output_format': 'mp4',
+        'merge_output_format': merge_fmt,
         'writethumbnail': True,
         'quiet': True,
         'no_warnings': True,
         'max_filesize': 1900 * 1024 * 1024,
-        'extractor_args': {
-            'youtube': {'player_client': ['android', 'web']}
-        }
+        'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
     }
+
+    if quality_format == "audio":
+        ydl_opts['postprocessors'] = [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }]
 
     if os.path.exists("cookies.txt"):
         ydl_opts['cookiefile'] = "cookies.txt"
@@ -240,7 +274,10 @@ def extract_and_download_social(url: str, user_id: int):
 
         file_path = ydl.prepare_filename(info)
         
-        if not os.path.exists(file_path):
+        if quality_format == "audio":
+            base, _ = os.path.splitext(file_path)
+            file_path = base + ".mp3"
+        elif not os.path.exists(file_path):
             base, _ = os.path.splitext(file_path)
             if os.path.exists(base + ".mp4"):
                 file_path = base + ".mp4"
@@ -253,15 +290,11 @@ def extract_and_download_social(url: str, user_id: int):
                 break
 
         title = info.get('title', 'Downloaded Media')
-        duration = int(info.get('duration') or 0)
+        duration = int(info.get('duration', 0) or 0)
         width = info.get('width')
         height = info.get('height')
 
-        # Clean integer casting
-        width_val = int(width) if (width and str(width).isdigit() and int(width) > 0) else None
-        height_val = int(height) if (height and str(height).isdigit() and int(height) > 0) else None
-
-        return file_path, thumb_path, title, duration, width_val, height_val
+        return file_path, thumb_path, title, duration, width, height
 
 async def main():
     app = web.Application()
@@ -287,7 +320,7 @@ async def main():
 
         text = (
             f"**Hello {user.first_name},**\n\n"
-            "Send any link to download media:\n"
+            "Send any supported link to download media:\n"
             "• **Supported:** Telegram, YouTube, TikTok, Instagram, Facebook\n"
             "• Sent media auto-deletes in 5 minutes."
         )
@@ -353,6 +386,73 @@ async def main():
                 reply_markup=InlineKeyboardMarkup(buttons)
             )
             await callback_query.answer()
+            return
+
+        elif data.startswith("ytq_"):
+            parts = data.split("_")
+            cache_key = parts[1]
+            quality = parts[2]
+
+            cached_item = yt_link_cache.get(cache_key)
+            if not cached_item:
+                await callback_query.answer("Session expired. Send link again.", show_alert=True)
+                return
+
+            target_url = cached_item["url"]
+            q_label = f"{quality}p" if quality.isdigit() else "MP3 Audio"
+            status = await callback_query.message.edit_text(f"Downloading **{q_label}**...")
+            await callback_query.answer()
+
+            try:
+                file_path, thumb_path, title, duration, width, height = await asyncio.to_thread(
+                    extract_and_download_social, target_url, user_id, quality
+                )
+
+                if not file_path or not os.path.exists(file_path):
+                    await status.edit_text("Failed to download media.")
+                    return
+
+                progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
+
+                if quality == "audio":
+                    sent_msg = await client.send_audio(
+                        chat_id=callback_query.message.chat.id,
+                        audio=file_path,
+                        thumb=thumb_path if (thumb_path and os.path.exists(thumb_path)) else None,
+                        caption=f"**{title[:60]}**",
+                        duration=duration,
+                        progress=progress_bar,
+                        progress_args=(status, "Uploading Audio", user_id)
+                    )
+                else:
+                    actual_res = f"{height}p" if height else q_label
+                    sent_msg = await client.send_video(
+                        chat_id=callback_query.message.chat.id,
+                        video=file_path,
+                        thumb=thumb_path if (thumb_path and os.path.exists(thumb_path)) else None,
+                        caption=f"**{title[:60]}** `[{actual_res}]`",
+                        duration=duration,
+                        width=width,
+                        height=height,
+                        supports_streaming=True,
+                        progress=progress_bar,
+                        progress_args=(status, f"Uploading ({actual_res})", user_id)
+                    )
+
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                if thumb_path and os.path.exists(thumb_path):
+                    os.remove(thumb_path)
+
+                increment_downloads("youtube")
+                await status.delete()
+
+                if sent_msg:
+                    del_ids = [sent_msg.id]
+                    asyncio.create_task(auto_delete_messages(bot, callback_query.message.chat.id, del_ids, 300))
+
+            except Exception as e:
+                await status.edit_text(f"Download Error: `{str(e)[:100]}`")
             return
 
         if user_id != OWNER_ID:
@@ -478,15 +578,62 @@ async def main():
         if social_match:
             target_url = social_match.group(0)
             platform_name = detect_social_platform(target_url)
-            status = await message.reply_text("Processing link...")
 
+            # Interactive Quality Selection for YouTube
+            if platform_name == "youtube":
+                status = await message.reply_text("Fetching video resolutions...")
+                try:
+                    info = await asyncio.to_thread(extract_media_info, target_url)
+                    title = info.get("title", "YouTube Video")
+                    duration = int(info.get("duration", 0) or 0)
+                    dur_str = format_time(duration)
+
+                    available_heights = set()
+                    for f in info.get("formats", []):
+                        h = f.get("height")
+                        if h and f.get("vcodec") != "none":
+                            available_heights.add(h)
+
+                    standard_options = [1080, 720, 480, 360, 240]
+                    matched_qualities = [q for q in standard_options if any(h >= q for h in available_heights)]
+                    if not matched_qualities and available_heights:
+                        matched_qualities = sorted(list(available_heights), reverse=True)[:4]
+
+                    cache_key = uuid.uuid4().hex[:8]
+                    yt_link_cache[cache_key] = {"url": target_url, "title": title}
+
+                    buttons = []
+                    row = []
+                    for q in matched_qualities:
+                        label = f"📹 {q}p (HD)" if q >= 720 else f"📹 {q}p"
+                        row.append(InlineKeyboardButton(label, callback_data=f"ytq_{cache_key}_{q}"))
+                        if len(row) == 2:
+                            buttons.append(row)
+                            row = []
+                    if row:
+                        buttons.append(row)
+
+                    buttons.append([InlineKeyboardButton("🎵 Audio (MP3)", callback_data=f"ytq_{cache_key}_audio")])
+
+                    await status.edit_text(
+                        f"🎬 **{title[:60]}**\n"
+                        f"⏱️ Duration: `{dur_str}`\n\n"
+                        f"Select your preferred resolution below:",
+                        reply_markup=InlineKeyboardMarkup(buttons)
+                    )
+                except Exception as e:
+                    await status.edit_text(f"Error fetching YouTube video: `{str(e)[:100]}`")
+                return
+
+            # Direct Download for TikTok, Instagram, Facebook
+            status = await message.reply_text("Processing link...")
             try:
                 file_path, thumb_path, title, duration, width, height = await asyncio.to_thread(
-                    extract_and_download_social, target_url, user_id
+                    extract_and_download_social, target_url, user_id, "best"
                 )
                 
                 if not file_path or not os.path.exists(file_path):
-                    await status.edit_text("Failed to download video. Link might be private or broken.")
+                    await status.edit_text("Failed to download video. The video might be private or unavailable.")
                     return
 
                 progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
@@ -496,7 +643,7 @@ async def main():
                     video=file_path,
                     thumb=thumb_path if (thumb_path and os.path.exists(thumb_path)) else None,
                     caption=f"**{title[:60]}**" if title else "",
-                    duration=int(duration or 0),
+                    duration=duration,
                     width=width,
                     height=height,
                     supports_streaming=True,
