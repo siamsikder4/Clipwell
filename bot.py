@@ -30,7 +30,7 @@ PORT = int(os.environ.get("PORT", "8080"))
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# Temporary in-memory cache for YouTube selection
+# Temporary memory cache for YouTube requests
 yt_link_cache = {}
 
 # Database Initialization
@@ -218,7 +218,7 @@ def extract_media_info(url: str):
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
-        'extractor_args': {'youtube': {'player_client': ['android', 'ios']}}
+        'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
     }
     if os.path.exists("cookies.txt"):
         ydl_opts['cookiefile'] = "cookies.txt"
@@ -230,13 +230,19 @@ def extract_and_download_social(url: str, user_id: int, quality_format: str = "b
     timestamp = int(time.time())
     out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_%(id)s.%(ext)s")
     
-    # Accurate resolution matching rules
+    # Exact resolution selection
     if quality_format == "audio":
         format_rule = "bestaudio/best"
         merge_fmt = "mp3"
-    elif quality_format in ["360", "480", "720", "1080"]:
+    elif quality_format in ["144", "240", "360", "480", "720", "1080", "1440", "2160"]:
         h = quality_format
-        format_rule = f"bestvideo[height<={h}]+bestaudio/best[height<={h}]"
+        # Prioritize exact height, then fallback to closest lower height
+        format_rule = (
+            f"bestvideo[height={h}][ext=mp4]+bestaudio[ext=m4a]/"
+            f"bestvideo[height={h}]+bestaudio/"
+            f"bestvideo[height<={h}]+bestaudio/"
+            f"best[height<={h}]/best"
+        )
         merge_fmt = "mp4"
     else:
         format_rule = "bestvideo+bestaudio/best"
@@ -250,7 +256,7 @@ def extract_and_download_social(url: str, user_id: int, quality_format: str = "b
         'quiet': True,
         'no_warnings': True,
         'max_filesize': 1900 * 1024 * 1024,
-        'extractor_args': {'youtube': {'player_client': ['android', 'ios']}}
+        'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
     }
 
     if quality_format == "audio":
@@ -389,11 +395,12 @@ async def main():
 
             cached_item = yt_link_cache.get(cache_key)
             if not cached_item:
-                await callback_query.answer("Link expired. Please send the link again.", show_alert=True)
+                await callback_query.answer("Session expired. Send link again.", show_alert=True)
                 return
 
             target_url = cached_item["url"]
-            status = await callback_query.message.edit_text(f"Starting {quality.upper()} download...")
+            q_label = f"{quality}p" if quality.isdigit() else "MP3 Audio"
+            status = await callback_query.message.edit_text(f"Downloading **{q_label}**...")
             await callback_query.answer()
 
             try:
@@ -418,17 +425,18 @@ async def main():
                         progress_args=(status, "Uploading Audio", user_id)
                     )
                 else:
+                    actual_res = f"{height}p" if height else q_label
                     sent_msg = await client.send_video(
                         chat_id=callback_query.message.chat.id,
                         video=file_path,
                         thumb=thumb_path if (thumb_path and os.path.exists(thumb_path)) else None,
-                        caption=f"**{title[:60]}** `[{quality.upper()}]`",
+                        caption=f"**{title[:60]}** `[{actual_res}]`",
                         duration=duration,
                         width=width,
                         height=height,
                         supports_streaming=True,
                         progress=progress_bar,
-                        progress_args=(status, "Uploading Video", user_id)
+                        progress_args=(status, f"Uploading ({actual_res})", user_id)
                     )
 
                 if os.path.exists(file_path):
@@ -571,36 +579,49 @@ async def main():
             target_url = social_match.group(0)
             platform_name = detect_social_platform(target_url)
 
-            # Interactive Quality Selection for YouTube
+            # Interactive Dynamic Quality Selection for YouTube
             if platform_name == "youtube":
-                status = await message.reply_text("Fetching video details...")
+                status = await message.reply_text("Fetching video resolutions...")
                 try:
                     info = await asyncio.to_thread(extract_media_info, target_url)
                     title = info.get("title", "YouTube Video")
                     duration = int(info.get("duration", 0) or 0)
                     dur_str = format_time(duration)
 
+                    # Extract actual available heights from the stream formats
+                    available_heights = set()
+                    for f in info.get("formats", []):
+                        h = f.get("height")
+                        if h and f.get("vcodec") != "none":
+                            available_heights.add(h)
+
+                    # Map standard options that exist for this video
+                    standard_options = [1080, 720, 480, 360, 240]
+                    matched_qualities = [q for q in standard_options if any(h >= q for h in available_heights)]
+                    if not matched_qualities and available_heights:
+                        matched_qualities = sorted(list(available_heights), reverse=True)[:4]
+
                     cache_key = uuid.uuid4().hex[:8]
                     yt_link_cache[cache_key] = {"url": target_url, "title": title}
 
-                    buttons = [
-                        [
-                            InlineKeyboardButton("📹 360p", callback_data=f"ytq_{cache_key}_360"),
-                            InlineKeyboardButton("📹 480p", callback_data=f"ytq_{cache_key}_480")
-                        ],
-                        [
-                            InlineKeyboardButton("📹 720p (HD)", callback_data=f"ytq_{cache_key}_720"),
-                            InlineKeyboardButton("📹 1080p (FHD)", callback_data=f"ytq_{cache_key}_1080")
-                        ],
-                        [
-                            InlineKeyboardButton("🎵 Audio (MP3)", callback_data=f"ytq_{cache_key}_audio")
-                        ]
-                    ]
+                    # Create dynamic buttons (2 per row)
+                    buttons = []
+                    row = []
+                    for q in matched_qualities:
+                        label = f"📹 {q}p (HD)" if q >= 720 else f"📹 {q}p"
+                        row.append(InlineKeyboardButton(label, callback_data=f"ytq_{cache_key}_{q}"))
+                        if len(row) == 2:
+                            buttons.append(row)
+                            row = []
+                    if row:
+                        buttons.append(row)
+
+                    buttons.append([InlineKeyboardButton("🎵 Audio (MP3)", callback_data=f"ytq_{cache_key}_audio")])
 
                     await status.edit_text(
                         f"🎬 **{title[:60]}**\n"
                         f"⏱️ Duration: `{dur_str}`\n\n"
-                        f"Select your preferred quality below:",
+                        f"Select your preferred resolution below:",
                         reply_markup=InlineKeyboardMarkup(buttons)
                     )
                 except Exception as e:
