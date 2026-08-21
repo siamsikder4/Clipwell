@@ -76,6 +76,29 @@ def get_all_sessions():
         print(f"Fetch Sessions Error: {e}", flush=True)
         return []
 
+def get_user_sessions(user_id: int):
+    if not db:
+        return []
+    try:
+        # Owner can access all active sessions as a fallback
+        if user_id == OWNER_ID:
+            return get_all_sessions()
+        
+        docs = db.collection("telegram_sessions").where("user_id", "==", user_id).stream()
+        sessions = []
+        for doc in docs:
+            data = doc.to_dict()
+            sessions.append({
+                "doc_id": doc.id,
+                "session_string": data.get("session_string"),
+                "account_name": data.get("account_name", "Unknown"),
+                "user_id": data.get("user_id")
+            })
+        return sessions
+    except Exception as e:
+        print(f"Fetch User Sessions Error: {e}", flush=True)
+        return []
+
 def delete_session_from_db(doc_id: str):
     if not db:
         return False
@@ -91,20 +114,6 @@ def delete_session_from_db(doc_id: str):
         return True
     except Exception as e:
         print(f"Delete Session Error: {e}", flush=True)
-        return False
-
-def user_has_session(user_id: int) -> bool:
-    if user_id == OWNER_ID:
-        return True
-    if not db:
-        return False
-    try:
-        docs = db.collection("telegram_sessions").where("user_id", "==", user_id).stream()
-        if any(docs):
-            return True
-        user_doc = db.collection("bot_users").document(str(user_id)).get()
-        return bool(user_doc.exists and user_doc.to_dict().get("has_session", False))
-    except Exception:
         return False
 
 def track_user(user_id: int, username: str, name: str):
@@ -258,7 +267,6 @@ def extract_and_download_social(url: str, user_id: int):
     timestamp = int(time.time())
     out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_%(id)s.%(ext)s")
     
-    # Standalone stream without ffmpeg merge dependency
     ydl_opts = {
         'format': 'best[ext=mp4]/best',
         'outtmpl': out_template,
@@ -295,8 +303,8 @@ async def main():
         user = message.from_user
         track_user(user.id, user.username, user.first_name)
 
-        has_sess = user_has_session(user.id)
-        status_tag = "Session Active" if has_sess else "Regular User"
+        user_sessions = get_user_sessions(user.id)
+        status_tag = "Session Active" if user_sessions else "Regular User"
 
         buttons = [[
             InlineKeyboardButton("Ping", callback_data="btn_ping"),
@@ -308,9 +316,9 @@ async def main():
         text = (
             f"**Hello {user.first_name},**\n"
             f"Account Status: `{status_tag}`\n\n"
-            "Send any supported video link to download:\n"
+            "Send any supported link to download:\n"
             "• **Supported:** YouTube, TikTok, Instagram, Facebook\n"
-            "• **Telegram Links:** Requires session ID\n"
+            "• **Telegram Links:** Requires session ID registered\n"
             "• Sent media auto-deletes in 5 minutes."
         )
         await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
@@ -356,17 +364,16 @@ async def main():
         elif data == "btn_help":
             await callback_query.message.edit_text(
                 "**How to use:**\n\n"
-                "1. Copy video URL (YouTube, TikTok, Instagram, Facebook).\n"
-                "2. Send it directly here.\n"
-                "3. Telegram private posts require an authorized session ID.",
+                "1. Send video URL (YouTube, TikTok, Instagram, Facebook) to download directly.\n"
+                "2. Telegram private channel links require your account session registered in the bot.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_home")]])
             )
             await callback_query.answer()
             return
 
         elif data == "btn_back_home":
-            has_sess = user_has_session(user_id)
-            status_tag = "Session Active" if has_sess else "Regular User"
+            user_sessions = get_user_sessions(user_id)
+            status_tag = "Session Active" if user_sessions else "Regular User"
 
             buttons = [[
                 InlineKeyboardButton("Ping", callback_data="btn_ping"),
@@ -377,7 +384,7 @@ async def main():
 
             await callback_query.message.edit_text(
                 f"Account Status: `{status_tag}`\n\n"
-                "Send any supported link (YouTube, TikTok, Instagram, Facebook).",
+                "Send any supported video link to download.",
                 reply_markup=InlineKeyboardMarkup(buttons)
             )
             await callback_query.answer()
@@ -501,7 +508,7 @@ async def main():
                 await status_msg.edit_text(f"Invalid session: `{str(e)}`")
             return
 
-        # 2. Social Media Links
+        # 2. Social Media Links (Open to all regular & session users)
         social_pattern = r"(https?://(?:[a-zA-Z0-9-_]+\.)*(?:youtube\.com|youtu\.be|instagram\.com|instagr\.am|tiktok\.com|facebook\.com|fb\.watch)/[^\s]+)"
         social_match = re.search(social_pattern, text_str)
 
@@ -543,7 +550,7 @@ async def main():
                 await status.edit_text(f"Download Error: `{str(e)[:100]}`")
             return
 
-        # 3. Telegram Post Links
+        # 3. Telegram Post Links (Strictly restricted to users with their own session ID)
         private_pattern = r"t\.me/c/(\d+)/(\d+)"
         public_pattern = r"t\.me/([^/]+)/(\d+)"
 
@@ -551,17 +558,14 @@ async def main():
         public_match = re.search(public_pattern, text_str)
 
         if private_match or public_match:
-            if not user_has_session(user_id):
+            # Check user's own registered session
+            user_sessions = get_user_sessions(user_id)
+            if not user_sessions:
                 await message.reply_text(
-                    "**Access Restricted:**\n"
-                    "Telegram post downloads require an authorized session ID.\n"
+                    "**Access Restricted**\n\n"
+                    "Telegram downloads require your own registered session ID.\n"
                     "You can download videos from YouTube, TikTok, Instagram, and Facebook freely."
                 )
-                return
-
-            active_sessions = get_all_sessions()
-            if not active_sessions:
-                await message.reply_text("No active sessions found.")
                 return
 
             status = await message.reply_text("Fetching post...")
@@ -576,7 +580,7 @@ async def main():
             target_msg = None
             working_user_client = None
 
-            for sess in active_sessions:
+            for sess in user_sessions:
                 temp_client = Client(
                     f"sess_{time.time()}",
                     api_id=API_ID,
@@ -602,7 +606,7 @@ async def main():
                         await temp_client.stop()
 
             if not target_msg or not working_user_client:
-                await status.edit_text("Post not found or inaccessible.")
+                await status.edit_text("Post not found or your session account has not joined the channel.")
                 return
 
             progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
