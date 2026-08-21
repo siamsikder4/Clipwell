@@ -16,7 +16,7 @@ from hydrogram.errors import FloodWait
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# Setup FFmpeg automatically
+# Auto Setup FFmpeg for audio-video merging
 try:
     import static_ffmpeg
     static_ffmpeg.add_paths()
@@ -235,13 +235,14 @@ def detect_social_platform(url: str) -> str:
         return "facebook"
     return "others"
 
-# Robust Social Media Extractor
+# Facebook Audio+Video Guaranteed Extractor
 def extract_and_download_social(url: str, user_id: int):
     timestamp = int(time.time())
     out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_%(id)s.%(ext)s")
 
+    # Priority to combined format (audio+video together) to prevent GIF behavior
     ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'format': 'best[ext=mp4][vcodec!=none][acodec!=none]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'outtmpl': out_template,
         'merge_output_format': 'mp4',
         'quiet': True,
@@ -265,7 +266,7 @@ def extract_and_download_social(url: str, user_id: int):
         if not info:
             return None, None, 0, 0, 0
 
-        # Resolve File Path
+        # Resolve Final File Path
         file_path = ydl.prepare_filename(info)
         if not os.path.exists(file_path):
             base, _ = os.path.splitext(file_path)
@@ -275,7 +276,6 @@ def extract_and_download_social(url: str, user_id: int):
                     break
 
         if not os.path.exists(file_path):
-            # Fallback search in downloads directory
             prefix = f"{user_id}_{timestamp}_"
             for f in os.listdir(DOWNLOAD_DIR):
                 if f.startswith(prefix) and not f.endswith(".part"):
@@ -388,12 +388,11 @@ async def message_handler(client: Client, message: Message):
             )
 
             if not file_path or not os.path.exists(file_path):
-                await status.edit_text("Failed to download video. Link might be private, broken, or restricted.")
+                await status.edit_text("Failed to download video. Link might be private, broken, or unsupported.")
                 return
 
             progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
 
-            # Build safe kwargs without None values
             send_kwargs = {
                 "chat_id": message.chat.id,
                 "video": file_path,
