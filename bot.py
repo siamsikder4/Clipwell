@@ -143,7 +143,7 @@ def get_stats():
         print(f"Stats Error: {e}", flush=True)
         return 0, 0, {}
 
-# Progress Tracker
+# Progress Tracker & Utilities
 admin_states = {}
 progress_status = {}
 
@@ -230,13 +230,11 @@ def extract_and_download_social(url: str, user_id: int, quality_format: str = "b
     timestamp = int(time.time())
     out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_%(id)s.%(ext)s")
     
-    # Exact resolution selection
     if quality_format == "audio":
         format_rule = "bestaudio/best"
         merge_fmt = "mp3"
     elif quality_format in ["144", "240", "360", "480", "720", "1080", "1440", "2160"]:
         h = quality_format
-        # Prioritize exact height, then fallback to closest lower height
         format_rule = (
             f"bestvideo[height={h}][ext=mp4]+bestaudio[ext=m4a]/"
             f"bestvideo[height={h}]+bestaudio/"
@@ -271,6 +269,9 @@ def extract_and_download_social(url: str, user_id: int, quality_format: str = "b
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
+        if not info:
+            return None, None, None, 0, None, None
+
         file_path = ydl.prepare_filename(info)
         
         if quality_format == "audio":
@@ -387,7 +388,6 @@ async def main():
             await callback_query.answer()
             return
 
-        # YouTube Quality Selection Callback
         elif data.startswith("ytq_"):
             parts = data.split("_")
             cache_key = parts[1]
@@ -579,7 +579,7 @@ async def main():
             target_url = social_match.group(0)
             platform_name = detect_social_platform(target_url)
 
-            # Interactive Dynamic Quality Selection for YouTube
+            # Interactive Quality Selection for YouTube
             if platform_name == "youtube":
                 status = await message.reply_text("Fetching video resolutions...")
                 try:
@@ -588,14 +588,12 @@ async def main():
                     duration = int(info.get("duration", 0) or 0)
                     dur_str = format_time(duration)
 
-                    # Extract actual available heights from the stream formats
                     available_heights = set()
                     for f in info.get("formats", []):
                         h = f.get("height")
                         if h and f.get("vcodec") != "none":
                             available_heights.add(h)
 
-                    # Map standard options that exist for this video
                     standard_options = [1080, 720, 480, 360, 240]
                     matched_qualities = [q for q in standard_options if any(h >= q for h in available_heights)]
                     if not matched_qualities and available_heights:
@@ -604,7 +602,6 @@ async def main():
                     cache_key = uuid.uuid4().hex[:8]
                     yt_link_cache[cache_key] = {"url": target_url, "title": title}
 
-                    # Create dynamic buttons (2 per row)
                     buttons = []
                     row = []
                     for q in matched_qualities:
@@ -636,7 +633,7 @@ async def main():
                 )
                 
                 if not file_path or not os.path.exists(file_path):
-                    await status.edit_text("Failed to download video.")
+                    await status.edit_text("Failed to download video. The video might be private or unavailable.")
                     return
 
                 progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
@@ -645,7 +642,7 @@ async def main():
                     chat_id=message.chat.id,
                     video=file_path,
                     thumb=thumb_path if (thumb_path and os.path.exists(thumb_path)) else None,
-                    caption=f"**{title[:60]}**",
+                    caption=f"**{title[:60]}**" if title else "",
                     duration=duration,
                     width=width,
                     height=height,
