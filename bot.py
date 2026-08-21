@@ -38,7 +38,7 @@ if FIREBASE_KEY_RAW:
         print(f"Firebase Error: {e}", flush=True)
 
 # Database Operations
-def add_session_to_db(session_str: str, name: str, user_id: int):
+def add_session_to_db(session_str: str, name: str, session_user_id: int):
     if not db:
         return False, "Database offline"
     try:
@@ -49,10 +49,11 @@ def add_session_to_db(session_str: str, name: str, user_id: int):
         db.collection("telegram_sessions").add({
             "session_string": session_str,
             "account_name": name,
-            "user_id": user_id,
+            "user_id": session_user_id,
             "created_at": time.time()
         })
-        db.collection("bot_users").document(str(user_id)).set({"has_session": True}, merge=True)
+        # Mark user in users list
+        db.collection("bot_users").document(str(session_user_id)).set({"has_session": True}, merge=True)
         return True, "Success"
     except Exception as e:
         return False, str(e)
@@ -80,7 +81,7 @@ def get_user_sessions(user_id: int):
     if not db:
         return []
     try:
-        # Owner can access all active sessions as a fallback
+        # Owner has access to all active sessions
         if user_id == OWNER_ID:
             return get_all_sessions()
         
@@ -120,14 +121,11 @@ def track_user(user_id: int, username: str, name: str):
     if not db:
         return
     try:
-        doc_ref = db.collection("bot_users").document(str(user_id))
-        doc = doc_ref.get()
-        has_session = False
-        if doc.exists:
-            has_session = doc.to_dict().get("has_session", False)
-        if user_id == OWNER_ID:
-            has_session = True
+        # Verify session presence directly from database
+        sessions = get_user_sessions(user_id)
+        has_session = bool(sessions) or (user_id == OWNER_ID)
 
+        doc_ref = db.collection("bot_users").document(str(user_id))
         doc_ref.set({
             "user_id": user_id,
             "username": username or "N/A",
@@ -303,6 +301,7 @@ async def main():
         user = message.from_user
         track_user(user.id, user.username, user.first_name)
 
+        # Direct database session verification
         user_sessions = get_user_sessions(user.id)
         status_tag = "Session Active" if user_sessions else "Regular User"
 
@@ -318,7 +317,7 @@ async def main():
             f"Account Status: `{status_tag}`\n\n"
             "Send any supported link to download:\n"
             "• **Supported:** YouTube, TikTok, Instagram, Facebook\n"
-            "• **Telegram Links:** Requires session ID registered\n"
+            "• **Telegram Links:** Requires registered session\n"
             "• Sent media auto-deletes in 5 minutes."
         )
         await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
@@ -384,7 +383,7 @@ async def main():
 
             await callback_query.message.edit_text(
                 f"Account Status: `{status_tag}`\n\n"
-                "Send any supported video link to download.",
+                "Send any supported link to download.",
                 reply_markup=InlineKeyboardMarkup(buttons)
             )
             await callback_query.answer()
@@ -449,7 +448,7 @@ async def main():
             else:
                 lines = ["**Active Sessions:**\n"]
                 for idx, s in enumerate(all_sess, 1):
-                    lines.append(f"{idx}. `{s['account_name']}` (ID: `{s['doc_id']}`)")
+                    lines.append(f"{idx}. `{s['account_name']}` (UID: `{s['user_id']}`)")
                 await callback_query.message.edit_text(
                     "\n".join(lines),
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
@@ -497,18 +496,23 @@ async def main():
                 await test_client.start()
                 me = await test_client.get_me()
                 acc_name = f"{me.first_name} (@{me.username})" if me.username else me.first_name
+                session_owner_id = me.id  # Extract real Telegram User ID of this session
                 await test_client.stop()
 
-                success, err_msg = add_session_to_db(text_str, acc_name, user_id)
+                success, err_msg = add_session_to_db(text_str, acc_name, session_owner_id)
                 if success:
-                    await status_msg.edit_text(f"Session saved: `{acc_name}`")
+                    await status_msg.edit_text(
+                        f"Session saved permanently:\n"
+                        f"• Name: `{acc_name}`\n"
+                        f"• Owner User ID: `{session_owner_id}`"
+                    )
                 else:
                     await status_msg.edit_text(f"Error: `{err_msg}`")
             except Exception as e:
                 await status_msg.edit_text(f"Invalid session: `{str(e)}`")
             return
 
-        # 2. Social Media Links (Open to all regular & session users)
+        # 2. Social Media Links (Open to Everyone)
         social_pattern = r"(https?://(?:[a-zA-Z0-9-_]+\.)*(?:youtube\.com|youtu\.be|instagram\.com|instagr\.am|tiktok\.com|facebook\.com|fb\.watch)/[^\s]+)"
         social_match = re.search(social_pattern, text_str)
 
@@ -550,7 +554,7 @@ async def main():
                 await status.edit_text(f"Download Error: `{str(e)[:100]}`")
             return
 
-        # 3. Telegram Post Links (Strictly restricted to users with their own session ID)
+        # 3. Telegram Post Links (Strictly checked against user's session)
         private_pattern = r"t\.me/c/(\d+)/(\d+)"
         public_pattern = r"t\.me/([^/]+)/(\d+)"
 
@@ -558,7 +562,6 @@ async def main():
         public_match = re.search(public_pattern, text_str)
 
         if private_match or public_match:
-            # Check user's own registered session
             user_sessions = get_user_sessions(user_id)
             if not user_sessions:
                 await message.reply_text(
@@ -606,13 +609,13 @@ async def main():
                         await temp_client.stop()
 
             if not target_msg or not working_user_client:
-                await status.edit_text("Post not found or your session account has not joined the channel.")
+                await status.edit_text("Post not found or your session account is not a member of this channel.")
                 return
 
             progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
 
             try:
-                # Telegram Album
+                # Telegram Media Group (Album)
                 if target_msg.media_group_id:
                     group_messages = await working_user_client.get_media_group(chat_id, msg_id)
                     downloaded_files, media_list, gif_files = [], [], []
