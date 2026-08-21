@@ -29,18 +29,18 @@ if FIREBASE_KEY_RAW:
         cred = credentials.Certificate(cred_dict)
         firebase_admin.initialize_app(cred)
         db = firestore.client()
-        print(">>> FIREBASE CONNECTED SUCCESSFULLY <<<", flush=True)
+        print(">>> 🟢 FIREBASE CONNECTED SUCCESSFULLY <<<", flush=True)
     except Exception as e:
         print(f"❌ Firebase Connection Error: {e}", flush=True)
 
 # Firebase Helper Functions
 def add_session_to_db(session_str: str, name: str):
     if not db:
-        return False, "Firebase is not connected!"
+        return False, "Firebase ডেটাবেজ কানেক্টেড নেই!"
     try:
         docs = db.collection("telegram_sessions").where("session_string", "==", session_str).stream()
         if any(docs):
-            return False, "Session already exists in Firebase!"
+            return False, "এই সেশনটি আগেই যোগ করা হয়েছে!"
 
         db.collection("telegram_sessions").add({
             "session_string": session_str,
@@ -62,7 +62,7 @@ def get_all_sessions():
             sessions.append({
                 "doc_id": doc.id,
                 "session_string": data.get("session_string"),
-                "account_name": data.get("account_name", "Unknown Account")
+                "account_name": data.get("account_name", "Unknown User")
             })
         return sessions
     except Exception as e:
@@ -79,7 +79,7 @@ def delete_session_from_db(doc_id: str):
         print(f"Error deleting session: {e}", flush=True)
         return False
 
-# Analytics & User Tracking Functions
+# Analytics & User Tracking
 def track_user_in_db(user_id: int, username: str, name: str):
     if not db:
         return
@@ -118,23 +118,77 @@ def get_analytics_stats():
         print(f"Analytics fetch error: {e}", flush=True)
         return 0, 0
 
-# UI & State Trackers
+# UI Trackers & Rate Limits
 admin_states = {}
-last_update_time = {}
+progress_status = {}
+
+# Time Formatter Helper
+def format_time(seconds: int) -> str:
+    mins, secs = divmod(int(seconds), 60)
+    hours, mins = divmod(mins, 60)
+    if hours > 0:
+        return f"{hours:02d}:{mins:02d}:{secs:02d}"
+    return f"{mins:02d}:{secs:02d}"
+
+# Aesthetic Dynamic Progress Bar
+async def progress_bar(current, total, status_msg, action_name, user_id):
+    now = time.time()
+    user_data = progress_status.get(user_id, {})
+    last_update = user_data.get("last_time", 0)
+    start_time = user_data.get("start_time", now)
+
+    # 2.5s throttling to prevent flood error
+    if (now - last_update < 2.5) and current < total:
+        return
+
+    progress_status[user_id] = {
+        "last_time": now,
+        "start_time": start_time
+    }
+
+    percentage = (current / total) * 100
+    filled = int(percentage // 10)
+    bar = "▰" * filled + "▱" * (10 - filled)
+
+    curr_mb = current / (1024 * 1024)
+    tot_mb = total / (1024 * 1024)
+
+    # Speed & ETA calculation
+    elapsed_time = max(now - start_time, 0.1)
+    speed = current / elapsed_time  # Bytes/sec
+    speed_mb = speed / (1024 * 1024)
+
+    remaining_bytes = total - current
+    eta = remaining_bytes / speed if speed > 0 else 0
+    eta_str = format_time(eta)
+
+    text = (
+        f"╭──────── ⚡ **{action_name.upper()}** ⚡ ────────╮\n"
+        f"│\n"
+        f"├ 📊 **অগ্রগতি:** `[{bar}] {percentage:.1f}%`\n"
+        f"├ 📦 **সাইজ:** `{curr_mb:.2f} MB / {tot_mb:.2f} MB`\n"
+        f"├ 🚀 **স্পিড:** `{speed_mb:.2f} MB/s`\n"
+        f"├ ⏳ **বাকি সময়:** `{eta_str}`\n"
+        f"│\n"
+        f"╰──────────────────────────────────╯"
+    )
+    try:
+        await status_msg.edit_text(text)
+    except Exception:
+        pass
 
 # Health Check Endpoint
 async def handle_ping(request):
-    return web.Response(text="Clipwell High-Speed Engine Active!")
+    return web.Response(text="Clipwell High-Speed Engine is Running Smoothly!")
 
-# Auto-delete helper (5 minutes = 300 seconds)
+# Auto-delete helper
 async def auto_delete_messages(bot_client, chat_id: int, message_ids: list, delay_seconds: int = 300):
     await asyncio.sleep(delay_seconds)
     try:
         await bot_client.delete_messages(chat_id=chat_id, message_ids=message_ids)
     except Exception as e:
-        print(f"Auto delete error: {e}", flush=True)
+        print(f"Auto delete notice: {e}", flush=True)
 
-# Helper: Detect GIF
 def is_gif_message(msg):
     if not msg:
         return False
@@ -149,39 +203,10 @@ def has_downloadable_media(msg):
         msg and (msg.video or msg.photo or msg.document or msg.animation or msg.media_group_id)
     )
 
-# Caption Helper (Returns strictly original caption if present)
 def get_original_caption(original_caption: str) -> str:
     if original_caption and original_caption.strip():
         return original_caption.strip()
     return ""
-
-# Aesthetic Progress Bar Callback
-async def progress_bar(current, total, status_msg, action_name, user_id):
-    now = time.time()
-    last_time = last_update_time.get(user_id, 0)
-
-    if (now - last_time < 2.5) and current < total:
-        return
-
-    last_update_time[user_id] = now
-    percentage = (current / total) * 100
-    filled = int(percentage // 10)
-    bar = "█" * filled + "░" * (10 - filled)
-
-    curr_mb = current / (1024 * 1024)
-    tot_mb = total / (1024 * 1024)
-
-    text = (
-        f"╭─ ⚡ **{action_name.upper()}** ⚡\n"
-        f"│\n"
-        f"├ 📊 `[{bar}] {percentage:.1f}%`\n"
-        f"├ 📁 `📦 {curr_mb:.1f} MB / {tot_mb:.1f} MB`\n"
-        f"╰──────────────────────────"
-    )
-    try:
-        await status_msg.edit_text(text)
-    except Exception:
-        pass
 
 async def main():
     app = web.Application()
@@ -205,77 +230,176 @@ async def main():
         user = message.from_user
         track_user_in_db(user.id, user.username, user.first_name)
 
+        buttons = [
+            [
+                InlineKeyboardButton("⚡ সার্ভার স্ট্যাটাস", callback_data="btn_ping"),
+                InlineKeyboardButton("ℹ️ ব্যবহারের নিয়ম", callback_data="btn_help")
+            ]
+        ]
+        if user.id == OWNER_ID:
+            buttons.append([InlineKeyboardButton("⚙️ অ্যাডমিন প্যানেল", callback_data="btn_admin_shortcut")])
+
         text = (
-            "╭─ 🚀 **CLIPWELL DOWNLOADER** 🚀\n"
+            f"👋 **স্বাগতম, {user.first_name}!**\n\n"
+            "╭─────── 📥 **CLIPWELL PRO ENGINE** ───────╮\n"
             "│\n"
-            "├ 📥 Send any **Public** or **Private** Telegram link.\n"
-            "├ 🖼️ Supports Photo, Video, Album, Document & GIF.\n"
-            "├ ⚡ Fast download with live progress bar.\n"
-            "├ ⏳ **Auto-Delete:** Links & media auto-delete after 5 minutes.\n"
-            "╰──────────────────────────"
+            "├ 🔗 যেকোনো **পাবলিক** বা **প্রাইভেট** লিংক পাঠান\n"
+            "├ 🎬 **সাপোর্ট:** Photo, Video, Document, GIF, Album\n"
+            "├ ⚡ লাইভ স্পিড ট্র্যাকার ও আল্ট্রা-ফাস্ট আপলোড\n"
+            "├ ⏳ **অটো-ডিলিট:** প্রাইভেসি রক্ষার্থে ৫ মিনিটে রিমুভ\n"
+            "│\n"
+            "╰──────────────────────────────────╯\n\n"
+            "👉 *মিডিয়া পেতে নিচের ইনপুট বক্সে লিংক পেস্ট করুন।* "
         )
-        await message.reply_text(text)
+        await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
     # Command: /admin (Admin Control Panel)
     @bot.on_message(filters.command(["admin", "panel"]) & filters.private)
     async def admin_panel(client: Client, message: Message):
         if message.from_user.id != OWNER_ID:
-            await message.reply_text("❌ **Access Denied:** You are not authorized.")
+            await message.reply_text("⛔ **অনুমতি নেই:** আপনি এই কমান্ডটি ব্যবহারের যোগ্য নন।")
             return
 
         all_sess = get_all_sessions()
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 Analytics & Stats", callback_data="btn_stats")],
-            [InlineKeyboardButton("➕ Add New Session", callback_data="btn_add_session")],
-            [InlineKeyboardButton(f"📋 View All Sessions ({len(all_sess)})", callback_data="btn_list_sessions")],
-            [InlineKeyboardButton("🗑️ Remove Session", callback_data="btn_del_menu")]
+            [InlineKeyboardButton("📊 অ্যানালিটিক্স ও পরিসংখ্যান", callback_data="btn_stats")],
+            [InlineKeyboardButton("➕ নতুন সেশন যুক্ত করুন", callback_data="btn_add_session")],
+            [InlineKeyboardButton(f"📋 অ্যাক্টিভ সেশন লিস্ট ({len(all_sess)})", callback_data="btn_list_sessions")],
+            [InlineKeyboardButton("🗑️ সেশন রিমুভ করুন", callback_data="btn_del_menu")]
         ])
 
-        db_status = "🟢 Connected" if db else "🔴 Not Configured"
+        db_status = "🟢 সচল" if db else "🔴 সংযোগ বিচ্ছিন্ন"
         text = (
-            "╭─ ⚙️ **ADMIN CONTROL PANEL** ⚙️\n"
+            "╭─────── ⚙️ **ADMIN CONTROL DASHBOARD** ───────╮\n"
             "│\n"
             f"├ 💾 **Firebase DB:** `{db_status}`\n"
-            f"├ 🟢 **Active Sessions:** `{len(all_sess)}`\n"
-            "├ Select an option below to manage.\n"
-            "╰──────────────────────────"
+            f"├ 🔑 **অ্যাক্টিভ ক্লায়েন্ট সেশন:** `{len(all_sess)} টি`\n"
+            "├ নিচে থেকে কাঙ্ক্ষিত অপশন সিলেক্ট করুন।\n"
+            "│\n"
+            "╰──────────────────────────────────────────╯"
         )
         await message.reply_text(text, reply_markup=keyboard)
 
     # Callback Query Handler
     @bot.on_callback_query()
     async def callback_handler(client: Client, callback_query: CallbackQuery):
+        data = callback_query.data
         user_id = callback_query.from_user.id
-        if user_id != OWNER_ID:
-            await callback_query.answer("❌ Unauthorized!", show_alert=True)
+
+        # Public Callbacks
+        if data == "btn_ping":
+            start_ping = time.time()
+            msg = await callback_query.message.edit_text("📡 *পিং চেক করা হচ্ছে...*")
+            latency = (time.time() - start_ping) * 1000
+            await msg.edit_text(
+                f"╭─────── ⚡ **SERVER LATENCY** ───────╮\n"
+                f"│\n"
+                f"├ 🚀 **বটের রেসপন্স স্পিড:** `{latency:.2f} ms`\n"
+                f"├ 🟢 **ইঞ্জিন স্ট্যাটাস:** `অনলাইন & অ্যাক্টিভ`\n"
+                f"│\n"
+                f"╰───────────────────────────────────╯",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 ফিরে যান", callback_data="btn_back_home")]])
+            )
+            await callback_query.answer()
             return
 
-        data = callback_query.data
+        elif data == "btn_help":
+            help_text = (
+                "╭─────── 📖 **কীভাবে ব্যবহার করবেন?** ───────╮\n"
+                "│\n"
+                "├ **১.** যেকোনো টেলিগ্রাম পোস্টের লিংক কপি করুন।\n"
+                "├ **২.** এই বটে লিংকটি মেসেজ আকারে সেন্ড করুন।\n"
+                "├ **৩.** বট স্বয়ংক্রিয়ভাবে মিডিয়া ডাউনলোড করে দেবে।\n"
+                "├ ⚠️ *প্রাইভেট চ্যানেলের ক্ষেত্রে সেশন অ্যাকাউন্টকে*\n"
+                "│  *চ্যানেলটিতে যুক্ত থাকতে হবে।*\n"
+                "│\n"
+                "╰───────────────────────────────────╯"
+            )
+            await callback_query.message.edit_text(
+                help_text,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 ফিরে যান", callback_data="btn_back_home")]])
+            )
+            await callback_query.answer()
+            return
 
-        if data == "btn_stats":
+        elif data == "btn_back_home":
+            buttons = [
+                [
+                    InlineKeyboardButton("⚡ সার্ভার স্ট্যাটাস", callback_data="btn_ping"),
+                    InlineKeyboardButton("ℹ️ ব্যবহারের নিয়ম", callback_data="btn_help")
+                ]
+            ]
+            if user_id == OWNER_ID:
+                buttons.append([InlineKeyboardButton("⚙️ অ্যাডমিন প্যানেল", callback_data="btn_admin_shortcut")])
+
+            home_text = (
+                f"👋 **স্বাগতম, {callback_query.from_user.first_name}!**\n\n"
+                "╭─────── 📥 **CLIPWELL PRO ENGINE** ───────╮\n"
+                "│\n"
+                "├ 🔗 যেকোনো **পাবলিক** বা **প্রাইভেট** লিংক পাঠান\n"
+                "├ 🎬 **সাপোর্ট:** Photo, Video, Document, GIF, Album\n"
+                "├ ⚡ লাইভ স্পিড ট্র্যাকার ও আল্ট্রা-ফাস্ট আপলোড\n"
+                "├ ⏳ **অটো-ডিলিট:** প্রাইভেসি রক্ষার্থে ৫ মিনিটে রিমুভ\n"
+                "│\n"
+                "╰──────────────────────────────────╯"
+            )
+            await callback_query.message.edit_text(home_text, reply_markup=InlineKeyboardMarkup(buttons))
+            await callback_query.answer()
+            return
+
+        # Protected Admin Actions
+        if user_id != OWNER_ID:
+            await callback_query.answer("⛔ অননুমোদিত অ্যাক্সেস!", show_alert=True)
+            return
+
+        if data in ["btn_admin_shortcut", "btn_back_admin"]:
+            all_sess = get_all_sessions()
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📊 অ্যানালিটিক্স ও পরিসংখ্যান", callback_data="btn_stats")],
+                [InlineKeyboardButton("➕ নতুন সেশন যুক্ত করুন", callback_data="btn_add_session")],
+                [InlineKeyboardButton(f"📋 অ্যাক্টিভ সেশন লিস্ট ({len(all_sess)})", callback_data="btn_list_sessions")],
+                [InlineKeyboardButton("🗑️ সেশন রিমুভ করুন", callback_data="btn_del_menu")]
+            ])
+            db_status = "🟢 সচল" if db else "🔴 সংযোগ বিচ্ছিন্ন"
+            text = (
+                "╭─────── ⚙️ **ADMIN CONTROL DASHBOARD** ───────╮\n"
+                "│\n"
+                f"├ 💾 **Firebase DB:** `{db_status}`\n"
+                f"├ 🔑 **অ্যাক্টিভ ক্লায়েন্ট সেশন:** `{len(all_sess)} টি`\n"
+                "├ নিচে থেকে কাঙ্ক্ষিত অপশন সিলেক্ট করুন।\n"
+                "│\n"
+                "╰──────────────────────────────────────────╯"
+            )
+            await callback_query.message.edit_text(text, reply_markup=keyboard)
+            await callback_query.answer()
+
+        elif data == "btn_stats":
             total_users, total_downloads = get_analytics_stats()
             all_sess = get_all_sessions()
 
             text = (
-                "╭─ 📊 **BOT REAL-TIME ANALYTICS** 📊\n"
+                "╭─────── 📊 **লাইভ বট পরিসংখ্যান** ───────╮\n"
                 "│\n"
-                f"├ 👥 **Total Users:** `{total_users}`\n"
-                f"├ 📥 **Total Downloads:** `{total_downloads}`\n"
-                f"├ 🔑 **Active Sessions:** `{len(all_sess)}`\n"
-                f"├ 💾 **Firebase DB:** `Connected`\n"
-                "╰──────────────────────────"
+                f"├ 👥 **মোট ইউজার:** `{total_users} জন`\n"
+                f"├ 📥 **মোট ডাউনলোড সম্পন্ন:** `{total_downloads} টি`\n"
+                f"├ 🔑 **কানেক্টেড সেশন:** `{len(all_sess)} টি`\n"
+                f"├ 💾 **ক্লাউড ডেটাবেজ:** `সংযুক্ত (Firebase)`\n"
+                "│\n"
+                "╰───────────────────────────────────╯"
             )
-            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menu", callback_data="btn_back_admin")]])
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 মেনুতে ফিরুন", callback_data="btn_back_admin")]])
             await callback_query.message.edit_text(text, reply_markup=keyboard)
             await callback_query.answer()
 
         elif data == "btn_add_session":
             admin_states[user_id] = "WAITING_SESSION"
             await callback_query.message.reply(
-                "╭─ ➕ **ADD SESSION STRING** ➕\n"
+                "╭─────── ➕ **নতুন সেশন যুক্ত করুন** ───────╮\n"
                 "│\n"
-                "├ Please **reply to this message** with your Pyrogram `SESSION_STRING`:\n"
-                "╰──────────────────────────",
+                "├ আপনার Pyrogram `SESSION_STRING` টি কপি করে\n"
+                "├ **এই মেসেজে রিপ্লাই দিন:**\n"
+                "│\n"
+                "╰────────────────────────────────────────╯",
                 reply_markup=ForceReply(selective=True)
             )
             await callback_query.answer()
@@ -283,51 +407,34 @@ async def main():
         elif data == "btn_list_sessions":
             all_sess = get_all_sessions()
             if not all_sess:
-                await callback_query.message.edit_text("ℹ️ **No active sessions found in Firebase DB!**")
+                await callback_query.message.edit_text(
+                    "⚠️ **কোনো সেশন যুক্ত করা নেই!**",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 মেনু", callback_data="btn_back_admin")]])
+                )
             else:
-                text = f"╭─ 📋 **FIREBASE SESSIONS ({len(all_sess)})** 📋\n│\n"
+                text = f"╭─────── 📋 **সংযুক্ত সেশন তালিকা ({len(all_sess)})** ───────╮\n│\n"
                 for idx, s in enumerate(all_sess, 1):
-                    text += f"├ **#{idx} Account:** `{s['account_name']}`\n"
+                    text += f"├ **#{idx} অ্যাকাউন্ট:** `{s['account_name']}`\n"
                     text += f"│  🔑 **Doc ID:** `{s['doc_id']}`\n│\n"
-                text += "╰──────────────────────────"
+                text += "╰──────────────────────────────────────╯"
 
-                keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menu", callback_data="btn_back_admin")]])
+                keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 মেনুতে ফিরুন", callback_data="btn_back_admin")]])
                 await callback_query.message.edit_text(text, reply_markup=keyboard)
-            await callback_query.answer()
-
-        elif data == "btn_back_admin":
-            all_sess = get_all_sessions()
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📊 Analytics & Stats", callback_data="btn_stats")],
-                [InlineKeyboardButton("➕ Add New Session", callback_data="btn_add_session")],
-                [InlineKeyboardButton(f"📋 View All Sessions ({len(all_sess)})", callback_data="btn_list_sessions")],
-                [InlineKeyboardButton("🗑️ Remove Session", callback_data="btn_del_menu")]
-            ])
-            db_status = "🟢 Connected" if db else "🔴 Not Configured"
-            text = (
-                "╭─ ⚙️ **ADMIN CONTROL PANEL** ⚙️\n"
-                "│\n"
-                f"├ 💾 **Firebase DB:** `{db_status}`\n"
-                f"├ 🟢 **Active Sessions:** `{len(all_sess)}`\n"
-                "├ Select an option below to manage.\n"
-                "╰──────────────────────────"
-            )
-            await callback_query.message.edit_text(text, reply_markup=keyboard)
             await callback_query.answer()
 
         elif data == "btn_del_menu":
             all_sess = get_all_sessions()
             if not all_sess:
-                await callback_query.answer("No sessions found in Firebase!", show_alert=True)
+                await callback_query.answer("কোনো সেশন পাওয়া যায়নি!", show_alert=True)
                 return
 
             buttons = []
             for s in all_sess:
                 buttons.append([InlineKeyboardButton(f"❌ {s['account_name']}", callback_data=f"del_{s['doc_id']}")])
-            buttons.append([InlineKeyboardButton("🔙 Back", callback_data="btn_back_admin")])
+            buttons.append([InlineKeyboardButton("🔙 ফিরে যান", callback_data="btn_back_admin")])
 
             await callback_query.message.edit_text(
-                "╭─ 🗑️ **DELETE SESSION FROM FIREBASE** 🗑️\n│\n├ Select the account to remove:\n╰──────────────────────────",
+                "╭─────── 🗑️ **সেশন ডিলিট প্যানেল** ───────╮\n│\n├ যে অ্যাকাউন্টটি সরাতে চান তা সিলেক্ট করুন:\n╰─────────────────────────────────────╯",
                 reply_markup=InlineKeyboardMarkup(buttons)
             )
             await callback_query.answer()
@@ -336,9 +443,15 @@ async def main():
             doc_id = data.split("del_")[1]
             success = delete_session_from_db(doc_id)
             if success:
-                await callback_query.message.edit_text("✅ **Successfully deleted session from Firebase!**")
+                await callback_query.message.edit_text(
+                    "✅ **সেশনটি ডেটাবেজ থেকে মুছে ফেলা হয়েছে!**",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 মেনু", callback_data="btn_back_admin")]])
+                )
             else:
-                await callback_query.message.edit_text("❌ **Failed to delete session.**")
+                await callback_query.message.edit_text(
+                    "❌ **সেশনটি ডিলিট করা যায়নি।**",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 মেনু", callback_data="btn_back_admin")]])
+                )
             await callback_query.answer()
 
     # Text Input & Link Handler
@@ -352,10 +465,10 @@ async def main():
 
         track_user_in_db(user_id, message.from_user.username, message.from_user.first_name)
 
-        # 1. Handle Admin Session Input
+        # 1. Admin Session Submission
         if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_SESSION":
             admin_states.pop(user_id, None)
-            status_msg = await message.reply_text("⏳ **Validating session string with Telegram...**")
+            status_msg = await message.reply_text("⏳ **টেলিগ্রাম সেশন যাচাই করা হচ্ছে...**")
 
             test_client = Client(f"test_{time.time()}", api_id=API_ID, api_hash=API_HASH, session_string=text_str, in_memory=True)
             try:
@@ -366,14 +479,18 @@ async def main():
 
                 success, err_msg = add_session_to_db(text_str, acc_name)
                 if success:
-                    await status_msg.edit_text(f"🎉 **Session saved permanently to Firebase!**\n👤 **Account:** `{acc_name}`")
+                    await status_msg.edit_text(
+                        f"🎉 **সেশন সফলভাবে যুক্ত হয়েছে!**\n"
+                        f"👤 **অ্যাকাউন্ট নাম:** `{acc_name}`\n"
+                        f"💾 **স্টোরেজ:** `Firebase Cloud`"
+                    )
                 else:
-                    await status_msg.edit_text(f"⚠️ **Save Error:** `{err_msg}`")
+                    await status_msg.edit_text(f"⚠️ **ত্রুটি:** `{err_msg}`")
             except Exception as e:
-                await status_msg.edit_text(f"❌ **Invalid Session String!**\nError: `{str(e)}`")
+                await status_msg.edit_text(f"❌ **ভুল বা অকার্যকর সেশন স্ট্রিং!**\nত্রুটি: `{str(e)}`")
             return
 
-        # 2. Process Telegram Links
+        # 2. Telegram Link Regex Matching
         private_pattern = r"t\.me/c/(\d+)/(\d+)"
         public_pattern = r"t\.me/([^/]+)/(\d+)"
 
@@ -381,15 +498,15 @@ async def main():
         public_match = re.search(public_pattern, text_str)
 
         if not (private_match or public_match):
-            await message.reply_text("⚠️ **Invalid Link:** Please send a valid Telegram post link.")
+            await message.reply_text("⚠️ **ভুল লিংক:** অনুগ্রহ করে একটি সঠিক টেলিগ্রাম পোস্টের লিংক দিন।")
             return
 
         active_sessions = get_all_sessions()
         if not active_sessions:
-            await message.reply_text("⚠️ **Bot Error:** No active user sessions found in Firebase. Add sessions via `/admin`.")
+            await message.reply_text("⚠️ **বট কনফিগারেশন ত্রুটি:** কোনো সেশন কানেক্ট করা নেই। অ্যাডমিনকে জানান।")
             return
 
-        status = await message.reply_text("🔍 **Checking post link across active Firebase sessions...**")
+        status = await message.reply_text("🔍 **পোস্টটি সেশন নেটওয়ার্কে খোঁজা হচ্ছে...**")
 
         if private_match:
             chat_id = int("-100" + private_match.group(1))
@@ -411,11 +528,10 @@ async def main():
             )
             try:
                 await temp_client.start()
-
                 try:
                     await temp_client.get_chat(chat_id)
-                except Exception as chat_err:
-                    print(f"Chat resolve notice for {sess['account_name']}: {chat_err}", flush=True)
+                except Exception:
+                    pass
 
                 msg = await temp_client.get_messages(chat_id, msg_id)
                 if has_downloadable_media(msg):
@@ -425,16 +541,22 @@ async def main():
                 else:
                     await temp_client.stop()
             except Exception as e:
-                print(f"Session {sess['account_name']} error: {e}", flush=True)
+                print(f"Session notice for {sess['account_name']}: {e}", flush=True)
                 if temp_client.is_connected:
                     await temp_client.stop()
 
         if not target_msg or not working_user_client:
             await status.edit_text(
-                "❌ **Post Not Found!**\n"
-                "Make sure at least one connected account in Firebase sessions is an active **member** of that private channel."
+                "❌ **পোস্টটি পাওয়া যায়নি!**\n\n"
+                "📌 নিশ্চিত করুন আপনার সেশন অ্যাকাউন্টের অন্তত একটি সেই প্রাইভেট চ্যানেলে যুক্ত রয়েছে।"
             )
             return
+
+        # Initialize progress tracker state for this user
+        progress_status[user_id] = {
+            "last_time": time.time(),
+            "start_time": time.time()
+        }
 
         try:
             # Case 1: Album (Media Group)
@@ -446,10 +568,12 @@ async def main():
 
                 for idx, msg in enumerate(group_messages):
                     if msg.video or msg.photo or msg.document or msg.animation:
+                        # Reset start time for accurate step calculation
+                        progress_status[user_id]["start_time"] = time.time()
                         file_path = await working_user_client.download_media(
                             msg,
                             progress=progress_bar,
-                            progress_args=(status, f"Downloading Album 📚 ({idx+1}/{len(group_messages)})", user_id)
+                            progress_args=(status, f"অ্যালবাম ডাউনলোড ({idx+1}/{len(group_messages)})", user_id)
                         )
                         downloaded_files.append(file_path)
 
@@ -466,12 +590,12 @@ async def main():
 
                 sent_msgs = []
                 if media_list:
-                    await status.edit_text("⬆️ **Uploading Album 📚...**")
+                    await status.edit_text("⬆️ **অ্যালবাম আপলোড করা হচ্ছে...**")
                     sent_msgs = await client.send_media_group(chat_id=message.chat.id, media=media_list)
 
                 if gif_files:
-                    await status.edit_text("⬆️ **Uploading GIF(s) 🎞️...**")
-                    for g_idx, (gpath, gcap_orig) in enumerate(gif_files):
+                    await status.edit_text("⬆️ **অ্যানিমেশন/GIF আপলোড করা হচ্ছে...**")
+                    for gpath, gcap_orig in gif_files:
                         gcap = get_original_caption(gcap_orig)
                         gif_msg = await client.send_animation(
                             chat_id=message.chat.id,
@@ -492,29 +616,31 @@ async def main():
                     delete_msg_ids = [message.id] + [m.id for m in sent_msgs]
                     asyncio.create_task(auto_delete_messages(bot, message.chat.id, delete_msg_ids, delay_seconds=300))
                 else:
-                    await status.edit_text("❌ **No downloadable media found in this album.**")
+                    await status.edit_text("❌ **অ্যালবামে কোনো ডাউনলোডযোগ্য ফাইল পাওয়া যায়নি।**")
 
-            # Case 2: Single Media (Video / Photo / Document / GIF)
+            # Case 2: Single Media
             else:
                 is_gif = is_gif_message(target_msg)
                 final_caption = get_original_caption(target_msg.caption)
 
                 if is_gif:
-                    media_type_str = "GIF 🎞️"
+                    media_type_str = "GIF"
                 elif target_msg.video:
-                    media_type_str = "Video 🎬"
+                    media_type_str = "ভিডিও"
                 elif target_msg.photo:
-                    media_type_str = "Photo 🖼️"
+                    media_type_str = "ছবি"
                 else:
-                    media_type_str = "Document 📁"
+                    media_type_str = "ডকুমেন্ট"
 
+                progress_status[user_id]["start_time"] = time.time()
                 file_path = await working_user_client.download_media(
                     target_msg,
                     progress=progress_bar,
-                    progress_args=(status, f"Downloading {media_type_str}", user_id)
+                    progress_args=(status, f"{media_type_str} ডাউনলোড হচ্ছে", user_id)
                 )
 
-                last_update_time[user_id] = 0
+                # Reset tracker for upload
+                progress_status[user_id]["start_time"] = time.time()
 
                 sent_msg = None
                 if is_gif:
@@ -523,7 +649,7 @@ async def main():
                         animation=file_path,
                         caption=final_caption,
                         progress=progress_bar,
-                        progress_args=(status, f"Uploading {media_type_str}", user_id)
+                        progress_args=(status, f"{media_type_str} আপলোড হচ্ছে", user_id)
                     )
                 elif target_msg.video:
                     sent_msg = await client.send_video(
@@ -532,7 +658,7 @@ async def main():
                         caption=final_caption,
                         supports_streaming=True,
                         progress=progress_bar,
-                        progress_args=(status, f"Uploading {media_type_str}", user_id)
+                        progress_args=(status, f"{media_type_str} আপলোড হচ্ছে", user_id)
                     )
                 elif target_msg.photo:
                     sent_msg = await client.send_photo(
@@ -540,7 +666,7 @@ async def main():
                         photo=file_path,
                         caption=final_caption,
                         progress=progress_bar,
-                        progress_args=(status, f"Uploading {media_type_str}", user_id)
+                        progress_args=(status, f"{media_type_str} আপলোড হচ্ছে", user_id)
                     )
                 elif target_msg.document:
                     sent_msg = await client.send_document(
@@ -548,7 +674,7 @@ async def main():
                         document=file_path,
                         caption=final_caption,
                         progress=progress_bar,
-                        progress_args=(status, f"Uploading {media_type_str}", user_id)
+                        progress_args=(status, f"{media_type_str} আপলোড হচ্ছে", user_id)
                     )
 
                 if os.path.exists(file_path):
@@ -563,7 +689,7 @@ async def main():
                     asyncio.create_task(auto_delete_messages(bot, message.chat.id, delete_msg_ids, delay_seconds=300))
 
         except Exception as e:
-            await status.edit_text(f"❌ **Error:** `{str(e)}`")
+            await status.edit_text(f"❌ **প্রসেসিং ত্রুটি:** `{str(e)}`")
         finally:
             if working_user_client and working_user_client.is_connected:
                 await working_user_client.stop()
@@ -571,12 +697,11 @@ async def main():
     # Start Main Bot
     try:
         await bot.start()
-        print(">>> CLIPWELL FAST DOWNLOADER STARTED SUCCESSFULLY <<<", flush=True)
+        print(">>> 🚀 CLIPWELL ULTRA FAST BOT STARTED SUCCESSFULLY <<<", flush=True)
     except FloodWait as e:
-        print(f"⚠️ Telegram FloodWait detected! Waiting for {e.value} seconds...", flush=True)
+        print(f"⚠️ FloodWait: Waiting for {e.value} seconds...", flush=True)
         await asyncio.sleep(e.value + 5)
         await bot.start()
-        print(">>> CLIPWELL FAST DOWNLOADER STARTED SUCCESSFULLY AFTER FLOODWAIT <<<", flush=True)
 
     await idle()
 
