@@ -4,12 +4,12 @@ import time
 import json
 import asyncio
 from aiohttp import web
-from pyrogram import Client, filters, idle
-from pyrogram.types import (
+from hydrogram import Client, filters, idle
+from hydrogram.types import (
     Message, InputMediaVideo, InputMediaPhoto,
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ForceReply
 )
-from pyrogram.errors import FloodWait
+from hydrogram.errors import FloodWait
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -182,41 +182,92 @@ def has_media(msg):
     return bool(msg and (msg.video or msg.photo or msg.document or msg.animation or msg.media_group_id))
 
 # Handlers
-@bot.on_message(filters.all & filters.private)
-async def global_message_router(client: Client, message: Message):
+@bot.on_message(filters.command(["start"]) & filters.private)
+async def start_cmd(client: Client, message: Message):
     user = message.from_user
-    if not user:
-        return
-
-    text_str = (message.text or message.caption or "").strip()
-    print(f"[DEBUG] Message from {user.id}: {text_str}", flush=True)
-
-    # Track user
     asyncio.create_task(asyncio.to_thread(sync_track_user, user.id, user.username, user.first_name))
 
-    # /start command
-    if text_str.startswith("/start"):
+    buttons = [[
+        InlineKeyboardButton("Ping", callback_data="btn_ping"),
+        InlineKeyboardButton("Help", callback_data="btn_help")
+    ]]
+    if user.id == OWNER_ID:
+        buttons.append([InlineKeyboardButton("Admin Panel", callback_data="btn_admin_shortcut")])
+
+    text = (
+        f"**Hello {user.first_name},**\n\n"
+        "Send any Telegram post link (Public or Private Channel) to download media.\n"
+        "• Sent media auto-deletes in 5 minutes."
+    )
+    await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+@bot.on_message(filters.command(["admin", "panel"]) & filters.private)
+async def admin_panel(client: Client, message: Message):
+    if message.from_user.id != OWNER_ID:
+        await message.reply_text("Access denied.")
+        return
+
+    all_sess = await asyncio.to_thread(sync_get_all_sessions)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Stats", callback_data="btn_stats")],
+        [InlineKeyboardButton("Add Session", callback_data="btn_add_session")],
+        [InlineKeyboardButton(f"Sessions ({len(all_sess)})", callback_data="btn_list_sessions")],
+        [InlineKeyboardButton("Delete Session", callback_data="btn_del_menu")]
+    ])
+
+    db_status = "Online" if db else "Offline"
+    text = (
+        "**Admin Panel**\n\n"
+        f"• DB: `{db_status}`\n"
+        f"• Active Sessions: `{len(all_sess)}`"
+    )
+    await message.reply_text(text, reply_markup=keyboard)
+
+@bot.on_callback_query()
+async def callback_handler(client: Client, callback_query: CallbackQuery):
+    data = callback_query.data
+    user_id = callback_query.from_user.id
+
+    if data == "btn_ping":
+        start_ping = time.time()
+        msg = await callback_query.message.edit_text("Checking...")
+        latency = (time.time() - start_ping) * 1000
+        await msg.edit_text(
+            f"**Latency:** `{latency:.1f} ms`",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_home")]])
+        )
+        await callback_query.answer()
+        return
+
+    elif data == "btn_help":
+        await callback_query.message.edit_text(
+            "**How to use:**\n\n"
+            "Send any Telegram channel post link (public `t.me/...` or private `t.me/c/...`) to download media directly.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_home")]])
+        )
+        await callback_query.answer()
+        return
+
+    elif data == "btn_back_home":
         buttons = [[
             InlineKeyboardButton("Ping", callback_data="btn_ping"),
             InlineKeyboardButton("Help", callback_data="btn_help")
         ]]
-        if user.id == OWNER_ID:
+        if user_id == OWNER_ID:
             buttons.append([InlineKeyboardButton("Admin Panel", callback_data="btn_admin_shortcut")])
 
-        text = (
-            f"**Hello {user.first_name},**\n\n"
-            "Send any Telegram post link (Public or Private Channel) to download media.\n"
-            "• Sent media auto-deletes in 5 minutes."
+        await callback_query.message.edit_text(
+            "Send any Telegram post link to download media.",
+            reply_markup=InlineKeyboardMarkup(buttons)
         )
-        await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+        await callback_query.answer()
         return
 
-    # /admin or /panel command
-    if text_str.startswith("/admin") or text_str.startswith("/panel"):
-        if user.id != OWNER_ID:
-            await message.reply_text("Access denied.")
-            return
+    if user_id != OWNER_ID:
+        await callback_query.answer("Unauthorized.", show_alert=True)
+        return
 
+    if data in ["btn_admin_shortcut", "btn_back_admin"]:
         all_sess = await asyncio.to_thread(sync_get_all_sessions)
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("Stats", callback_data="btn_stats")],
@@ -224,19 +275,89 @@ async def global_message_router(client: Client, message: Message):
             [InlineKeyboardButton(f"Sessions ({len(all_sess)})", callback_data="btn_list_sessions")],
             [InlineKeyboardButton("Delete Session", callback_data="btn_del_menu")]
         ])
-
         db_status = "Online" if db else "Offline"
-        text = (
-            "**Admin Panel**\n\n"
-            f"• DB: `{db_status}`\n"
-            f"• Active Sessions: `{len(all_sess)}`"
+        await callback_query.message.edit_text(
+            f"**Admin Panel**\n\n• DB: `{db_status}`\n• Sessions: `{len(all_sess)}`",
+            reply_markup=keyboard
         )
-        await message.reply_text(text, reply_markup=keyboard)
+        await callback_query.answer()
+
+    elif data == "btn_stats":
+        users, downloads = await asyncio.to_thread(sync_get_stats)
+        all_sess = await asyncio.to_thread(sync_get_all_sessions)
+
+        stats_lines = [
+            "**Bot Statistics**\n",
+            f"• Total Users: `{users}`",
+            f"• Total Downloads: `{downloads}`",
+            f"• Active Sessions: `{len(all_sess)}`"
+        ]
+
+        await callback_query.message.edit_text(
+            "\n".join(stats_lines),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
+        )
+        await callback_query.answer()
+
+    elif data == "btn_add_session":
+        admin_states[user_id] = "WAITING_SESSION"
+        await callback_query.message.reply(
+            "Send the Pyrogram `SESSION_STRING` in reply to this message.",
+            reply_markup=ForceReply(selective=True)
+        )
+        await callback_query.answer()
+
+    elif data == "btn_list_sessions":
+        all_sess = await asyncio.to_thread(sync_get_all_sessions)
+        if not all_sess:
+            await callback_query.message.edit_text(
+                "No active sessions found.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
+            )
+        else:
+            lines = ["**Active Sessions:**\n"]
+            for idx, s in enumerate(all_sess, 1):
+                lines.append(f"{idx}. `{s['account_name']}` (ID: `{s['doc_id']}`)")
+            await callback_query.message.edit_text(
+                "\n".join(lines),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
+            )
+        await callback_query.answer()
+
+    elif data == "btn_del_menu":
+        all_sess = await asyncio.to_thread(sync_get_all_sessions)
+        if not all_sess:
+            await callback_query.answer("No sessions found.", show_alert=True)
+            return
+
+        buttons = [[InlineKeyboardButton(s['account_name'], callback_data=f"del_{s['doc_id']}")] for s in all_sess]
+        buttons.append([InlineKeyboardButton("Back", callback_data="btn_back_admin")])
+        await callback_query.message.edit_text("Select session to remove:", reply_markup=InlineKeyboardMarkup(buttons))
+        await callback_query.answer()
+
+    elif data.startswith("del_"):
+        doc_id = data.split("del_")[1]
+        success = await asyncio.to_thread(sync_delete_session, doc_id)
+        msg = "Session deleted." if success else "Failed to delete session."
+        await callback_query.message.edit_text(
+            msg,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
+        )
+        await callback_query.answer()
+
+@bot.on_message(filters.text & filters.private)
+async def text_handler(client: Client, message: Message):
+    user_id = message.from_user.id
+    text_str = message.text.strip()
+
+    if text_str.startswith("/"):
         return
 
-    # Admin Session Input Waiter
-    if user.id == OWNER_ID and admin_states.get(user.id) == "WAITING_SESSION":
-        admin_states.pop(user.id, None)
+    asyncio.create_task(asyncio.to_thread(sync_track_user, user_id, message.from_user.username, message.from_user.first_name))
+
+    # Admin Session Input
+    if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_SESSION":
+        admin_states.pop(user_id, None)
         status_msg = await message.reply_text("Validating session...")
 
         test_client = Client(f"test_{time.time()}", api_id=API_ID, api_hash=API_HASH, session_string=text_str, in_memory=True)
@@ -255,7 +376,7 @@ async def global_message_router(client: Client, message: Message):
             await status_msg.edit_text(f"Invalid session: `{str(e)}`")
         return
 
-    # Telegram Links (Public & Private)
+    # Telegram Links
     private_pattern = r"t\.me/c/(\d+)/(\d+)"
     public_pattern = r"t\.me/([^/]+)/(\d+)"
 
@@ -418,130 +539,7 @@ async def global_message_router(client: Client, message: Message):
                 await working_user_client.stop()
         return
 
-    if not text_str.startswith("/"):
-        await message.reply_text("Invalid link. Please send a valid Telegram post link (e.g. `t.me/...` or `t.me/c/...`).")
-
-@bot.on_callback_query()
-async def callback_handler(client: Client, callback_query: CallbackQuery):
-    data = callback_query.data
-    user_id = callback_query.from_user.id
-
-    if data == "btn_ping":
-        start_ping = time.time()
-        msg = await callback_query.message.edit_text("Checking...")
-        latency = (time.time() - start_ping) * 1000
-        await msg.edit_text(
-            f"**Latency:** `{latency:.1f} ms`",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_home")]])
-        )
-        await callback_query.answer()
-        return
-
-    elif data == "btn_help":
-        await callback_query.message.edit_text(
-            "**How to use:**\n\n"
-            "Send any Telegram channel post link (public `t.me/...` or private `t.me/c/...`) to download media directly.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_home")]])
-        )
-        await callback_query.answer()
-        return
-
-    elif data == "btn_back_home":
-        buttons = [[
-            InlineKeyboardButton("Ping", callback_data="btn_ping"),
-            InlineKeyboardButton("Help", callback_data="btn_help")
-        ]]
-        if user_id == OWNER_ID:
-            buttons.append([InlineKeyboardButton("Admin Panel", callback_data="btn_admin_shortcut")])
-
-        await callback_query.message.edit_text(
-            "Send any Telegram post link to download media.",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-        await callback_query.answer()
-        return
-
-    if user_id != OWNER_ID:
-        await callback_query.answer("Unauthorized.", show_alert=True)
-        return
-
-    if data in ["btn_admin_shortcut", "btn_back_admin"]:
-        all_sess = await asyncio.to_thread(sync_get_all_sessions)
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Stats", callback_data="btn_stats")],
-            [InlineKeyboardButton("Add Session", callback_data="btn_add_session")],
-            [InlineKeyboardButton(f"Sessions ({len(all_sess)})", callback_data="btn_list_sessions")],
-            [InlineKeyboardButton("Delete Session", callback_data="btn_del_menu")]
-        ])
-        db_status = "Online" if db else "Offline"
-        await callback_query.message.edit_text(
-            f"**Admin Panel**\n\n• DB: `{db_status}`\n• Sessions: `{len(all_sess)}`",
-            reply_markup=keyboard
-        )
-        await callback_query.answer()
-
-    elif data == "btn_stats":
-        users, downloads = await asyncio.to_thread(sync_get_stats)
-        all_sess = await asyncio.to_thread(sync_get_all_sessions)
-
-        stats_lines = [
-            "**Bot Statistics**\n",
-            f"• Total Users: `{users}`",
-            f"• Total Downloads: `{downloads}`",
-            f"• Active Sessions: `{len(all_sess)}`"
-        ]
-
-        await callback_query.message.edit_text(
-            "\n".join(stats_lines),
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
-        )
-        await callback_query.answer()
-
-    elif data == "btn_add_session":
-        admin_states[user_id] = "WAITING_SESSION"
-        await callback_query.message.reply(
-            "Send the Pyrogram `SESSION_STRING` in reply to this message.",
-            reply_markup=ForceReply(selective=True)
-        )
-        await callback_query.answer()
-
-    elif data == "btn_list_sessions":
-        all_sess = await asyncio.to_thread(sync_get_all_sessions)
-        if not all_sess:
-            await callback_query.message.edit_text(
-                "No active sessions found.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
-            )
-        else:
-            lines = ["**Active Sessions:**\n"]
-            for idx, s in enumerate(all_sess, 1):
-                lines.append(f"{idx}. `{s['account_name']}` (ID: `{s['doc_id']}`)")
-            await callback_query.message.edit_text(
-                "\n".join(lines),
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
-            )
-        await callback_query.answer()
-
-    elif data == "btn_del_menu":
-        all_sess = await asyncio.to_thread(sync_get_all_sessions)
-        if not all_sess:
-            await callback_query.answer("No sessions found.", show_alert=True)
-            return
-
-        buttons = [[InlineKeyboardButton(s['account_name'], callback_data=f"del_{s['doc_id']}")] for s in all_sess]
-        buttons.append([InlineKeyboardButton("Back", callback_data="btn_back_admin")])
-        await callback_query.message.edit_text("Select session to remove:", reply_markup=InlineKeyboardMarkup(buttons))
-        await callback_query.answer()
-
-    elif data.startswith("del_"):
-        doc_id = data.split("del_")[1]
-        success = await asyncio.to_thread(sync_delete_session, doc_id)
-        msg = "Session deleted." if success else "Failed to delete session."
-        await callback_query.message.edit_text(
-            msg,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
-        )
-        await callback_query.answer()
+    await message.reply_text("Invalid link. Please send a valid Telegram post link (e.g. `t.me/...` or `t.me/c/...`).")
 
 async def handle_ping(request):
     return web.Response(text="Bot is running.")
@@ -556,7 +554,7 @@ async def main():
 
     try:
         await bot.start()
-        print("Telegram Downloader Bot started successfully.", flush=True)
+        print("Telegram Downloader Bot is fully LIVE and listening for messages.", flush=True)
     except FloodWait as e:
         print(f"FloodWait: Sleeping {e.value}s", flush=True)
         await asyncio.sleep(e.value + 5)
