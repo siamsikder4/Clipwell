@@ -230,15 +230,16 @@ def extract_and_download_social(url: str, user_id: int, quality_format: str = "b
     timestamp = int(time.time())
     out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_%(id)s.%(ext)s")
     
+    # Accurate resolution matching rules
     if quality_format == "audio":
         format_rule = "bestaudio/best"
         merge_fmt = "mp3"
     elif quality_format in ["360", "480", "720", "1080"]:
         h = quality_format
-        format_rule = f"bestvideo[height<={h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={h}]+bestaudio/best[height<={h}]/best"
+        format_rule = f"bestvideo[height<={h}]+bestaudio/best[height<={h}]"
         merge_fmt = "mp4"
     else:
-        format_rule = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best"
+        format_rule = "bestvideo+bestaudio/best"
         merge_fmt = "mp4"
 
     ydl_opts = {
