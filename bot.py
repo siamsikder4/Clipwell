@@ -12,6 +12,7 @@ from pyrogram.types import (
 )
 from pyrogram.errors import FloodWait
 from aiohttp import web
+import yt_dlp
 
 # Configuration
 API_ID = int(os.environ.get("API_ID", "35039821"))
@@ -20,6 +21,10 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 FIREBASE_KEY_RAW = os.environ.get("FIREBASE_KEY", "").strip()
 OWNER_ID = 6142774415
 PORT = int(os.environ.get("PORT", "8080"))
+
+# Ensure download directory exists
+DOWNLOAD_DIR = "downloads"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # Database Initialization
 db = None
@@ -114,7 +119,7 @@ def get_stats():
         print(f"Stats Error: {e}", flush=True)
         return 0, 0
 
-# UI State & Rate Limits
+# UI State & Progress Tracker
 admin_states = {}
 progress_status = {}
 
@@ -174,6 +179,34 @@ def is_gif_message(msg):
 def has_media(msg):
     return bool(msg and (msg.video or msg.photo or msg.document or msg.animation or msg.media_group_id))
 
+# yt-dlp Core Downloader Worker
+def extract_and_download_social(url: str, user_id: int):
+    timestamp = int(time.time())
+    out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_%(id)s.%(ext)s")
+    
+    ydl_opts = {
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'outtmpl': out_template,
+        'merge_output_format': 'mp4',
+        'quiet': True,
+        'no_warnings': True,
+        'max_filesize': 1900 * 1024 * 1024,  # Under 2GB for Telegram limit
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        file_path = ydl.prepare_filename(info)
+        
+        # In case merging produced .mp4 extension
+        if not os.path.exists(file_path):
+            base, _ = os.path.splitext(file_path)
+            if os.path.exists(base + ".mp4"):
+                file_path = base + ".mp4"
+
+        title = info.get('title', 'Downloaded Media')
+        duration = int(info.get('duration', 0) or 0)
+        return file_path, title, duration
+
 async def main():
     app = web.Application()
     app.router.add_get("/", handle_ping)
@@ -198,8 +231,8 @@ async def main():
 
         text = (
             f"**Hello {user.first_name},**\n\n"
-            "Send any public or private Telegram post link.\n"
-            "• Supports Photo, Video, Document, GIF, Album.\n"
+            "Send any supported link to download:\n"
+            "• **Supported:** Telegram, YouTube, TikTok, Instagram, Facebook\n"
             "• Sent media auto-deletes in 5 minutes."
         )
         await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
@@ -245,9 +278,9 @@ async def main():
         elif data == "btn_help":
             await callback_query.message.edit_text(
                 "**How to use:**\n\n"
-                "1. Copy any Telegram post link.\n"
-                "2. Send the link here.\n"
-                "3. The bot will download and forward the media.",
+                "1. Copy video URL (Telegram, YouTube, TikTok, Instagram, Facebook).\n"
+                "2. Send it directly here.\n"
+                "3. The bot will process and send the file.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_home")]])
             )
             await callback_query.answer()
@@ -262,7 +295,7 @@ async def main():
                 buttons.append([InlineKeyboardButton("Admin Panel", callback_data="btn_admin_shortcut")])
 
             await callback_query.message.edit_text(
-                "Send any public or private Telegram post link to download media.",
+                "Send any supported link (Telegram, YouTube, TikTok, Instagram, Facebook).",
                 reply_markup=InlineKeyboardMarkup(buttons)
             )
             await callback_query.answer()
@@ -358,6 +391,7 @@ async def main():
 
         track_user(user_id, message.from_user.username, message.from_user.first_name)
 
+        # 1. Admin Session Input
         if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_SESSION":
             admin_states.pop(user_id, None)
             status_msg = await message.reply_text("Validating session...")
@@ -378,6 +412,48 @@ async def main():
                 await status_msg.edit_text(f"Invalid session: `{str(e)}`")
             return
 
+        # 2. Social Media Links (YouTube, TikTok, Instagram, Facebook, etc.)
+        social_pattern = r"(https?://(?:www\.)?(?:youtube\.com|youtu\.be|instagram\.com|tiktok\.com|facebook\.com|fb\.watch)/[^\s]+)"
+        social_match = re.search(social_pattern, text_str)
+
+        if social_match:
+            target_url = social_match.group(0)
+            status = await message.reply_text("Processing media URL...")
+            try:
+                # Run download in a separate thread to prevent blocking
+                file_path, title, duration = await asyncio.to_thread(extract_and_download_social, target_url, user_id)
+                
+                if not file_path or not os.path.exists(file_path):
+                    await status.edit_text("Failed to download video.")
+                    return
+
+                progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
+
+                sent_msg = await client.send_video(
+                    chat_id=message.chat.id,
+                    video=file_path,
+                    caption=f"**{title[:60]}**",
+                    duration=duration,
+                    supports_streaming=True,
+                    progress=progress_bar,
+                    progress_args=(status, "Uploading Video", user_id)
+                )
+
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+
+                increment_downloads()
+                await status.delete()
+
+                if sent_msg:
+                    del_ids = [message.id, sent_msg.id]
+                    asyncio.create_task(auto_delete_messages(bot, message.chat.id, del_ids, 300))
+
+            except Exception as e:
+                await status.edit_text(f"Download Error: `{str(e)[:100]}`")
+            return
+
+        # 3. Telegram Post Links
         private_pattern = r"t\.me/c/(\d+)/(\d+)"
         public_pattern = r"t\.me/([^/]+)/(\d+)"
 
@@ -385,7 +461,7 @@ async def main():
         public_match = re.search(public_pattern, text_str)
 
         if not (private_match or public_match):
-            await message.reply_text("Invalid link.")
+            await message.reply_text("Invalid link. Send Telegram, YouTube, TikTok, Instagram, or Facebook URL.")
             return
 
         active_sessions = get_all_sessions()
@@ -437,7 +513,7 @@ async def main():
         progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
 
         try:
-            # Media Group (Album)
+            # Telegram Media Group (Album)
             if target_msg.media_group_id:
                 group_messages = await working_user_client.get_media_group(chat_id, msg_id)
                 downloaded_files, media_list, gif_files = [], [], []
@@ -485,7 +561,7 @@ async def main():
                 else:
                     await status.edit_text("No downloadable media in this album.")
 
-            # Single Media
+            # Telegram Single Media
             else:
                 is_gif = is_gif_message(target_msg)
                 caption = target_msg.caption.strip() if target_msg.caption else ""
