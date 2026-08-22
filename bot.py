@@ -12,6 +12,8 @@ from hydrogram.types import (
     Message, InputMediaVideo, InputMediaPhoto,
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ForceReply
 )
+from hydrogram.enums import ChatMemberStatus
+from hydrogram.errors import UserNotParticipant, ChatAdminRequired, PeerIdInvalid
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -61,7 +63,8 @@ bot = Client(
     in_memory=True
 )
 
-# Database Helpers
+# ----------------- DATABASE HELPERS ----------------- #
+
 def sync_add_session(session_str: str, name: str):
     if not db:
         return False, "Database offline"
@@ -104,6 +107,50 @@ def sync_delete_session(doc_id: str):
         return True
     except Exception as e:
         logger.error(f"Delete Session Error: {e}")
+        return False
+
+# F-Sub Database Functions
+def sync_get_fsub_channels():
+    if not db:
+        return []
+    try:
+        docs = db.collection("fsub_channels").stream()
+        channels = []
+        for doc in docs:
+            data = doc.to_dict()
+            channels.append({
+                "doc_id": doc.id,
+                "chat_id": data.get("chat_id"),
+                "invite_link": data.get("invite_link"),
+                "channel_name": data.get("channel_name", "Join Channel")
+            })
+        return channels
+    except Exception as e:
+        logger.error(f"Get F-Sub Channels Error: {e}")
+        return []
+
+def sync_add_fsub_channel(chat_id: str, invite_link: str, channel_name: str):
+    if not db:
+        return False, "Database offline"
+    try:
+        db.collection("fsub_channels").add({
+            "chat_id": chat_id.strip(),
+            "invite_link": invite_link.strip(),
+            "channel_name": channel_name.strip(),
+            "created_at": time.time()
+        })
+        return True, "Success"
+    except Exception as e:
+        return False, str(e)
+
+def sync_delete_fsub_channel(doc_id: str):
+    if not db:
+        return False
+    try:
+        db.collection("fsub_channels").document(doc_id).delete()
+        return True
+    except Exception as e:
+        logger.error(f"Delete F-Sub Channel Error: {e}")
         return False
 
 def sync_track_user(user_id: int, username: str, name: str):
@@ -156,6 +203,8 @@ def sync_get_stats():
     except Exception as e:
         logger.error(f"Stats Error: {e}")
         return 0, 0, {}
+
+# ----------------- UTILITY & FSUB VERIFICATION ----------------- #
 
 admin_states = {}
 progress_status = {}
@@ -290,7 +339,40 @@ def extract_and_download_social(url: str, user_id: int):
 
         return file_path, title, duration, width, height
 
-# Message Router
+# Check user subscription status
+async def check_user_fsub(client: Client, user_id: int):
+    if user_id == OWNER_ID:
+        return []
+    
+    fsub_channels = await asyncio.to_thread(sync_get_fsub_channels)
+    if not fsub_channels:
+        return []
+
+    unjoined_channels = []
+    for ch in fsub_channels:
+        try:
+            chat_id = int(ch['chat_id']) if ch['chat_id'].startswith("-100") or ch['chat_id'].isdigit() or ch['chat_id'].startswith("-") else ch['chat_id']
+            member = await client.get_chat_member(chat_id, user_id)
+            if member.status in [ChatMemberStatus.BANNED, ChatMemberStatus.LEFT]:
+                unjoined_channels.append(ch)
+        except UserNotParticipant:
+            unjoined_channels.append(ch)
+        except (ChatAdminRequired, PeerIdInvalid) as e:
+            logger.warning(f"Bot cannot check status for channel {ch['chat_id']}: {e}. Make sure the bot is an ADMIN.")
+        except Exception as e:
+            logger.error(f"FSub check error for {ch['chat_id']}: {e}")
+
+    return unjoined_channels
+
+def get_fsub_keyboard(unjoined_channels):
+    buttons = []
+    for ch in unjoined_channels:
+        buttons.append([InlineKeyboardButton(f"📢 {ch['channel_name']}", url=ch['invite_link'])])
+    buttons.append([InlineKeyboardButton("🔄 Joined / Try Again", callback_data="btn_check_fsub")])
+    return InlineKeyboardMarkup(buttons)
+
+# ----------------- MESSAGE HANDLER ----------------- #
+
 @bot.on_message(filters.private)
 async def private_message_handler(client: Client, message: Message):
     user = message.from_user
@@ -302,44 +384,28 @@ async def private_message_handler(client: Client, message: Message):
     logger.info(f"Incoming update from {user_id} ({user.first_name}): {text_str}")
     asyncio.create_task(asyncio.to_thread(sync_track_user, user_id, user.username, user.first_name))
 
-    # /start
-    if text_str.startswith("/start"):
-        buttons = [[
-            InlineKeyboardButton("Ping", callback_data="btn_ping"),
-            InlineKeyboardButton("Help", callback_data="btn_help")
-        ]]
-        if user_id == OWNER_ID:
-            buttons.append([InlineKeyboardButton("Admin Panel", callback_data="btn_admin_shortcut")])
-
-        text = (
-            f"**Hello {user.first_name},**\n\n"
-            "Send any media link to download:\n"
-            "• **Supported:** Telegram, YouTube, TikTok, Instagram, Facebook\n"
-            "• Sent media auto-deletes in 5 minutes."
-        )
-        await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
-        return
-
-    # /admin
+    # /admin handler (Direct bypass)
     if text_str.startswith("/admin") or text_str.startswith("/panel"):
         if user_id != OWNER_ID:
             await message.reply_text("Access denied.")
             return
 
         all_sess = await asyncio.to_thread(sync_get_all_sessions)
+        fsub_list = await asyncio.to_thread(sync_get_fsub_channels)
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Stats", callback_data="btn_stats")],
-            [InlineKeyboardButton("Add Session", callback_data="btn_add_session")],
-            [InlineKeyboardButton(f"Sessions ({len(all_sess)})", callback_data="btn_list_sessions")],
-            [InlineKeyboardButton("Delete Session", callback_data="btn_del_menu")]
+            [InlineKeyboardButton("📊 Stats", callback_data="btn_stats")],
+            [InlineKeyboardButton("📢 Force Sub Menu", callback_data="btn_fsub_menu")],
+            [InlineKeyboardButton("➕ Add Session", callback_data="btn_add_session")],
+            [InlineKeyboardButton(f"🔑 Sessions ({len(all_sess)})", callback_data="btn_list_sessions")],
+            [InlineKeyboardButton("❌ Delete Session", callback_data="btn_del_menu")]
         ])
 
         db_status = "Online" if db else "Offline"
-        text = f"**Admin Panel**\n\n• DB: `{db_status}`\n• Active Sessions: `{len(all_sess)}`"
+        text = f"**Admin Panel**\n\n• DB: `{db_status}`\n• Active Sessions: `{len(all_sess)}`\n• F-Sub Channels: `{len(fsub_list)}`"
         await message.reply_text(text, reply_markup=keyboard)
         return
 
-    # Session State
+    # Admin Session Input State
     if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_SESSION":
         admin_states.pop(user_id, None)
         status_msg = await message.reply_text("Validating session...")
@@ -358,6 +424,51 @@ async def private_message_handler(client: Client, message: Message):
                 await status_msg.edit_text(f"Error: `{err_msg}`")
         except Exception as e:
             await status_msg.edit_text(f"Invalid session: `{str(e)}`")
+        return
+
+    # Admin Add F-Sub Channel State
+    if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_FSUB":
+        admin_states.pop(user_id, None)
+        parts = [p.strip() for p in text_str.split("|")]
+        if len(parts) < 3:
+            await message.reply_text(
+                "❌ **Invalid Format!**\n\nPlease send like this:\n`Chat_ID | Invite_Link | Channel Name`\n\nExample:\n`-100123456789 | https://t.me/+AbCdEf | Join Updates`"
+            )
+            return
+        
+        c_id, c_link, c_name = parts[0], parts[1], parts[2]
+        success, err = await asyncio.to_thread(sync_add_fsub_channel, c_id, c_link, c_name)
+        if success:
+            await message.reply_text(f"✅ **Force Sub channel added successfully!**\n\n• Name: `{c_name}`\n• Chat ID: `{c_id}`")
+        else:
+            await message.reply_text(f"❌ Failed to add channel: `{err}`")
+        return
+
+    # --- FORCE SUBSCRIBE VERIFICATION ---
+    unjoined = await check_user_fsub(client, user_id)
+    if unjoined:
+        await message.reply_text(
+            "⚠️ **You must join our channel(s) first to use this bot!**\n\nPlease join the channels below and click **'Joined / Try Again'**.",
+            reply_markup=get_fsub_keyboard(unjoined)
+        )
+        return
+
+    # /start handler
+    if text_str.startswith("/start"):
+        buttons = [[
+            InlineKeyboardButton("Ping", callback_data="btn_ping"),
+            InlineKeyboardButton("Help", callback_data="btn_help")
+        ]]
+        if user_id == OWNER_ID:
+            buttons.append([InlineKeyboardButton("Admin Panel", callback_data="btn_admin_shortcut")])
+
+        text = (
+            f"**Hello {user.first_name},**\n\n"
+            "Send any media link to download:\n"
+            "• **Supported:** Telegram, YouTube, TikTok, Instagram, Facebook\n"
+            "• Sent media auto-deletes in 5 minutes."
+        )
+        await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
 
     # Social Media URL
@@ -579,11 +690,24 @@ async def private_message_handler(client: Client, message: Message):
 
     await message.reply_text("Invalid link. Send Telegram, YouTube, TikTok, Instagram, or Facebook URL.")
 
-# Callback Query Handler
+# ----------------- CALLBACK QUERY HANDLER ----------------- #
+
 @bot.on_callback_query()
 async def callback_handler(client: Client, callback_query: CallbackQuery):
     data = callback_query.data
     user_id = callback_query.from_user.id
+
+    # User re-check F-Sub status
+    if data == "btn_check_fsub":
+        unjoined = await check_user_fsub(client, user_id)
+        if not unjoined:
+            await callback_query.answer("✅ Verified! You can now use the bot.", show_alert=True)
+            await callback_query.message.edit_text(
+                "✅ **Verification Successful!**\n\nYou can now send any video/media link to download."
+            )
+        else:
+            await callback_query.answer("❌ You still haven't joined all required channels!", show_alert=True)
+        return
 
     if data == "btn_ping":
         start_ping = time.time()
@@ -620,25 +744,95 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
         await callback_query.answer()
         return
 
+    # Admin authorization check
     if user_id != OWNER_ID:
         await callback_query.answer("Unauthorized.", show_alert=True)
         return
 
     if data in ["btn_admin_shortcut", "btn_back_admin"]:
         all_sess = await asyncio.to_thread(sync_get_all_sessions)
+        fsub_list = await asyncio.to_thread(sync_get_fsub_channels)
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Stats", callback_data="btn_stats")],
-            [InlineKeyboardButton("Add Session", callback_data="btn_add_session")],
-            [InlineKeyboardButton(f"Sessions ({len(all_sess)})", callback_data="btn_list_sessions")],
-            [InlineKeyboardButton("Delete Session", callback_data="btn_del_menu")]
+            [InlineKeyboardButton("📊 Stats", callback_data="btn_stats")],
+            [InlineKeyboardButton("📢 Force Sub Menu", callback_data="btn_fsub_menu")],
+            [InlineKeyboardButton("➕ Add Session", callback_data="btn_add_session")],
+            [InlineKeyboardButton(f"🔑 Sessions ({len(all_sess)})", callback_data="btn_list_sessions")],
+            [InlineKeyboardButton("❌ Delete Session", callback_data="btn_del_menu")]
         ])
         db_status = "Online" if db else "Offline"
         await callback_query.message.edit_text(
-            f"**Admin Panel**\n\n• DB: `{db_status}`\n• Sessions: `{len(all_sess)}`",
+            f"**Admin Panel**\n\n• DB: `{db_status}`\n• Active Sessions: `{len(all_sess)}`\n• F-Sub Channels: `{len(fsub_list)}`",
             reply_markup=keyboard
         )
         await callback_query.answer()
 
+    # --- F-Sub Admin Menus ---
+    elif data == "btn_fsub_menu":
+        fsub_list = await asyncio.to_thread(sync_get_fsub_channels)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Add F-Sub Channel", callback_data="btn_add_fsub")],
+            [InlineKeyboardButton(f"📋 List Channels ({len(fsub_list)})", callback_data="btn_list_fsub")],
+            [InlineKeyboardButton("🗑️ Remove Channel", callback_data="btn_del_fsub_menu")],
+            [InlineKeyboardButton("🔙 Back to Admin", callback_data="btn_back_admin")]
+        ])
+        await callback_query.message.edit_text(
+            f"**Force Subscribe Settings**\n\nConfigured Channels: `{len(fsub_list)}`",
+            reply_markup=keyboard
+        )
+        await callback_query.answer()
+
+    elif data == "btn_add_fsub":
+        admin_states[user_id] = "WAITING_FSUB"
+        await callback_query.message.reply(
+            "Send channel details in the following format:\n\n"
+            "`Chat_ID | Invite_Link | Button Title`\n\n"
+            "**Example:**\n`-100234567890 | https://t.me/+AbCdEf | Join Main Channel`\n\n"
+            "⚠️ *Make sure the bot is an Admin in that channel.*",
+            reply_markup=ForceReply(selective=True)
+        )
+        await callback_query.answer()
+
+    elif data == "btn_list_fsub":
+        fsub_list = await asyncio.to_thread(sync_get_fsub_channels)
+        if not fsub_list:
+            text = "No Force Subscribe channels configured."
+        else:
+            text = "**Configured F-Sub Channels:**\n\n"
+            for idx, ch in enumerate(fsub_list, 1):
+                text += f"{idx}. **{ch['channel_name']}**\n• Chat ID: `{ch['chat_id']}`\n• Link: {ch['invite_link']}\n\n"
+
+        await callback_query.message.edit_text(
+            text,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_fsub_menu")]])
+        )
+        await callback_query.answer()
+
+    elif data == "btn_del_fsub_menu":
+        fsub_list = await asyncio.to_thread(sync_get_fsub_channels)
+        if not fsub_list:
+            await callback_query.answer("No channels to remove.", show_alert=True)
+            return
+
+        buttons = [[InlineKeyboardButton(f"🗑️ {ch['channel_name']}", callback_data=f"delfsub_{ch['doc_id']}")] for ch in fsub_list]
+        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="btn_fsub_menu")])
+
+        await callback_query.message.edit_text(
+            "Select a channel to remove from Force Sub:",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        await callback_query.answer()
+
+    elif data.startswith("delfsub_"):
+        doc_id = data.split("delfsub_")[1]
+        success = await asyncio.to_thread(sync_delete_fsub_channel, doc_id)
+        msg = "✅ Channel removed successfully." if success else "❌ Failed to remove channel."
+        await callback_query.message.edit_text(
+            msg,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_fsub_menu")]])
+        )
+        await callback_query.answer()
+
+    # --- Standard Admin Menus ---
     elif data == "btn_stats":
         users, downloads, platforms = await asyncio.to_thread(sync_get_stats)
         all_sess = await asyncio.to_thread(sync_get_all_sessions)
