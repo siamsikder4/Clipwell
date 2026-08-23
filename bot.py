@@ -109,7 +109,7 @@ def sync_delete_session(doc_id: str):
         logger.error(f"Delete Session Error: {e}")
         return False
 
-# F-Sub Database Functions
+# F-Sub Functions
 def sync_get_fsub_channels():
     if not db:
         return []
@@ -153,6 +153,7 @@ def sync_delete_fsub_channel(doc_id: str):
         logger.error(f"Delete F-Sub Channel Error: {e}")
         return False
 
+# User Tracking & Analytics
 def sync_track_user(user_id: int, username: str, name: str):
     if not db:
         return
@@ -174,10 +175,39 @@ def sync_increment_downloads(platform: str):
         doc_ref = db.collection("bot_stats").document("global_analytics")
         doc_ref.set({
             "total_downloads": firestore.Increment(1),
-            f"count_{platform}": firestore.Increment(1)
+            f"count_{platform.lower()}": firestore.Increment(1)
         }, merge=True)
     except Exception as e:
         logger.error(f"Metric Error: {e}")
+
+def sync_increment_user_downloads(user_id: int, platform: str):
+    if not db:
+        return
+    try:
+        doc_ref = db.collection("bot_users").document(str(user_id))
+        update_data = {
+            "total_downloads": firestore.Increment(1),
+            "last_active": time.time()
+        }
+        if platform.lower() == "telegram":
+            update_data["telegram_downloads"] = firestore.Increment(1)
+        else:
+            update_data["social_downloads"] = firestore.Increment(1)
+            update_data[f"count_{platform.lower()}"] = firestore.Increment(1)
+
+        doc_ref.set(update_data, merge=True)
+    except Exception as e:
+        logger.error(f"User Metric Error for {user_id}: {e}")
+
+def sync_get_user_info(user_id: str):
+    if not db:
+        return None
+    try:
+        doc = db.collection("bot_users").document(str(user_id)).get()
+        return doc.to_dict() if doc.exists else None
+    except Exception as e:
+        logger.error(f"Get User Info Error: {e}")
+        return None
 
 def sync_get_stats():
     if not db:
@@ -204,7 +234,7 @@ def sync_get_stats():
         logger.error(f"Stats Error: {e}")
         return 0, 0, {}
 
-# ----------------- UTILITY & FSUB VERIFICATION ----------------- #
+# ----------------- UTILITY & HELPERS ----------------- #
 
 admin_states = {}
 progress_status = {}
@@ -339,7 +369,6 @@ def extract_and_download_social(url: str, user_id: int):
 
         return file_path, title, duration, width, height
 
-# Check user subscription status
 async def check_user_fsub(client: Client, user_id: int):
     if user_id == OWNER_ID:
         return []
@@ -358,7 +387,7 @@ async def check_user_fsub(client: Client, user_id: int):
         except UserNotParticipant:
             unjoined_channels.append(ch)
         except (ChatAdminRequired, PeerIdInvalid) as e:
-            logger.warning(f"Bot cannot check status for channel {ch['chat_id']}: {e}. Make sure the bot is an ADMIN.")
+            logger.warning(f"Bot cannot check status for {ch['chat_id']}: {e}. Make sure the bot is an Admin.")
         except Exception as e:
             logger.error(f"FSub check error for {ch['chat_id']}: {e}")
 
@@ -384,7 +413,7 @@ async def private_message_handler(client: Client, message: Message):
     logger.info(f"Incoming update from {user_id} ({user.first_name}): {text_str}")
     asyncio.create_task(asyncio.to_thread(sync_track_user, user_id, user.username, user.first_name))
 
-    # /admin handler (Direct bypass)
+    # /admin handler
     if text_str.startswith("/admin") or text_str.startswith("/panel"):
         if user_id != OWNER_ID:
             await message.reply_text("Access denied.")
@@ -403,6 +432,42 @@ async def private_message_handler(client: Client, message: Message):
         db_status = "Online" if db else "Offline"
         text = f"**Admin Panel**\n\n• DB: `{db_status}`\n• Active Sessions: `{len(all_sess)}`\n• F-Sub Channels: `{len(fsub_list)}`"
         await message.reply_text(text, reply_markup=keyboard)
+        return
+
+    # Check Specific User Details (/user <ID>)
+    if text_str.startswith("/user"):
+        if user_id != OWNER_ID:
+            return
+        parts = text_str.split()
+        if len(parts) < 2:
+            await message.reply_text("💡 **ব্যবহারের নিয়ম:** `/user <User_ID>`\n\n**উদাহরণ:** `/user 1234567890`")
+            return
+        
+        target_id = parts[1].strip()
+        user_info = await asyncio.to_thread(sync_get_user_info, target_id)
+        if not user_info:
+            await message.reply_text("❌ এই ইউজার ডাটাবেজে পাওয়া যায়নি!")
+            return
+
+        tg_dl = user_info.get("telegram_downloads", 0)
+        social_dl = user_info.get("social_downloads", 0)
+        total_dl = user_info.get("total_downloads", 0)
+        last_seen = time.strftime('%d-%m-%Y %I:%M %p', time.localtime(user_info.get('last_active', 0)))
+
+        response_text = (
+            f"👤 **User Analytics**\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"• **Name:** {user_info.get('name', 'N/A')}\n"
+            f"• **Username:** @{user_info.get('username', 'N/A')}\n"
+            f"• **User ID:** `{user_info.get('user_id')}`\n"
+            f"• **Last Active:** `{last_seen}`\n\n"
+            f"📊 **ডাউনলোড পরিসংখ্যান:**\n"
+            f"• 📂 **Telegram Downloads:** `{tg_dl}`\n"
+            f"• 🌐 **Social Downloads:** `{social_dl}`\n"
+            f"• 🚀 **Total Downloads:** `{total_dl}`\n"
+            f"━━━━━━━━━━━━━━━━━━"
+        )
+        await message.reply_text(response_text)
         return
 
     # Admin Session Input State
@@ -426,7 +491,7 @@ async def private_message_handler(client: Client, message: Message):
             await status_msg.edit_text(f"Invalid session: `{str(e)}`")
         return
 
-    # Admin Add F-Sub Channel State
+    # Admin F-Sub Input State
     if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_FSUB":
         admin_states.pop(user_id, None)
         parts = [p.strip() for p in text_str.split("|")]
@@ -444,7 +509,7 @@ async def private_message_handler(client: Client, message: Message):
             await message.reply_text(f"❌ Failed to add channel: `{err}`")
         return
 
-    # --- FORCE SUBSCRIBE VERIFICATION ---
+    # --- FORCE SUBSCRIBE CHECK ---
     unjoined = await check_user_fsub(client, user_id)
     if unjoined:
         await message.reply_text(
@@ -453,7 +518,7 @@ async def private_message_handler(client: Client, message: Message):
         )
         return
 
-    # /start handler
+    # /start
     if text_str.startswith("/start"):
         buttons = [[
             InlineKeyboardButton("Ping", callback_data="btn_ping"),
@@ -511,7 +576,9 @@ async def private_message_handler(client: Client, message: Message):
             if os.path.exists(file_path):
                 os.remove(file_path)
 
+            # Metrics Tracking (Global + Individual User)
             asyncio.create_task(asyncio.to_thread(sync_increment_downloads, platform_name))
+            asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, platform_name))
             await status.delete()
 
             if sent_msg:
@@ -617,7 +684,9 @@ async def private_message_handler(client: Client, message: Message):
                         os.remove(path)
 
                 if media_list or gif_files:
+                    # Metrics Tracking
                     asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram"))
+                    asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram"))
                     await status.delete()
                     del_ids = [message.id] + [m.id for m in sent_msgs]
                     asyncio.create_task(auto_delete_messages(message.chat.id, del_ids, 300))
@@ -672,7 +741,9 @@ async def private_message_handler(client: Client, message: Message):
                 if os.path.exists(file_path):
                     os.remove(file_path)
 
+                # Metrics Tracking
                 asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram"))
+                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram"))
                 await status.delete()
 
                 if sent_msg:
@@ -697,7 +768,7 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
     data = callback_query.data
     user_id = callback_query.from_user.id
 
-    # User re-check F-Sub status
+    # F-Sub Check
     if data == "btn_check_fsub":
         unjoined = await check_user_fsub(client, user_id)
         if not unjoined:
@@ -744,7 +815,7 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
         await callback_query.answer()
         return
 
-    # Admin authorization check
+    # Admin verification
     if user_id != OWNER_ID:
         await callback_query.answer("Unauthorized.", show_alert=True)
         return
@@ -766,7 +837,7 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
         )
         await callback_query.answer()
 
-    # --- F-Sub Admin Menus ---
+    # --- F-Sub Management ---
     elif data == "btn_fsub_menu":
         fsub_list = await asyncio.to_thread(sync_get_fsub_channels)
         keyboard = InlineKeyboardMarkup([
