@@ -153,20 +153,29 @@ def sync_delete_fsub_channel(doc_id: str):
         logger.error(f"Delete F-Sub Channel Error: {e}")
         return False
 
-# User Tracking & Analytics
-def sync_track_user(user_id: int, username: str, name: str):
+# User Tracking & Analytics (Checks if new user)
+def sync_track_user(user_id: int, username: str, name: str) -> bool:
     if not db:
-        return
+        return False
     try:
         doc_ref = db.collection("bot_users").document(str(user_id))
-        doc_ref.set({
+        doc = doc_ref.get()
+        is_new_user = not doc.exists
+
+        data = {
             "user_id": int(user_id),
             "username": username or "N/A",
-            "name": name,
+            "name": name or "N/A",
             "last_active": time.time()
-        }, merge=True)
+        }
+        if is_new_user:
+            data["joined_at"] = time.time()
+
+        doc_ref.set(data, merge=True)
+        return is_new_user
     except Exception as e:
         logger.error(f"Tracking Error: {e}")
+        return False
 
 def sync_increment_downloads(platform: str):
     if not db:
@@ -411,7 +420,26 @@ async def private_message_handler(client: Client, message: Message):
     text_str = (message.text or message.caption or "").strip()
 
     logger.info(f"Incoming update from {user_id} ({user.first_name}): {text_str}")
-    asyncio.create_task(asyncio.to_thread(sync_track_user, user_id, user.username, user.first_name))
+
+    # Track User & Send Admin Alert for New Users
+    async def track_and_notify():
+        is_new = await asyncio.to_thread(sync_track_user, user_id, user.username, user.first_name)
+        if is_new and user_id != OWNER_ID:
+            alert_text = (
+                "🔔 **#New_User_Alert**\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                f"• **Name:** {user.first_name}\n"
+                f"• **Username:** @{user.username if user.username else 'N/A'}\n"
+                f"• **User ID:** `{user_id}`\n"
+                f"• **Profile:** [Click Here](tg://user?id={user_id})\n"
+                "━━━━━━━━━━━━━━━━━━"
+            )
+            try:
+                await client.send_message(chat_id=OWNER_ID, text=alert_text)
+            except Exception as ex:
+                logger.error(f"Admin alert failed: {ex}")
+
+    asyncio.create_task(track_and_notify())
 
     # /admin handler
     if text_str.startswith("/admin") or text_str.startswith("/panel"):
