@@ -13,7 +13,10 @@ from hydrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ForceReply
 )
 from hydrogram.enums import ChatMemberStatus
-from hydrogram.errors import UserNotParticipant, ChatAdminRequired, PeerIdInvalid
+from hydrogram.errors import (
+    UserNotParticipant, ChatAdminRequired, PeerIdInvalid,
+    SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired, PasswordHashInvalid
+)
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -62,6 +65,11 @@ bot = Client(
     bot_token=BOT_TOKEN,
     in_memory=True
 )
+
+# Global States
+admin_states = {}
+login_clients = {}  # In-bot session login cache
+progress_status = {}
 
 # ----------------- DATABASE HELPERS ----------------- #
 
@@ -153,7 +161,7 @@ def sync_delete_fsub_channel(doc_id: str):
         logger.error(f"Delete F-Sub Channel Error: {e}")
         return False
 
-# User Tracking & Analytics (Checks if new user)
+# User Tracking & Analytics
 def sync_track_user(user_id: int, username: str, name: str) -> bool:
     if not db:
         return False
@@ -243,10 +251,47 @@ def sync_get_stats():
         logger.error(f"Stats Error: {e}")
         return 0, 0, {}
 
-# ----------------- UTILITY & HELPERS ----------------- #
+async def generate_admin_dashboard():
+    users, downloads, platforms = await asyncio.to_thread(sync_get_stats)
+    all_sess = await asyncio.to_thread(sync_get_all_sessions)
+    fsub_list = await asyncio.to_thread(sync_get_fsub_channels)
+    db_status = "Online 🟢" if db else "Offline 🔴"
 
-admin_states = {}
-progress_status = {}
+    text = (
+        "👑 **Admin Management Dashboard**\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"• **Database Status:** `{db_status}`\n"
+        f"• **Total Users:** `{users}`\n"
+        f"• **Total Downloads:** `{downloads}`\n"
+        f"• **Active Sessions:** `{len(all_sess)}`\n"
+        f"• **F-Sub Channels:** `{len(fsub_list)}`\n\n"
+        "📊 **Platform Breakdown:**\n"
+        f"• 📂 Telegram: `{platforms.get('Telegram', 0)}`\n"
+        f"• 🔴 YouTube: `{platforms.get('YouTube', 0)}`\n"
+        f"• 🎵 TikTok: `{platforms.get('TikTok', 0)}`\n"
+        f"• 📸 Instagram: `{platforms.get('Instagram', 0)}`\n"
+        f"• 🔵 Facebook: `{platforms.get('Facebook', 0)}`\n"
+        f"• 🌐 Others: `{platforms.get('Others', 0)}`\n"
+        "━━━━━━━━━━━━━━━━━━━━"
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔑 Generate Session (OTP)", callback_data="btn_login_account"),
+            InlineKeyboardButton("➕ Paste Session", callback_data="btn_add_session")
+        ],
+        [
+            InlineKeyboardButton(f"📁 Sessions ({len(all_sess)})", callback_data="btn_list_sessions"),
+            InlineKeyboardButton("🗑️ Delete Session", callback_data="btn_del_menu")
+        ],
+        [
+            InlineKeyboardButton("📢 Force Sub Menu", callback_data="btn_fsub_menu"),
+            InlineKeyboardButton("🔄 Refresh Stats", callback_data="btn_refresh_admin")
+        ]
+    ])
+    return text, keyboard
+
+# ----------------- UTILITY & HELPERS ----------------- #
 
 def format_time(seconds: int) -> str:
     mins, secs = divmod(int(seconds), 60)
@@ -441,25 +486,14 @@ async def private_message_handler(client: Client, message: Message):
 
     asyncio.create_task(track_and_notify())
 
-    # /admin handler
+    # /admin handler (Shows Live Dashboard with all details)
     if text_str.startswith("/admin") or text_str.startswith("/panel"):
         if user_id != OWNER_ID:
             await message.reply_text("Access denied.")
             return
 
-        all_sess = await asyncio.to_thread(sync_get_all_sessions)
-        fsub_list = await asyncio.to_thread(sync_get_fsub_channels)
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 Stats", callback_data="btn_stats")],
-            [InlineKeyboardButton("📢 Force Sub Menu", callback_data="btn_fsub_menu")],
-            [InlineKeyboardButton("➕ Add Session", callback_data="btn_add_session")],
-            [InlineKeyboardButton(f"🔑 Sessions ({len(all_sess)})", callback_data="btn_list_sessions")],
-            [InlineKeyboardButton("❌ Delete Session", callback_data="btn_del_menu")]
-        ])
-
-        db_status = "Online" if db else "Offline"
-        text = f"**Admin Panel**\n\n• DB: `{db_status}`\n• Active Sessions: `{len(all_sess)}`\n• F-Sub Channels: `{len(fsub_list)}`"
-        await message.reply_text(text, reply_markup=keyboard)
+        dash_text, dash_markup = await generate_admin_dashboard()
+        await message.reply_text(dash_text, reply_markup=dash_markup)
         return
 
     # Check Specific User Details (/user <ID>)
@@ -498,7 +532,9 @@ async def private_message_handler(client: Client, message: Message):
         await message.reply_text(response_text)
         return
 
-    # Admin Session Input State
+    # ----------------- ADMIN STATES (ONLY OWNER) ----------------- #
+
+    # 1. Manual Session Input State (Admin Pastes Session String)
     if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_SESSION":
         admin_states.pop(user_id, None)
         status_msg = await message.reply_text("Validating session...")
@@ -512,14 +548,143 @@ async def private_message_handler(client: Client, message: Message):
 
             success, err_msg = await asyncio.to_thread(sync_add_session, text_str, acc_name)
             if success:
-                await status_msg.edit_text(f"Session saved: `{acc_name}`")
+                await status_msg.edit_text(f"✅ **সেশন সফলভাবে ডাটাবেজে সেভ হয়েছে!**\n\n• অ্যাকাউন্ট: `{acc_name}`")
             else:
-                await status_msg.edit_text(f"Error: `{err_msg}`")
+                await status_msg.edit_text(f"❌ Error: `{err_msg}`")
         except Exception as e:
-            await status_msg.edit_text(f"Invalid session: `{str(e)}`")
+            await status_msg.edit_text(f"❌ Invalid session: `{str(e)}`")
         return
 
-    # Admin F-Sub Input State
+    # 2. In-Bot Session Generator - Step 1: Phone Number
+    if user_id == OWNER_ID and admin_states.get(user_id) == "LOGIN_PHONE":
+        admin_states.pop(user_id, None)
+        phone_number = text_str.replace(" ", "").strip()
+        status_msg = await message.reply_text("⏳ টেলিগ্রাম ওটিপি (OTP) কোড পাঠানো হচ্ছে...")
+
+        temp_client = Client(
+            f"login_{int(time.time())}",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            in_memory=True
+        )
+        try:
+            await temp_client.connect()
+            code_info = await temp_client.send_code(phone_number)
+            login_clients[user_id] = {
+                "client": temp_client,
+                "phone": phone_number,
+                "phone_code_hash": code_info.phone_code_hash
+            }
+            admin_states[user_id] = "LOGIN_OTP"
+            await status_msg.edit_text(
+                "📩 **টেলিগ্রামে আসা OTP কোডটি পাঠান:**\n\n"
+                "💡 *টিপস:* টেলিগ্রাম কোড ব্লক এড়াতে স্পেস দিয়ে লিখুন (যেমন: `1 2 3 4 5`)",
+                reply_markup=ForceReply(selective=True)
+            )
+        except Exception as e:
+            if temp_client.is_connected:
+                await temp_client.disconnect()
+            await status_msg.edit_text(f"❌ ওটিপি পাঠাতে সমস্যা হয়েছে: `{str(e)}`")
+        return
+
+    # 3. In-Bot Session Generator - Step 2: OTP Code
+    if user_id == OWNER_ID and admin_states.get(user_id) == "LOGIN_OTP":
+        otp_code = text_str.replace(" ", "").replace("-", "").strip()
+        session_data = login_clients.get(user_id)
+
+        if not session_data:
+            admin_states.pop(user_id, None)
+            await message.reply_text("❌ সেশন টাইমআউট হয়ে গেছে। আবার চেষ্টা করুন।")
+            return
+
+        temp_client = session_data["client"]
+        phone = session_data["phone"]
+        phone_code_hash = session_data["phone_code_hash"]
+        status_msg = await message.reply_text("⏳ ওটিপি যাচাই করা হচ্ছে...")
+
+        try:
+            await temp_client.sign_in(phone, phone_code_hash, otp_code)
+            session_string = await temp_client.export_session_string()
+            me = await temp_client.get_me()
+            acc_name = f"{me.first_name} (@{me.username})" if me.username else me.first_name
+            await temp_client.disconnect()
+            login_clients.pop(user_id, None)
+            admin_states.pop(user_id, None)
+
+            # Auto-save হবে না; নিচে কোডটি কপি করার জন্য পাঠিয়ে দেওয়া হবে
+            result_text = (
+                f"✅ **সেশন সফলভাবে তৈরি হয়েছে!**\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"• **অ্যাকাউন্ট:** `{acc_name}`\n"
+                f"• **ইউজার আইডি:** `{me.id}`\n\n"
+                f"📋 **আপনার সেশন কোড (নিচে ট্যাপ করে কপি করুন):**\n\n"
+                f"`{session_string}`\n\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"💡 এটি কপি করে Admin প্যানেলের **'➕ Paste Session'** বাটনে গিয়ে যুক্ত করে নিন।"
+            )
+            await status_msg.edit_text(result_text)
+
+        except SessionPasswordNeeded:
+            admin_states[user_id] = "LOGIN_2FA"
+            await status_msg.edit_text(
+                "🔐 এই অ্যাকাউন্টে **Two-Step Verification (2FA)** চালু আছে।\n\nঅনুগ্রহ করে ২-স্টেপ পাসওয়ার্ডটি পাঠান:",
+                reply_markup=ForceReply(selective=True)
+            )
+        except (PhoneCodeInvalid, PhoneCodeExpired):
+            await status_msg.edit_text("❌ ভুল বা মেয়াদোত্তীর্ণ ওটিপি! সঠিক কোডটি স্পেস দিয়ে লিখুন:")
+        except Exception as e:
+            if temp_client.is_connected:
+                await temp_client.disconnect()
+            login_clients.pop(user_id, None)
+            admin_states.pop(user_id, None)
+            await status_msg.edit_text(f"❌ লগইন এরর: `{str(e)}`")
+        return
+
+    # 4. In-Bot Session Generator - Step 3: 2FA Password
+    if user_id == OWNER_ID and admin_states.get(user_id) == "LOGIN_2FA":
+        password = text_str.strip()
+        session_data = login_clients.get(user_id)
+
+        if not session_data:
+            admin_states.pop(user_id, None)
+            await message.reply_text("❌ সেশন টাইমআউট হয়ে গেছে।")
+            return
+
+        temp_client = session_data["client"]
+        status_msg = await message.reply_text("⏳ পাসওয়ার্ড যাচাই করা হচ্ছে...")
+
+        try:
+            await temp_client.check_password(password)
+            session_string = await temp_client.export_session_string()
+            me = await temp_client.get_me()
+            acc_name = f"{me.first_name} (@{me.username})" if me.username else me.first_name
+            await temp_client.disconnect()
+            login_clients.pop(user_id, None)
+            admin_states.pop(user_id, None)
+
+            result_text = (
+                f"✅ **সেশন সফলভাবে তৈরি হয়েছে!**\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"• **অ্যাকাউন্ট:** `{acc_name}`\n"
+                f"• **ইউজার আইডি:** `{me.id}`\n\n"
+                f"📋 **আপনার সেশন কোড (নিচে ট্যাপ করে কপি করুন):**\n\n"
+                f"`{session_string}`\n\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"💡 এটি কপি করে Admin প্যানেলের **'➕ Paste Session'** বাটনে গিয়ে যুক্ত করে নিন।"
+            )
+            await status_msg.edit_text(result_text)
+
+        except PasswordHashInvalid:
+            await status_msg.edit_text("❌ ভুল ২-স্টেপ পাসওয়ার্ড! আবার সঠিক পাসওয়ার্ড দিন:")
+        except Exception as e:
+            if temp_client.is_connected:
+                await temp_client.disconnect()
+            login_clients.pop(user_id, None)
+            admin_states.pop(user_id, None)
+            await status_msg.edit_text(f"❌ ভেরিফিকেশন ফেইলড: `{str(e)}`")
+        return
+
+    # 5. Admin F-Sub Channel Input
     if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_FSUB":
         admin_states.pop(user_id, None)
         parts = [p.strip() for p in text_str.split("|")]
@@ -537,7 +702,7 @@ async def private_message_handler(client: Client, message: Message):
             await message.reply_text(f"❌ Failed to add channel: `{err}`")
         return
 
-    # --- FORCE SUBSCRIBE CHECK ---
+    # --- FORCE SUBSCRIBE CHECK (FOR GENERAL USERS) ---
     unjoined = await check_user_fsub(client, user_id)
     if unjoined:
         await message.reply_text(
@@ -604,7 +769,7 @@ async def private_message_handler(client: Client, message: Message):
             if os.path.exists(file_path):
                 os.remove(file_path)
 
-            # Metrics Tracking (Global + Individual User)
+            # Metrics Tracking
             asyncio.create_task(asyncio.to_thread(sync_increment_downloads, platform_name))
             asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, platform_name))
             await status.delete()
@@ -843,25 +1008,70 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
         await callback_query.answer()
         return
 
-    # Admin verification
+    # Admin Verification
     if user_id != OWNER_ID:
         await callback_query.answer("Unauthorized.", show_alert=True)
         return
 
-    if data in ["btn_admin_shortcut", "btn_back_admin"]:
+    # Refresh / Open Admin Dashboard
+    if data in ["btn_admin_shortcut", "btn_back_admin", "btn_refresh_admin"]:
+        dash_text, dash_markup = await generate_admin_dashboard()
+        await callback_query.message.edit_text(dash_text, reply_markup=dash_markup)
+        await callback_query.answer("Dashboard Refreshed")
+
+    # In-Bot Session Generator Trigger
+    elif data == "btn_login_account":
+        admin_states[user_id] = "LOGIN_PHONE"
+        await callback_query.message.reply(
+            "📱 **দেশের কোডসহ ফোন নম্বর পাঠান:**\n\n**যেমন:** `+8801700000000`",
+            reply_markup=ForceReply(selective=True)
+        )
+        await callback_query.answer()
+
+    # Manual Session Paste Trigger
+    elif data == "btn_add_session":
+        admin_states[user_id] = "WAITING_SESSION"
+        await callback_query.message.reply(
+            "Send the Pyrogram `SESSION_STRING` in reply to this message.",
+            reply_markup=ForceReply(selective=True)
+        )
+        await callback_query.answer()
+
+    elif data == "btn_list_sessions":
         all_sess = await asyncio.to_thread(sync_get_all_sessions)
-        fsub_list = await asyncio.to_thread(sync_get_fsub_channels)
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 Stats", callback_data="btn_stats")],
-            [InlineKeyboardButton("📢 Force Sub Menu", callback_data="btn_fsub_menu")],
-            [InlineKeyboardButton("➕ Add Session", callback_data="btn_add_session")],
-            [InlineKeyboardButton(f"🔑 Sessions ({len(all_sess)})", callback_data="btn_list_sessions")],
-            [InlineKeyboardButton("❌ Delete Session", callback_data="btn_del_menu")]
-        ])
-        db_status = "Online" if db else "Offline"
+        if not all_sess:
+            await callback_query.message.edit_text(
+                "No active sessions found.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_back_admin")]])
+            )
+        else:
+            lines = ["**Active Sessions:**\n"]
+            for idx, s in enumerate(all_sess, 1):
+                lines.append(f"{idx}. `{s['account_name']}` (ID: `{s['doc_id']}`)")
+            await callback_query.message.edit_text(
+                "\n".join(lines),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_back_admin")]])
+            )
+        await callback_query.answer()
+
+    elif data == "btn_del_menu":
+        all_sess = await asyncio.to_thread(sync_get_all_sessions)
+        if not all_sess:
+            await callback_query.answer("No sessions found.", show_alert=True)
+            return
+
+        buttons = [[InlineKeyboardButton(s['account_name'], callback_data=f"del_{s['doc_id']}")] for s in all_sess]
+        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="btn_back_admin")])
+        await callback_query.message.edit_text("Select session to remove:", reply_markup=InlineKeyboardMarkup(buttons))
+        await callback_query.answer()
+
+    elif data.startswith("del_"):
+        doc_id = data.split("del_")[1]
+        success = await asyncio.to_thread(sync_delete_session, doc_id)
+        msg = "✅ Session deleted." if success else "❌ Failed to delete session."
         await callback_query.message.edit_text(
-            f"**Admin Panel**\n\n• DB: `{db_status}`\n• Active Sessions: `{len(all_sess)}`\n• F-Sub Channels: `{len(fsub_list)}`",
-            reply_markup=keyboard
+            msg,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_back_admin")]])
         )
         await callback_query.answer()
 
@@ -928,73 +1138,6 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
         await callback_query.message.edit_text(
             msg,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_fsub_menu")]])
-        )
-        await callback_query.answer()
-
-    # --- Standard Admin Menus ---
-    elif data == "btn_stats":
-        users, downloads, platforms = await asyncio.to_thread(sync_get_stats)
-        all_sess = await asyncio.to_thread(sync_get_all_sessions)
-
-        stats_lines = [
-            "**Bot Statistics**\n",
-            f"• Total Users: `{users}`",
-            f"• Total Downloads: `{downloads}`",
-            f"• Active Sessions: `{len(all_sess)}`\n",
-            "**Platform Breakdown:**"
-        ]
-        for p_name, p_count in platforms.items():
-            stats_lines.append(f"• {p_name}: `{p_count}`")
-
-        await callback_query.message.edit_text(
-            "\n".join(stats_lines),
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
-        )
-        await callback_query.answer()
-
-    elif data == "btn_add_session":
-        admin_states[user_id] = "WAITING_SESSION"
-        await callback_query.message.reply(
-            "Send the Pyrogram `SESSION_STRING` in reply to this message.",
-            reply_markup=ForceReply(selective=True)
-        )
-        await callback_query.answer()
-
-    elif data == "btn_list_sessions":
-        all_sess = await asyncio.to_thread(sync_get_all_sessions)
-        if not all_sess:
-            await callback_query.message.edit_text(
-                "No active sessions found.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
-            )
-        else:
-            lines = ["**Active Sessions:**\n"]
-            for idx, s in enumerate(all_sess, 1):
-                lines.append(f"{idx}. `{s['account_name']}` (ID: `{s['doc_id']}`)")
-            await callback_query.message.edit_text(
-                "\n".join(lines),
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
-            )
-        await callback_query.answer()
-
-    elif data == "btn_del_menu":
-        all_sess = await asyncio.to_thread(sync_get_all_sessions)
-        if not all_sess:
-            await callback_query.answer("No sessions found.", show_alert=True)
-            return
-
-        buttons = [[InlineKeyboardButton(s['account_name'], callback_data=f"del_{s['doc_id']}")] for s in all_sess]
-        buttons.append([InlineKeyboardButton("Back", callback_data="btn_back_admin")])
-        await callback_query.message.edit_text("Select session to remove:", reply_markup=InlineKeyboardMarkup(buttons))
-        await callback_query.answer()
-
-    elif data.startswith("del_"):
-        doc_id = data.split("del_")[1]
-        success = await asyncio.to_thread(sync_delete_session, doc_id)
-        msg = "Session deleted." if success else "Failed to delete session."
-        await callback_query.message.edit_text(
-            msg,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_admin")]])
         )
         await callback_query.answer()
 
