@@ -5,6 +5,7 @@ import json
 import asyncio
 import logging
 import urllib.request
+from datetime import datetime
 from aiohttp import web
 import yt_dlp
 from hydrogram import Client, filters
@@ -68,7 +69,7 @@ bot = Client(
 
 # Global States
 admin_states = {}
-login_clients = {}  # In-bot session login cache
+login_clients = {}
 progress_status = {}
 
 # ----------------- DATABASE HELPERS ----------------- #
@@ -161,7 +162,7 @@ def sync_delete_fsub_channel(doc_id: str):
         logger.error(f"Delete F-Sub Channel Error: {e}")
         return False
 
-# User Tracking & Analytics
+# User Tracking & Granular Analytics
 def sync_track_user(user_id: int, username: str, name: str) -> bool:
     if not db:
         return False
@@ -185,32 +186,42 @@ def sync_track_user(user_id: int, username: str, name: str) -> bool:
         logger.error(f"Tracking Error: {e}")
         return False
 
-def sync_increment_downloads(platform: str):
-    if not db:
+def sync_increment_downloads(platform: str, count: int = 1):
+    if not db or count <= 0:
         return
     try:
+        today_str = datetime.now().strftime("%Y-%m-%d")
+
+        # Global totals
         doc_ref = db.collection("bot_stats").document("global_analytics")
         doc_ref.set({
-            "total_downloads": firestore.Increment(1),
-            f"count_{platform.lower()}": firestore.Increment(1)
+            "total_downloads": firestore.Increment(count),
+            f"count_{platform.lower()}": firestore.Increment(count)
+        }, merge=True)
+
+        # Daily analytics logging
+        daily_ref = db.collection("bot_stats").document("daily_analytics").collection("days").document(today_str)
+        daily_ref.set({
+            "date": today_str,
+            "downloads": firestore.Increment(count)
         }, merge=True)
     except Exception as e:
         logger.error(f"Metric Error: {e}")
 
-def sync_increment_user_downloads(user_id: int, platform: str):
-    if not db:
+def sync_increment_user_downloads(user_id: int, platform: str, count: int = 1):
+    if not db or count <= 0:
         return
     try:
         doc_ref = db.collection("bot_users").document(str(user_id))
         update_data = {
-            "total_downloads": firestore.Increment(1),
+            "total_downloads": firestore.Increment(count),
             "last_active": time.time()
         }
         if platform.lower() == "telegram":
-            update_data["telegram_downloads"] = firestore.Increment(1)
+            update_data["telegram_downloads"] = firestore.Increment(count)
         else:
-            update_data["social_downloads"] = firestore.Increment(1)
-            update_data[f"count_{platform.lower()}"] = firestore.Increment(1)
+            update_data["social_downloads"] = firestore.Increment(count)
+            update_data[f"count_{platform.lower()}"] = firestore.Increment(count)
 
         doc_ref.set(update_data, merge=True)
     except Exception as e:
@@ -228,10 +239,21 @@ def sync_get_user_info(user_id: str):
 
 def sync_get_stats():
     if not db:
-        return 0, 0, {}
+        return 0, 0, {}, 0, 0.0
     try:
         users = sum(1 for _ in db.collection("bot_users").stream())
         stat_doc = db.collection("bot_stats").document("global_analytics").get()
+
+        total_dl = 0
+        platform_counts = {
+            "Telegram": 0,
+            "YouTube": 0,
+            "TikTok": 0,
+            "Instagram": 0,
+            "Facebook": 0,
+            "Others": 0
+        }
+
         if stat_doc.exists:
             data = stat_doc.to_dict()
             total_dl = data.get("total_downloads", 0)
@@ -243,16 +265,31 @@ def sync_get_stats():
                 "Facebook": data.get("count_facebook", 0),
                 "Others": data.get("count_others", 0)
             }
-        else:
-            total_dl = 0
-            platform_counts = {}
-        return users, total_dl, platform_counts
+
+        # Daily analytics calculation
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        daily_docs = list(db.collection("bot_stats").document("daily_analytics").collection("days").stream())
+
+        today_downloads = 0
+        total_days = len(daily_docs)
+        sum_daily_dl = 0
+
+        for doc in daily_docs:
+            d_data = doc.to_dict()
+            d_count = d_data.get("downloads", 0)
+            sum_daily_dl += d_count
+            if doc.id == today_str:
+                today_downloads = d_count
+
+        daily_avg = (sum_daily_dl / max(total_days, 1)) if total_days > 0 else float(total_dl)
+
+        return users, total_dl, platform_counts, today_downloads, daily_avg
     except Exception as e:
         logger.error(f"Stats Error: {e}")
-        return 0, 0, {}
+        return 0, 0, {}, 0, 0.0
 
 async def generate_admin_dashboard():
-    users, downloads, platforms = await asyncio.to_thread(sync_get_stats)
+    users, downloads, platforms, today_dl, daily_avg = await asyncio.to_thread(sync_get_stats)
     all_sess = await asyncio.to_thread(sync_get_all_sessions)
     fsub_list = await asyncio.to_thread(sync_get_fsub_channels)
     db_status = "Online 🟢" if db else "Offline 🔴"
@@ -260,18 +297,20 @@ async def generate_admin_dashboard():
     text = (
         "👑 **Admin Management Dashboard**\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"• **Database Status:** `{db_status}`\n"
-        f"• **Total Users:** `{users}`\n"
-        f"• **Total Downloads:** `{downloads}`\n"
+        f"• **Database:** `{db_status}`\n"
+        f"• **Total Users:** `{users:,}`\n"
+        f"• **Total Media Downloaded:** `{downloads:,}`\n"
+        f"• **Today's Downloads:** `{today_dl:,}`\n"
+        f"• **Daily Average:** `{daily_avg:.1f} / day`\n"
         f"• **Active Sessions:** `{len(all_sess)}`\n"
         f"• **F-Sub Channels:** `{len(fsub_list)}`\n\n"
         "📊 **Platform Breakdown:**\n"
-        f"• 📂 Telegram: `{platforms.get('Telegram', 0)}`\n"
-        f"• 🔴 YouTube: `{platforms.get('YouTube', 0)}`\n"
-        f"• 🎵 TikTok: `{platforms.get('TikTok', 0)}`\n"
-        f"• 📸 Instagram: `{platforms.get('Instagram', 0)}`\n"
-        f"• 🔵 Facebook: `{platforms.get('Facebook', 0)}`\n"
-        f"• 🌐 Others: `{platforms.get('Others', 0)}`\n"
+        f"• 📂 Telegram: `{platforms.get('Telegram', 0):,}`\n"
+        f"• 🔴 YouTube: `{platforms.get('YouTube', 0):,}`\n"
+        f"• 🎵 TikTok: `{platforms.get('TikTok', 0):,}`\n"
+        f"• 📸 Instagram: `{platforms.get('Instagram', 0):,}`\n"
+        f"• 🔵 Facebook: `{platforms.get('Facebook', 0):,}`\n"
+        f"• 🌐 Others: `{platforms.get('Others', 0):,}`\n"
         "━━━━━━━━━━━━━━━━━━━━"
     )
 
@@ -426,7 +465,7 @@ def extract_and_download_social(url: str, user_id: int):
 async def check_user_fsub(client: Client, user_id: int):
     if user_id == OWNER_ID:
         return []
-    
+
     fsub_channels = await asyncio.to_thread(sync_get_fsub_channels)
     if not fsub_channels:
         return []
@@ -486,10 +525,10 @@ async def private_message_handler(client: Client, message: Message):
 
     asyncio.create_task(track_and_notify())
 
-    # /admin handler (Shows Live Dashboard with all details)
+    # /admin Dashboard
     if text_str.startswith("/admin") or text_str.startswith("/panel"):
         if user_id != OWNER_ID:
-            await message.reply_text("Access denied.")
+            await message.reply_text("Access denied. Owner only.")
             return
 
         dash_text, dash_markup = await generate_admin_dashboard()
@@ -502,19 +541,19 @@ async def private_message_handler(client: Client, message: Message):
             return
         parts = text_str.split()
         if len(parts) < 2:
-            await message.reply_text("💡 **ব্যবহারের নিয়ম:** `/user <User_ID>`\n\n**উদাহরণ:** `/user 1234567890`")
+            await message.reply_text("💡 **Usage:** `/user <User_ID>`\n\n**Example:** `/user 1234567890`")
             return
-        
+
         target_id = parts[1].strip()
         user_info = await asyncio.to_thread(sync_get_user_info, target_id)
         if not user_info:
-            await message.reply_text("❌ এই ইউজার ডাটাবেজে পাওয়া যায়নি!")
+            await message.reply_text("❌ User not found in database.")
             return
 
         tg_dl = user_info.get("telegram_downloads", 0)
         social_dl = user_info.get("social_downloads", 0)
         total_dl = user_info.get("total_downloads", 0)
-        last_seen = time.strftime('%d-%m-%Y %I:%M %p', time.localtime(user_info.get('last_active', 0)))
+        last_seen = time.strftime('%Y-%m-%d %I:%M %p', time.localtime(user_info.get('last_active', 0)))
 
         response_text = (
             f"👤 **User Analytics**\n"
@@ -523,10 +562,10 @@ async def private_message_handler(client: Client, message: Message):
             f"• **Username:** @{user_info.get('username', 'N/A')}\n"
             f"• **User ID:** `{user_info.get('user_id')}`\n"
             f"• **Last Active:** `{last_seen}`\n\n"
-            f"📊 **ডাউনলোড পরিসংখ্যান:**\n"
-            f"• 📂 **Telegram Downloads:** `{tg_dl}`\n"
-            f"• 🌐 **Social Downloads:** `{social_dl}`\n"
-            f"• 🚀 **Total Downloads:** `{total_dl}`\n"
+            f"📊 **Download Breakdown:**\n"
+            f"• 📂 **Telegram Media:** `{tg_dl:,}`\n"
+            f"• 🌐 **Social Media:** `{social_dl:,}`\n"
+            f"• 🚀 **Total Items:** `{total_dl:,}`\n"
             f"━━━━━━━━━━━━━━━━━━"
         )
         await message.reply_text(response_text)
@@ -534,10 +573,10 @@ async def private_message_handler(client: Client, message: Message):
 
     # ----------------- ADMIN STATES (ONLY OWNER) ----------------- #
 
-    # 1. Manual Session Input State (Admin Pastes Session String)
+    # 1. Manual Session Input State
     if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_SESSION":
         admin_states.pop(user_id, None)
-        status_msg = await message.reply_text("Validating session...")
+        status_msg = await message.reply_text("Validating session string...")
 
         test_client = Client(f"test_{int(time.time())}", api_id=API_ID, api_hash=API_HASH, session_string=text_str, in_memory=True)
         try:
@@ -548,18 +587,18 @@ async def private_message_handler(client: Client, message: Message):
 
             success, err_msg = await asyncio.to_thread(sync_add_session, text_str, acc_name)
             if success:
-                await status_msg.edit_text(f"✅ **সেশন সফলভাবে ডাটাবেজে সেভ হয়েছে!**\n\n• অ্যাকাউন্ট: `{acc_name}`")
+                await status_msg.edit_text(f"✅ **Session saved to database!**\n\n• Account: `{acc_name}`")
             else:
                 await status_msg.edit_text(f"❌ Error: `{err_msg}`")
         except Exception as e:
             await status_msg.edit_text(f"❌ Invalid session: `{str(e)}`")
         return
 
-    # 2. In-Bot Session Generator - Step 1: Phone Number
+    # 2. In-Bot Session Generator - Step 1: Phone
     if user_id == OWNER_ID and admin_states.get(user_id) == "LOGIN_PHONE":
         admin_states.pop(user_id, None)
         phone_number = text_str.replace(" ", "").strip()
-        status_msg = await message.reply_text("⏳ টেলিগ্রাম ওটিপি (OTP) কোড পাঠানো হচ্ছে...")
+        status_msg = await message.reply_text("⏳ Sending Telegram login OTP code...")
 
         temp_client = Client(
             f"login_{int(time.time())}",
@@ -577,14 +616,14 @@ async def private_message_handler(client: Client, message: Message):
             }
             admin_states[user_id] = "LOGIN_OTP"
             await status_msg.edit_text(
-                "📩 **টেলিগ্রামে আসা OTP কোডটি পাঠান:**\n\n"
-                "💡 *টিপস:* টেলিগ্রাম কোড ব্লক এড়াতে স্পেস দিয়ে লিখুন (যেমন: `1 2 3 4 5`)",
+                "📩 **Send the Telegram login OTP code:**\n\n"
+                "💡 *Tip:* Separate digits with spaces to avoid Telegram message filters (e.g., `1 2 3 4 5`).",
                 reply_markup=ForceReply(selective=True)
             )
         except Exception as e:
             if temp_client.is_connected:
                 await temp_client.disconnect()
-            await status_msg.edit_text(f"❌ ওটিপি পাঠাতে সমস্যা হয়েছে: `{str(e)}`")
+            await status_msg.edit_text(f"❌ Failed to send OTP: `{str(e)}`")
         return
 
     # 3. In-Bot Session Generator - Step 2: OTP Code
@@ -594,13 +633,13 @@ async def private_message_handler(client: Client, message: Message):
 
         if not session_data:
             admin_states.pop(user_id, None)
-            await message.reply_text("❌ সেশন টাইমআউট হয়ে গেছে। আবার চেষ্টা করুন।")
+            await message.reply_text("❌ Session timed out. Please try again.")
             return
 
         temp_client = session_data["client"]
         phone = session_data["phone"]
         phone_code_hash = session_data["phone_code_hash"]
-        status_msg = await message.reply_text("⏳ ওটিপি যাচাই করা হচ্ছে...")
+        status_msg = await message.reply_text("⏳ Verifying OTP code...")
 
         try:
             await temp_client.sign_in(phone, phone_code_hash, otp_code)
@@ -611,33 +650,32 @@ async def private_message_handler(client: Client, message: Message):
             login_clients.pop(user_id, None)
             admin_states.pop(user_id, None)
 
-            # Auto-save হবে না; নিচে কোডটি কপি করার জন্য পাঠিয়ে দেওয়া হবে
             result_text = (
-                f"✅ **সেশন সফলভাবে তৈরি হয়েছে!**\n"
+                f"✅ **Session generated successfully!**\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
-                f"• **অ্যাকাউন্ট:** `{acc_name}`\n"
-                f"• **ইউজার আইডি:** `{me.id}`\n\n"
-                f"📋 **আপনার সেশন কোড (নিচে ট্যাপ করে কপি করুন):**\n\n"
+                f"• **Account:** `{acc_name}`\n"
+                f"• **User ID:** `{me.id}`\n\n"
+                f"📋 **Pyrogram Session String (Tap to Copy):**\n\n"
                 f"`{session_string}`\n\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
-                f"💡 এটি কপি করে Admin প্যানেলের **'➕ Paste Session'** বাটনে গিয়ে যুক্ত করে নিন।"
+                f"💡 Copy this string and save it via Admin Panel -> **'➕ Paste Session'**."
             )
             await status_msg.edit_text(result_text)
 
         except SessionPasswordNeeded:
             admin_states[user_id] = "LOGIN_2FA"
             await status_msg.edit_text(
-                "🔐 এই অ্যাকাউন্টে **Two-Step Verification (2FA)** চালু আছে।\n\nঅনুগ্রহ করে ২-স্টেপ পাসওয়ার্ডটি পাঠান:",
+                "🔐 **Two-Step Verification (2FA) is enabled on this account.**\n\nPlease send your 2FA password:",
                 reply_markup=ForceReply(selective=True)
             )
         except (PhoneCodeInvalid, PhoneCodeExpired):
-            await status_msg.edit_text("❌ ভুল বা মেয়াদোত্তীর্ণ ওটিপি! সঠিক কোডটি স্পেস দিয়ে লিখুন:")
+            await status_msg.edit_text("❌ Invalid or expired OTP. Please reply with the correct code:")
         except Exception as e:
             if temp_client.is_connected:
                 await temp_client.disconnect()
             login_clients.pop(user_id, None)
             admin_states.pop(user_id, None)
-            await status_msg.edit_text(f"❌ লগইন এরর: `{str(e)}`")
+            await status_msg.edit_text(f"❌ Login error: `{str(e)}`")
         return
 
     # 4. In-Bot Session Generator - Step 3: 2FA Password
@@ -647,11 +685,11 @@ async def private_message_handler(client: Client, message: Message):
 
         if not session_data:
             admin_states.pop(user_id, None)
-            await message.reply_text("❌ সেশন টাইমআউট হয়ে গেছে।")
+            await message.reply_text("❌ Session timed out.")
             return
 
         temp_client = session_data["client"]
-        status_msg = await message.reply_text("⏳ পাসওয়ার্ড যাচাই করা হচ্ছে...")
+        status_msg = await message.reply_text("⏳ Verifying 2FA password...")
 
         try:
             await temp_client.check_password(password)
@@ -663,25 +701,25 @@ async def private_message_handler(client: Client, message: Message):
             admin_states.pop(user_id, None)
 
             result_text = (
-                f"✅ **সেশন সফলভাবে তৈরি হয়েছে!**\n"
+                f"✅ **Session generated successfully!**\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
-                f"• **অ্যাকাউন্ট:** `{acc_name}`\n"
-                f"• **ইউজার আইডি:** `{me.id}`\n\n"
-                f"📋 **আপনার সেশন কোড (নিচে ট্যাপ করে কপি করুন):**\n\n"
+                f"• **Account:** `{acc_name}`\n"
+                f"• **User ID:** `{me.id}`\n\n"
+                f"📋 **Pyrogram Session String (Tap to Copy):**\n\n"
                 f"`{session_string}`\n\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
-                f"💡 এটি কপি করে Admin প্যানেলের **'➕ Paste Session'** বাটনে গিয়ে যুক্ত করে নিন।"
+                f"💡 Copy this string and save it via Admin Panel -> **'➕ Paste Session'**."
             )
             await status_msg.edit_text(result_text)
 
         except PasswordHashInvalid:
-            await status_msg.edit_text("❌ ভুল ২-স্টেপ পাসওয়ার্ড! আবার সঠিক পাসওয়ার্ড দিন:")
+            await status_msg.edit_text("❌ Incorrect 2FA password. Please try again:")
         except Exception as e:
             if temp_client.is_connected:
                 await temp_client.disconnect()
             login_clients.pop(user_id, None)
             admin_states.pop(user_id, None)
-            await status_msg.edit_text(f"❌ ভেরিফিকেশন ফেইলড: `{str(e)}`")
+            await status_msg.edit_text(f"❌ Verification failed: `{str(e)}`")
         return
 
     # 5. Admin F-Sub Channel Input
@@ -693,16 +731,16 @@ async def private_message_handler(client: Client, message: Message):
                 "❌ **Invalid Format!**\n\nPlease send like this:\n`Chat_ID | Invite_Link | Channel Name`\n\nExample:\n`-100123456789 | https://t.me/+AbCdEf | Join Updates`"
             )
             return
-        
+
         c_id, c_link, c_name = parts[0], parts[1], parts[2]
         success, err = await asyncio.to_thread(sync_add_fsub_channel, c_id, c_link, c_name)
         if success:
-            await message.reply_text(f"✅ **Force Sub channel added successfully!**\n\n• Name: `{c_name}`\n• Chat ID: `{c_id}`")
+            await message.reply_text(f"✅ **Force Sub channel added!**\n\n• Name: `{c_name}`\n• Chat ID: `{c_id}`")
         else:
             await message.reply_text(f"❌ Failed to add channel: `{err}`")
         return
 
-    # --- FORCE SUBSCRIBE CHECK (FOR GENERAL USERS) ---
+    # --- FORCE SUBSCRIBE CHECK (GENERAL USERS) ---
     unjoined = await check_user_fsub(client, user_id)
     if unjoined:
         await message.reply_text(
@@ -722,7 +760,7 @@ async def private_message_handler(client: Client, message: Message):
 
         text = (
             f"**Hello {user.first_name},**\n\n"
-            "Send any media link to download:\n"
+            "Send any supported link to download:\n"
             "• **Supported:** Telegram, YouTube, TikTok, Instagram, Facebook\n"
             "• Sent media auto-deletes in 5 minutes."
         )
@@ -769,9 +807,9 @@ async def private_message_handler(client: Client, message: Message):
             if os.path.exists(file_path):
                 os.remove(file_path)
 
-            # Metrics Tracking
-            asyncio.create_task(asyncio.to_thread(sync_increment_downloads, platform_name))
-            asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, platform_name))
+            # Metrics Tracking (1 item)
+            asyncio.create_task(asyncio.to_thread(sync_increment_downloads, platform_name, 1))
+            asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, platform_name, 1))
             await status.delete()
 
             if sent_msg:
@@ -804,7 +842,7 @@ async def private_message_handler(client: Client, message: Message):
                 msg_id = int(public_match.group(2))
 
             if not active_sessions:
-                await status.edit_text("To download from Telegram channels, you must add a User Session via /admin first.")
+                await status.edit_text("To download from Telegram channels, add a User Session via /admin first.")
                 return
 
             for sess in active_sessions:
@@ -835,7 +873,7 @@ async def private_message_handler(client: Client, message: Message):
 
             progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
 
-            # Handle Album
+            # Handle Album (Track exact media counts)
             if target_msg.media_group_id:
                 group_messages = await working_client.get_media_group(target_msg.chat.id, target_msg.id)
                 downloaded_files, media_list, gif_files = [], [], []
@@ -876,10 +914,12 @@ async def private_message_handler(client: Client, message: Message):
                     if os.path.exists(path):
                         os.remove(path)
 
-                if media_list or gif_files:
-                    # Metrics Tracking
-                    asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram"))
-                    asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram"))
+                total_items_in_album = len(downloaded_files)
+
+                if total_items_in_album > 0:
+                    # Granular counting: increments total downloaded files by exact count inside album
+                    asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", total_items_in_album))
+                    asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", total_items_in_album))
                     await status.delete()
                     del_ids = [message.id] + [m.id for m in sent_msgs]
                     asyncio.create_task(auto_delete_messages(message.chat.id, del_ids, 300))
@@ -934,9 +974,9 @@ async def private_message_handler(client: Client, message: Message):
                 if os.path.exists(file_path):
                     os.remove(file_path)
 
-                # Metrics Tracking
-                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram"))
-                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram"))
+                # Metrics Tracking (1 item)
+                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1))
+                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1))
                 await status.delete()
 
                 if sent_msg:
@@ -987,7 +1027,7 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
     elif data == "btn_help":
         await callback_query.message.edit_text(
             "**How to use:**\n\n"
-            "Send any supported link (Telegram, YouTube, TikTok, Instagram, Facebook) to download directly.",
+            "Send any supported link (Telegram, YouTube, TikTok, Instagram, Facebook) to download media directly.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_home")]])
         )
         await callback_query.answer()
@@ -1019,16 +1059,16 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
         await callback_query.message.edit_text(dash_text, reply_markup=dash_markup)
         await callback_query.answer("Dashboard Refreshed")
 
-    # In-Bot Session Generator Trigger
+    # In-Bot Session Generator
     elif data == "btn_login_account":
         admin_states[user_id] = "LOGIN_PHONE"
         await callback_query.message.reply(
-            "📱 **দেশের কোডসহ ফোন নম্বর পাঠান:**\n\n**যেমন:** `+8801700000000`",
+            "📱 **Send phone number with country code:**\n\n**Example:** `+8801700000000`",
             reply_markup=ForceReply(selective=True)
         )
         await callback_query.answer()
 
-    # Manual Session Paste Trigger
+    # Manual Session Paste
     elif data == "btn_add_session":
         admin_states[user_id] = "WAITING_SESSION"
         await callback_query.message.reply(
