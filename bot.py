@@ -81,30 +81,29 @@ progress_status = {}
 
 def get_drive_service():
     if not GDRIVE_KEY_RAW:
-        return None, "GDRIVE_KEY is missing."
+        return None
     try:
         cred_dict = json.loads(GDRIVE_KEY_RAW)
         creds = service_account.Credentials.from_service_account_info(
             cred_dict,
             scopes=['https://www.googleapis.com/auth/drive']
         )
-        service = build('drive', 'v3', credentials=creds, cache_discovery=False)
-        return service, None
+        return build('drive', 'v3', credentials=creds, cache_discovery=False)
     except Exception as e:
         logger.error(f"Google Drive Init Error: {e}")
-        return None, str(e)
+        return None
 
 def upload_file_to_drive(file_path: str, file_name: str):
-    """Uploads file to Google Drive and generates a public URL."""
-    service, auth_err = get_drive_service()
+    """Uploads file to Google Drive and creates a direct sharable link."""
+    service = get_drive_service()
     if not service:
-        logger.error(f"Drive service error: {auth_err}")
-        return None, f"Drive Init Error: {auth_err}"
+        logger.error("Drive upload failed: Service is None")
+        return None, "Google Drive service is not configured."
 
     try:
         file_metadata = {'name': file_name}
         if GDRIVE_FOLDER_ID:
-            file_metadata['parents'] = [GDRIVE_FOLDER_ID.strip()]
+            file_metadata['parents'] = [GDRIVE_FOLDER_ID]
 
         media = MediaFileUpload(file_path, resumable=True)
         file = service.files().create(
@@ -116,20 +115,16 @@ def upload_file_to_drive(file_path: str, file_name: str):
 
         file_id = file.get('id')
 
-        # Make file publicly readable
+        # Make file public
         try:
             permission = {'type': 'anyone', 'role': 'reader'}
-            service.permissions().create(
-                fileId=file_id,
-                body=permission,
-                supportsAllDrives=True
-            ).execute()
+            service.permissions().create(fileId=file_id, body=permission, supportsAllDrives=True).execute()
         except Exception as p_err:
-            logger.warning(f"Permission notice: {p_err}")
+            logger.warning(f"Permission error (ignored): {p_err}")
 
         web_link = file.get('webViewLink') or f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
-        logger.info(f"Drive upload successful: {web_link}")
-        return web_link, None
+        logger.info(f"Drive upload successful! Link: {web_link}")
+        return web_link, "Success"
     except Exception as e:
         logger.error(f"G-Drive Upload Exception: {e}", exc_info=True)
         return None, str(e)
@@ -250,7 +245,7 @@ def sync_cleanup_expired_urls():
 
 async def url_cleanup_daemon():
     while True:
-        await asyncio.sleep(3600)
+        await asyncio.sleep(3600)  # Check every 1 hour
         await asyncio.to_thread(sync_cleanup_expired_urls)
 
 def sync_increment_downloads(platform: str, count: int = 1, photos: int = 0, videos: int = 0):
@@ -459,23 +454,16 @@ def is_gif_message(msg):
 def has_media(msg):
     return bool(msg and (msg.video or msg.photo or msg.document or msg.audio or msg.voice or msg.animation or msg.media_group_id))
 
-def clean_social_url(url: str) -> str:
-    clean_url = url.split("?")[0].strip()
-    if "instagram.com" in clean_url or "instagr.am" in clean_url:
-        return clean_url
-
+def unshorten_url(url: str) -> str:
     try:
         req = urllib.request.Request(
-            clean_url,
-            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            url,
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         )
-        with urllib.request.urlopen(req, timeout=8) as response:
-            redirected = response.geturl()
-            if "accounts/login" not in redirected:
-                return redirected
+        with urllib.request.urlopen(req, timeout=10) as response:
+            return response.geturl()
     except Exception:
-        pass
-    return clean_url
+        return url
 
 def detect_social_platform(url: str) -> str:
     url_lower = url.lower()
@@ -490,7 +478,7 @@ def detect_social_platform(url: str) -> str:
     return "others"
 
 def extract_and_download_social(url: str, user_id: int):
-    target_url = clean_social_url(url)
+    real_url = unshorten_url(url)
     timestamp = int(time.time())
     out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_%(id)s.%(ext)s")
 
@@ -503,60 +491,45 @@ def extract_and_download_social(url: str, user_id: int):
         'noplaylist': True,
         'max_filesize': 1900 * 1024 * 1024,
         'extractor_args': {
-            'youtube': {'player_client': ['android', 'ios', 'web']},
-            'instagram': {'api_key': ''}
+            'youtube': {
+                'player_client': ['android', 'ios', 'web']
+            }
         },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
         }
     }
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(target_url, download=True)
-            if info:
-                file_path = ydl.prepare_filename(info)
-                if not os.path.exists(file_path):
-                    base, _ = os.path.splitext(file_path)
-                    for ext in [".mp4", ".mkv", ".webm", ".mov"]:
-                        if os.path.exists(base + ext):
-                            file_path = base + ext
-                            break
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(real_url, download=True)
+        if not info:
+            return None, None, 0, 0, 0
 
-                if not os.path.exists(file_path):
-                    prefix = f"{user_id}_{timestamp}_"
-                    for f in os.listdir(DOWNLOAD_DIR):
-                        if f.startswith(prefix) and not f.endswith(".part"):
-                            file_path = os.path.join(DOWNLOAD_DIR, f)
-                            break
+        file_path = ydl.prepare_filename(info)
+        if not os.path.exists(file_path):
+            base, _ = os.path.splitext(file_path)
+            for ext in [".mp4", ".mkv", ".webm", ".mov"]:
+                if os.path.exists(base + ext):
+                    file_path = base + ext
+                    break
 
-                if os.path.exists(file_path):
-                    title = str(info.get('title') or "Video")
-                    duration = int(info.get('duration') or 0)
-                    width = int(info.get('width') or 0)
-                    height = int(info.get('height') or 0)
-                    return file_path, title, duration, width, height
-    except Exception as e:
-        logger.warning(f"Primary download error: {e}")
+        if not os.path.exists(file_path):
+            prefix = f"{user_id}_{timestamp}_"
+            for f in os.listdir(DOWNLOAD_DIR):
+                if f.startswith(prefix) and not f.endswith(".part"):
+                    file_path = os.path.join(DOWNLOAD_DIR, f)
+                    break
 
-    # Fallback for Instagram
-    if "instagram.com" in target_url or "instagr.am" in target_url:
-        try:
-            fallback_url = target_url.replace("instagram.com", "ddinstagram.com").replace("instagr.am", "ddinstagram.com")
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(fallback_url, download=True)
-                if info:
-                    prefix = f"{user_id}_{timestamp}_"
-                    for f in os.listdir(DOWNLOAD_DIR):
-                        if f.startswith(prefix) and not f.endswith(".part"):
-                            file_path = os.path.join(DOWNLOAD_DIR, f)
-                            title = str(info.get('title') or "Instagram Reel")
-                            return file_path, title, int(info.get('duration') or 0), int(info.get('width') or 0), int(info.get('height') or 0)
-        except Exception as fb_err:
-            logger.error(f"Fallback error: {fb_err}")
+        if not os.path.exists(file_path):
+            return None, None, 0, 0, 0
 
-    return None, None, 0, 0, 0
+        title = str(info.get('title') or "Video")
+        duration = int(info.get('duration') or 0)
+        width = int(info.get('width') or 0)
+        height = int(info.get('height') or 0)
+
+        return file_path, title, duration, width, height
 
 # ----------------- MESSAGE HANDLER ----------------- #
 
@@ -818,6 +791,7 @@ async def private_message_handler(client: Client, message: Message):
         target_url = social_match.group(0)
         platform_name = detect_social_platform(target_url)
 
+        # Log URL to Database
         asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, target_url, platform_name))
 
         status = await message.reply_text("Processing video...")
@@ -831,14 +805,12 @@ async def private_message_handler(client: Client, message: Message):
                 await status.edit_text("Failed to download video. Post might be private or link is expired.")
                 return
 
+            # Google Drive Upload
             drive_link = None
             if GDRIVE_KEY_RAW:
                 fname = os.path.basename(file_path)
-                await status.edit_text("⏳ Uploading to Google Drive...")
-                drive_link, drive_err = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
-                
-                if drive_err:
-                    await message.reply_text(f"⚠️ **Google Drive Upload Failed:**\n`{drive_err}`")
+                await status.edit_text("Uploading to Google Drive & Telegram...")
+                drive_link, _ = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
 
             progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
 
@@ -857,7 +829,7 @@ async def private_message_handler(client: Client, message: Message):
                 "reply_markup": reply_markup,
                 "supports_streaming": True,
                 "progress": progress_bar,
-                "progress_args": (status, "Uploading Video to Telegram", user_id)
+                "progress_args": (status, "Uploading Video", user_id)
             }
             if duration > 0:
                 send_kwargs["duration"] = duration
@@ -871,6 +843,7 @@ async def private_message_handler(client: Client, message: Message):
             if os.path.exists(file_path):
                 os.remove(file_path)
 
+            # Metrics Tracking
             asyncio.create_task(asyncio.to_thread(sync_increment_downloads, platform_name, 1))
             asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, platform_name, 1))
             await status.delete()
@@ -955,6 +928,7 @@ async def private_message_handler(client: Client, message: Message):
                         if file_path:
                             downloaded_files.append(file_path)
 
+                            # Upload items to Google Drive
                             if GDRIVE_KEY_RAW:
                                 asyncio.create_task(asyncio.to_thread(upload_file_to_drive, file_path, os.path.basename(file_path)))
 
@@ -1014,14 +988,12 @@ async def private_message_handler(client: Client, message: Message):
                     await status.edit_text("Failed to download media file.")
                     return
 
+                # Google Drive Upload
                 drive_link = None
                 if GDRIVE_KEY_RAW:
                     fname = os.path.basename(file_path)
-                    await status.edit_text(f"⏳ Uploading {media_type} to Google Drive...")
-                    drive_link, drive_err = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
-                    
-                    if drive_err:
-                        await message.reply_text(f"⚠️ **Google Drive Upload Failed:**\n`{drive_err}`")
+                    await status.edit_text(f"Uploading {media_type} to Drive & Telegram...")
+                    drive_link, _ = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
 
                 reply_markup = None
                 if drive_link:
@@ -1038,27 +1010,28 @@ async def private_message_handler(client: Client, message: Message):
                 if is_gif:
                     sent_msg = await client.send_animation(
                         chat_id=message.chat.id, animation=file_path, caption=caption, reply_markup=reply_markup,
-                        progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
+                        progress=progress_bar, progress_args=(status, f"Uploading {media_type}", user_id)
                     )
                 elif target_msg.video:
                     sent_msg = await client.send_video(
                         chat_id=message.chat.id, video=file_path, caption=caption, reply_markup=reply_markup,
-                        supports_streaming=True, progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
+                        supports_streaming=True, progress=progress_bar, progress_args=(status, f"Uploading {media_type}", user_id)
                     )
                 elif target_msg.photo:
                     sent_msg = await client.send_photo(
                         chat_id=message.chat.id, photo=file_path, caption=caption, reply_markup=reply_markup,
-                        progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
+                        progress=progress_bar, progress_args=(status, f"Uploading {media_type}", user_id)
                     )
                 elif target_msg.document or target_msg.audio or target_msg.voice:
                     sent_msg = await client.send_document(
                         chat_id=message.chat.id, document=file_path, caption=caption, reply_markup=reply_markup,
-                        progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
+                        progress=progress_bar, progress_args=(status, f"Uploading {media_type}", user_id)
                     )
 
                 if os.path.exists(file_path):
                     os.remove(file_path)
 
+                # Metrics Tracking
                 asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, photos_count, videos_count))
                 asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, photos_count, videos_count))
                 await status.delete()
