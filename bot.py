@@ -97,6 +97,7 @@ def upload_file_to_drive(file_path: str, file_name: str):
     """Uploads file to Google Drive and creates a direct sharable link."""
     service = get_drive_service()
     if not service:
+        logger.error("Drive upload failed: Service is None")
         return None, "Google Drive service is not configured."
 
     try:
@@ -108,19 +109,24 @@ def upload_file_to_drive(file_path: str, file_name: str):
         file = service.files().create(
             body=file_metadata,
             media_body=media,
-            fields='id, webViewLink, webContentLink'
+            supportsAllDrives=True,
+            fields='id, webViewLink'
         ).execute()
 
         file_id = file.get('id')
 
-        # Make file public (Anyone with link can view/download)
-        permission = {'type': 'anyone', 'role': 'reader'}
-        service.permissions().create(fileId=file_id, body=permission).execute()
+        # Make file public
+        try:
+            permission = {'type': 'anyone', 'role': 'reader'}
+            service.permissions().create(fileId=file_id, body=permission, supportsAllDrives=True).execute()
+        except Exception as p_err:
+            logger.warning(f"Permission error (ignored): {p_err}")
 
-        web_link = file.get('webViewLink')
+        web_link = file.get('webViewLink') or f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
+        logger.info(f"Drive upload successful! Link: {web_link}")
         return web_link, "Success"
     except Exception as e:
-        logger.error(f"G-Drive Upload Error: {e}")
+        logger.error(f"G-Drive Upload Exception: {e}", exc_info=True)
         return None, str(e)
 
 # ----------------- DATABASE HELPERS ----------------- #
@@ -772,7 +778,7 @@ async def private_message_handler(client: Client, message: Message):
             "Send any supported link to download:\n"
             "• **Supported:** Telegram, YouTube, TikTok, Instagram, Facebook\n"
             "• Sent media auto-deletes in 5 minutes.\n"
-            "• Google Drive upload link support included."
+            "• Google Drive backup included."
         )
         await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
@@ -799,15 +805,17 @@ async def private_message_handler(client: Client, message: Message):
                 await status.edit_text("Failed to download video. Post might be private or link is expired.")
                 return
 
-            # Check Google Drive Link Option
+            # Google Drive Upload
             drive_link = None
             if GDRIVE_KEY_RAW:
                 fname = os.path.basename(file_path)
+                await status.edit_text("Uploading to Google Drive & Telegram...")
                 drive_link, _ = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
 
             progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
 
             caption_txt = f"**{title[:60]}**" if title else ""
+            
             reply_markup = None
             if drive_link:
                 reply_markup = InlineKeyboardMarkup([
@@ -920,6 +928,10 @@ async def private_message_handler(client: Client, message: Message):
                         if file_path:
                             downloaded_files.append(file_path)
 
+                            # Upload items to Google Drive
+                            if GDRIVE_KEY_RAW:
+                                asyncio.create_task(asyncio.to_thread(upload_file_to_drive, file_path, os.path.basename(file_path)))
+
                             if is_gif_message(msg):
                                 gif_files.append((file_path, msg.caption or ""))
                                 videos_count += 1
@@ -976,10 +988,11 @@ async def private_message_handler(client: Client, message: Message):
                     await status.edit_text("Failed to download media file.")
                     return
 
-                # Optional Google Drive Upload for Large/Single Files
+                # Google Drive Upload
                 drive_link = None
                 if GDRIVE_KEY_RAW:
                     fname = os.path.basename(file_path)
+                    await status.edit_text(f"Uploading {media_type} to Drive & Telegram...")
                     drive_link, _ = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
 
                 reply_markup = None
