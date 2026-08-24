@@ -46,10 +46,10 @@ API_HASH = os.environ.get("API_HASH", "77df805f1700eeefec861de6c93ee2ae").strip(
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8952918726:AAGnKZm-S8hmBaWzltPfrdWRcyVHGVx44d0").strip()
 FIREBASE_KEY_RAW = os.environ.get("FIREBASE_KEY", "").strip()
 
-# Google Drive OAuth Configs (Google One / OAuth 2.0)
-GDRIVE_CLIENT_ID = os.environ.get("GDRIVE_CLIENT_ID", "").strip()
-GDRIVE_CLIENT_SECRET = os.environ.get("GDRIVE_CLIENT_SECRET", "").strip()
-GDRIVE_REFRESH_TOKEN = os.environ.get("GDRIVE_REFRESH_TOKEN", "").strip()
+# Google Drive OAuth Configs (Google One Personal Plan)
+GDRIVE_CLIENT_ID = os.environ.get("GDRIVE_CLIENT_ID", "203426313347-c4lv00u3rgr9e35upvani6mjhqf8jsap.apps.googleusercontent.com").strip()
+GDRIVE_CLIENT_SECRET = os.environ.get("GDRIVE_CLIENT_SECRET", "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").strip()
+GDRIVE_REFRESH_TOKEN = os.environ.get("GDRIVE_REFRESH_TOKEN", "1//04oj5g9drum_wCYIARAAGAQSNwF-L9Irb2WkEfSNazDQDF1SPldbINrtvurWmt3uEuGDrd1qUcIeSrEQm8BZ7LsjFakY6Z6xR9o").strip()
 GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "1aCU7K2Kd-pIdibVY-TSYX2qHaoG65bHR").strip()
 
 OWNER_ID = 6142774415
@@ -84,11 +84,11 @@ admin_states = {}
 login_clients = {}
 progress_status = {}
 
-# ----------------- GOOGLE DRIVE OAUTH 2.0 ENGINE ----------------- #
+# ----------------- GOOGLE DRIVE OAUTH ENGINE ----------------- #
 
 def get_drive_service():
     if not (GDRIVE_CLIENT_ID and GDRIVE_CLIENT_SECRET and GDRIVE_REFRESH_TOKEN):
-        return None, "OAuth 2.0 Credentials missing (CLIENT_ID / SECRET / REFRESH_TOKEN)"
+        return None, "OAuth 2.0 Credentials missing"
     try:
         creds = Credentials(
             token=None,
@@ -127,7 +127,7 @@ def upload_file_to_drive(file_path: str, file_name: str):
 
         file_id = file.get('id')
         if not file_id:
-            return None, "Drive did not return a valid File ID."
+            return None, "Drive did not return File ID."
 
         try:
             permission = {'type': 'anyone', 'role': 'reader'}
