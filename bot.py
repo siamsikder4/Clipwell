@@ -77,7 +77,7 @@ admin_states = {}
 login_clients = {}
 progress_status = {}
 
-# ----------------- GOOGLE DRIVE HELPERS ----------------- #
+# ----------------- GOOGLE DRIVE HELPERS (FIXED) ----------------- #
 
 def get_drive_service():
     if not GDRIVE_KEY_RAW:
@@ -94,7 +94,7 @@ def get_drive_service():
         return None
 
 def upload_file_to_drive(file_path: str, file_name: str):
-    """Uploads file to Google Drive and creates a direct sharable link."""
+    """Uploads file to Google Drive and generates a publicly accessible link."""
     service = get_drive_service()
     if not service:
         logger.error("Drive upload failed: Service is None")
@@ -103,7 +103,7 @@ def upload_file_to_drive(file_path: str, file_name: str):
     try:
         file_metadata = {'name': file_name}
         if GDRIVE_FOLDER_ID:
-            file_metadata['parents'] = [GDRIVE_FOLDER_ID]
+            file_metadata['parents'] = [GDRIVE_FOLDER_ID.strip()]
 
         media = MediaFileUpload(file_path, resumable=True)
         file = service.files().create(
@@ -115,12 +115,16 @@ def upload_file_to_drive(file_path: str, file_name: str):
 
         file_id = file.get('id')
 
-        # Make file public
+        # Make file publicly readable
         try:
             permission = {'type': 'anyone', 'role': 'reader'}
-            service.permissions().create(fileId=file_id, body=permission, supportsAllDrives=True).execute()
+            service.permissions().create(
+                fileId=file_id,
+                body=permission,
+                supportsAllDrives=True
+            ).execute()
         except Exception as p_err:
-            logger.warning(f"Permission error (ignored): {p_err}")
+            logger.warning(f"Drive permission notice: {p_err}")
 
         web_link = file.get('webViewLink') or f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
         logger.info(f"Drive upload successful! Link: {web_link}")
@@ -175,7 +179,7 @@ def sync_delete_session(doc_id: str):
         logger.error(f"Delete Session Error: {e}")
         return False
 
-# User Tracking & Granular Analytics
+# User Tracking & Analytics
 def sync_track_user(user_id: int, username: str, name: str) -> bool:
     if not db:
         return False
@@ -199,7 +203,7 @@ def sync_track_user(user_id: int, username: str, name: str) -> bool:
         logger.error(f"Tracking Error: {e}")
         return False
 
-# URL Logging & 1-Day Auto-Cleanup
+# URL Logging & Cleanup
 def sync_log_url(user_id: int, user_name: str, url: str, platform: str):
     if not db:
         return
@@ -245,7 +249,7 @@ def sync_cleanup_expired_urls():
 
 async def url_cleanup_daemon():
     while True:
-        await asyncio.sleep(3600)  # Check every 1 hour
+        await asyncio.sleep(3600)
         await asyncio.to_thread(sync_cleanup_expired_urls)
 
 def sync_increment_downloads(platform: str, count: int = 1, photos: int = 0, videos: int = 0):
@@ -778,7 +782,7 @@ async def private_message_handler(client: Client, message: Message):
             "Send any supported link to download:\n"
             "• **Supported:** Telegram, YouTube, TikTok, Instagram, Facebook\n"
             "• Sent media auto-deletes in 5 minutes.\n"
-            "• Google Drive backup included."
+            "• Google Drive upload link support included."
         )
         await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
@@ -791,7 +795,6 @@ async def private_message_handler(client: Client, message: Message):
         target_url = social_match.group(0)
         platform_name = detect_social_platform(target_url)
 
-        # Log URL to Database
         asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, target_url, platform_name))
 
         status = await message.reply_text("Processing video...")
@@ -816,6 +819,7 @@ async def private_message_handler(client: Client, message: Message):
 
             caption_txt = f"**{title[:60]}**" if title else ""
             
+            # Inline Button for Drive Link
             reply_markup = None
             if drive_link:
                 reply_markup = InlineKeyboardMarkup([
@@ -843,7 +847,6 @@ async def private_message_handler(client: Client, message: Message):
             if os.path.exists(file_path):
                 os.remove(file_path)
 
-            # Metrics Tracking
             asyncio.create_task(asyncio.to_thread(sync_increment_downloads, platform_name, 1))
             asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, platform_name, 1))
             await status.delete()
@@ -928,7 +931,7 @@ async def private_message_handler(client: Client, message: Message):
                         if file_path:
                             downloaded_files.append(file_path)
 
-                            # Upload items to Google Drive
+                            # Upload Album Item to Google Drive
                             if GDRIVE_KEY_RAW:
                                 asyncio.create_task(asyncio.to_thread(upload_file_to_drive, file_path, os.path.basename(file_path)))
 
@@ -1031,7 +1034,6 @@ async def private_message_handler(client: Client, message: Message):
                 if os.path.exists(file_path):
                     os.remove(file_path)
 
-                # Metrics Tracking
                 asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, photos_count, videos_count))
                 asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, photos_count, videos_count))
                 await status.delete()
@@ -1159,7 +1161,7 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
         )
         await callback_query.answer()
 
-    # View Submitted URLs (Last 24 Hours)
+    # View Submitted URLs
     elif data == "btn_view_urls":
         urls = await asyncio.to_thread(sync_get_active_urls, 25)
         if not urls:
