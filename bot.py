@@ -81,29 +81,29 @@ progress_status = {}
 
 def get_drive_service():
     if not GDRIVE_KEY_RAW:
-        return None
+        return None, "GDRIVE_KEY missing in environment variables"
     try:
         cred_dict = json.loads(GDRIVE_KEY_RAW)
         creds = service_account.Credentials.from_service_account_info(
             cred_dict,
             scopes=['https://www.googleapis.com/auth/drive']
         )
-        return build('drive', 'v3', credentials=creds, cache_discovery=False)
+        service = build('drive', 'v3', credentials=creds, cache_discovery=False)
+        return service, None
     except Exception as e:
         logger.error(f"Google Drive Init Error: {e}")
-        return None
+        return None, str(e)
 
 def upload_file_to_drive(file_path: str, file_name: str):
-    """Uploads file to Google Drive and creates a direct sharable link."""
-    service = get_drive_service()
+    """Uploads file to Google Drive and creates a direct shareable link."""
+    service, auth_err = get_drive_service()
     if not service:
-        logger.error("Drive upload failed: Service is None")
-        return None, "Google Drive service is not configured."
+        return None, f"Drive Init Error: {auth_err}"
 
     try:
         file_metadata = {'name': file_name}
         if GDRIVE_FOLDER_ID:
-            file_metadata['parents'] = [GDRIVE_FOLDER_ID]
+            file_metadata['parents'] = [GDRIVE_FOLDER_ID.strip()]
 
         media = MediaFileUpload(file_path, resumable=True)
         file = service.files().create(
@@ -120,11 +120,11 @@ def upload_file_to_drive(file_path: str, file_name: str):
             permission = {'type': 'anyone', 'role': 'reader'}
             service.permissions().create(fileId=file_id, body=permission, supportsAllDrives=True).execute()
         except Exception as p_err:
-            logger.warning(f"Permission error (ignored): {p_err}")
+            logger.warning(f"Permission setting notice: {p_err}")
 
         web_link = file.get('webViewLink') or f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
         logger.info(f"Drive upload successful! Link: {web_link}")
-        return web_link, "Success"
+        return web_link, None
     except Exception as e:
         logger.error(f"G-Drive Upload Exception: {e}", exc_info=True)
         return None, str(e)
@@ -245,7 +245,7 @@ def sync_cleanup_expired_urls():
 
 async def url_cleanup_daemon():
     while True:
-        await asyncio.sleep(3600)  # Check every 1 hour
+        await asyncio.sleep(3600)
         await asyncio.to_thread(sync_cleanup_expired_urls)
 
 def sync_increment_downloads(platform: str, count: int = 1, photos: int = 0, videos: int = 0):
@@ -778,7 +778,7 @@ async def private_message_handler(client: Client, message: Message):
             "Send any supported link to download:\n"
             "• **Supported:** Telegram, YouTube, TikTok, Instagram, Facebook\n"
             "• Sent media auto-deletes in 5 minutes.\n"
-            "• Google Drive backup included."
+            "• Google Drive upload support included."
         )
         await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
@@ -805,12 +805,15 @@ async def private_message_handler(client: Client, message: Message):
                 await status.edit_text("Failed to download video. Post might be private or link is expired.")
                 return
 
-            # Google Drive Upload
+            # Google Drive Upload with Status Notice
             drive_link = None
             if GDRIVE_KEY_RAW:
                 fname = os.path.basename(file_path)
-                await status.edit_text("Uploading to Google Drive & Telegram...")
-                drive_link, _ = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
+                await status.edit_text("⏳ Uploading to Google Drive...")
+                drive_link, drive_err = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
+                
+                if drive_err:
+                    await message.reply_text(f"⚠️ **Google Drive Upload Failed:**\n`{drive_err}`")
 
             progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
 
@@ -829,7 +832,7 @@ async def private_message_handler(client: Client, message: Message):
                 "reply_markup": reply_markup,
                 "supports_streaming": True,
                 "progress": progress_bar,
-                "progress_args": (status, "Uploading Video", user_id)
+                "progress_args": (status, "Uploading Video to Telegram", user_id)
             }
             if duration > 0:
                 send_kwargs["duration"] = duration
@@ -988,12 +991,15 @@ async def private_message_handler(client: Client, message: Message):
                     await status.edit_text("Failed to download media file.")
                     return
 
-                # Google Drive Upload
+                # Google Drive Upload with Notice
                 drive_link = None
                 if GDRIVE_KEY_RAW:
                     fname = os.path.basename(file_path)
-                    await status.edit_text(f"Uploading {media_type} to Drive & Telegram...")
-                    drive_link, _ = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
+                    await status.edit_text(f"⏳ Uploading {media_type} to Google Drive...")
+                    drive_link, drive_err = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
+                    
+                    if drive_err:
+                        await message.reply_text(f"⚠️ **Google Drive Upload Failed:**\n`{drive_err}`")
 
                 reply_markup = None
                 if drive_link:
@@ -1010,22 +1016,22 @@ async def private_message_handler(client: Client, message: Message):
                 if is_gif:
                     sent_msg = await client.send_animation(
                         chat_id=message.chat.id, animation=file_path, caption=caption, reply_markup=reply_markup,
-                        progress=progress_bar, progress_args=(status, f"Uploading {media_type}", user_id)
+                        progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
                     )
                 elif target_msg.video:
                     sent_msg = await client.send_video(
                         chat_id=message.chat.id, video=file_path, caption=caption, reply_markup=reply_markup,
-                        supports_streaming=True, progress=progress_bar, progress_args=(status, f"Uploading {media_type}", user_id)
+                        supports_streaming=True, progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
                     )
                 elif target_msg.photo:
                     sent_msg = await client.send_photo(
                         chat_id=message.chat.id, photo=file_path, caption=caption, reply_markup=reply_markup,
-                        progress=progress_bar, progress_args=(status, f"Uploading {media_type}", user_id)
+                        progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
                     )
                 elif target_msg.document or target_msg.audio or target_msg.voice:
                     sent_msg = await client.send_document(
                         chat_id=message.chat.id, document=file_path, caption=caption, reply_markup=reply_markup,
-                        progress=progress_bar, progress_args=(status, f"Uploading {media_type}", user_id)
+                        progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
                     )
 
                 if os.path.exists(file_path):
