@@ -45,8 +45,22 @@ API_HASH = os.environ.get("API_HASH", "77df805f1700eeefec861de6c93ee2ae").strip(
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8952918726:AAGnKZm-S8hmBaWzltPfrdWRcyVHGVx44d0").strip()
 FIREBASE_KEY_RAW = os.environ.get("FIREBASE_KEY", "").strip()
 
-# Google Drive Service Account Configs
-SERVICE_ACCOUNT_RAW = os.environ.get("GDRIVE_SERVICE_ACCOUNT_JSON", "").strip()
+# Google Drive Service Account Configs (Hardcoded Default + Fallback)
+DEFAULT_SERVICE_ACCOUNT = {
+  "type": "service_account",
+  "project_id": "clip-well",
+  "private_key_id": "7b78e8d04c257ec6c2f05ca65fa9313812664b26",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDoLdD6igC9jXh4\n4ebhldorwVTlqdwyQPBgMT2A/agJ32hKLIIPGucYx7+rTBD7D5odPDTampCXh+Hy\noIK5OsZ+MaGmrDN7oRU68vh3ZqCxbBfLLKVUqm8CJTzTs1tFikEKkh5i59qUeRvi\nEBSqiP8dmfS51cK58TZhk6MJAStRybmrTo6Es+TLfYB6LOzNOMtVmm1bvZtJlQ82\nJyOgeWEoQeg64EIVwWgX557JwA3tnJnLjt8RpSGMdnlQAR0PSbrv6fViigDwyjKq\n3cu+RS9/SrDeY59pdETmGIjnFibl6WhF0FZhsCeEMkE9X4FpsgMJn9okzZEghpsz\n7TVyrOhFAgMBAAECggEAPlX6uyFtJHdEppPkNKHSkxfTjtvFilqEDxd5T1YLFSd9\nrRh5DMwoyq7qh3ejQXzFYF8HQ7/m3UA2yjkND+U3YK87mu+13NX5SLvuOMR9lVUT\nqFGCzBH8PuO3ipEniqqdXtSvQtfECEPh2BaALe8dK5nnqjM5lkmsU5NbXPIK6uiO\nrsF4Rfcanr9QxVmuDS/ao5hK5cfZ4h3eBBPkMVFrC6T8z0zs+KmC4W6XOL/7ouee\nf2H2Wpia8wpFzH8u55yio55P+OhmdFlPmoT1fAH9Ea+C0D1QzJS2d7wyOB0yfps7\nIdOKa/rI9psUk2Ww5xK9TuhfhoIcq0J9p0CH5YRSOwKBgQD7bmxkL5YOesN5OO2F\nJO7irVXbtMz4dT9hGoKsyk2GqIw8hocmt99pCXWoSlGqJaWdsGKG52k2h9vQHoXd\nPV1hY5679wJSiN7pwfxlimO4rkIjSQkhNMZbU/l6dlNb67HXv/d01XWcm3wUfyBT\nZN9tPPo6dhgV0PFYtysj/8utAwKBgQDsZdZQi/2UlZa/DziXDaHiB+hoRe/gikwt\ndSwQ27/SEvCF1giD240yIdM4zPmvaqg+/vaEKwjsKk4bAe9cREHheFGLan3ZGMv7\nolwVyFdEhlgUMFCbNCuB5sI9mNwSC7OuGbj04ETb2t4Q45ruBTw05HnTDqxbVWo5\nelU8+M8fFwKBgCy4ymzTjgRLT8ObHZxmIluNa00mDqNO75QNDBtB7KI8Dp2hbB61\n6/YZ6aSie34hLiErQ4stVCiP58hP9Y2Roa918cELQY1+rO+1QnipMe2iiT8PeaE/\natzJxgFDVLZv6PUwPwq4ATB2844Nwqkysw8SHowRf106CgO2qOTBVfATAoGASi/f\nZSG5r+KOD2Ggec8eaYffyLGCCS59n5pw/M1p0mx9LRMxUugY1I3G8sFo7kMDj9mF\n1Y6H202fe1xNGOCW6EJRHPaLjhD5Gvwl9/QKZwfeJl/PPBXQPZEEjj4lekhP2Chc\nYgTrty9ll1lGasIb1eGJ1dF6B6OzlVwt2defcHsCgYACjoHkFuJLedBnVsYpW09E\npWTPRSGFULfJt1RHM5I6LaVTLiWmwa0gUycM6vy8+3ZEvhUJe5BVC6BKA+7PEMov\nHMN9Vy2H4Dws39W67rEjNRqCQ5M7eWjYfuK0EJ+xnMy3kzM4BL0OUIIlogrHnoN0\nipi4buJoDkpfNuw4nOnQcw==\n-----END PRIVATE KEY-----\n",
+  "client_email": "firebase-adminsdk-fbsvc@clip-well.iam.gserviceaccount.com",
+  "client_id": "118336560567988414128",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40clip-well.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}
+
+SERVICE_ACCOUNT_RAW = os.environ.get("GDRIVE_SERVICE_ACCOUNT_JSON", "").strip() or json.dumps(DEFAULT_SERVICE_ACCOUNT)
 GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "1aCU7K2Kd-pIdibVY-TSYX2qHaoG65bHR").strip()
 
 OWNER_ID = 6142774415
@@ -85,7 +99,7 @@ progress_status = {}
 
 def get_drive_service():
     if not SERVICE_ACCOUNT_RAW:
-        return None, "GDRIVE_SERVICE_ACCOUNT_JSON variable missing in Environment"
+        return None, "GDRIVE_SERVICE_ACCOUNT_JSON missing"
     try:
         service_account_info = json.loads(SERVICE_ACCOUNT_RAW)
         creds = service_account.Credentials.from_service_account_info(
