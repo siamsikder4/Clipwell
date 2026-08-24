@@ -45,7 +45,7 @@ API_HASH = os.environ.get("API_HASH", "77df805f1700eeefec861de6c93ee2ae").strip(
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8952918726:AAGnKZm-S8hmBaWzltPfrdWRcyVHGVx44d0").strip()
 FIREBASE_KEY_RAW = os.environ.get("FIREBASE_KEY", "").strip()
 
-# Google Drive Service Account Configs (Read from Railway Environment)
+# Google Drive Service Account Configs
 SERVICE_ACCOUNT_RAW = os.environ.get("GDRIVE_SERVICE_ACCOUNT_JSON", "").strip()
 GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "1aCU7K2Kd-pIdibVY-TSYX2qHaoG65bHR").strip()
 
@@ -139,7 +139,7 @@ def upload_file_to_drive(file_path: str, file_name: str):
         return web_link, None
     except Exception as e:
         logger.error(f"G-Drive Upload Exception: {e}", exc_info=True)
-        return None, str(e)
+        return None, f"{type(e).__name__}: {str(e)}"
 
 # ----------------- DATABASE HELPERS ----------------- #
 
