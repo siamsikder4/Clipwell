@@ -95,7 +95,6 @@ def get_drive_service():
         return None, str(e)
 
 def upload_file_to_drive(file_path: str, file_name: str):
-    """Uploads file to Google Drive and creates a direct shareable link."""
     service, auth_err = get_drive_service()
     if not service:
         return None, f"Drive Init Error: {auth_err}"
@@ -115,12 +114,11 @@ def upload_file_to_drive(file_path: str, file_name: str):
 
         file_id = file.get('id')
 
-        # Make file public
         try:
             permission = {'type': 'anyone', 'role': 'reader'}
             service.permissions().create(fileId=file_id, body=permission, supportsAllDrives=True).execute()
         except Exception as p_err:
-            logger.warning(f"Permission setting notice: {p_err}")
+            logger.warning(f"Permission notice: {p_err}")
 
         web_link = file.get('webViewLink') or f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
         logger.info(f"Drive upload successful! Link: {web_link}")
@@ -175,7 +173,6 @@ def sync_delete_session(doc_id: str):
         logger.error(f"Delete Session Error: {e}")
         return False
 
-# User Tracking & Granular Analytics
 def sync_track_user(user_id: int, username: str, name: str) -> bool:
     if not db:
         return False
@@ -199,7 +196,6 @@ def sync_track_user(user_id: int, username: str, name: str) -> bool:
         logger.error(f"Tracking Error: {e}")
         return False
 
-# URL Logging & 1-Day Auto-Cleanup
 def sync_log_url(user_id: int, user_name: str, url: str, platform: str):
     if not db:
         return
@@ -454,16 +450,27 @@ def is_gif_message(msg):
 def has_media(msg):
     return bool(msg and (msg.video or msg.photo or msg.document or msg.audio or msg.voice or msg.animation or msg.media_group_id))
 
-def unshorten_url(url: str) -> str:
+def clean_social_url(url: str) -> str:
+    """Cleans tracking params and unshortens only non-Instagram links."""
+    # Strip tracking queries
+    clean_url = url.split("?")[0].strip()
+    
+    # Do not auto-unshorten Instagram (it redirects to accounts/login)
+    if "instagram.com" in clean_url or "instagr.am" in clean_url:
+        return clean_url
+
     try:
         req = urllib.request.Request(
-            url,
-            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            clean_url,
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         )
-        with urllib.request.urlopen(req, timeout=10) as response:
-            return response.geturl()
+        with urllib.request.urlopen(req, timeout=8) as response:
+            redirected = response.geturl()
+            if "accounts/login" not in redirected:
+                return redirected
     except Exception:
-        return url
+        pass
+    return clean_url
 
 def detect_social_platform(url: str) -> str:
     url_lower = url.lower()
@@ -478,7 +485,7 @@ def detect_social_platform(url: str) -> str:
     return "others"
 
 def extract_and_download_social(url: str, user_id: int):
-    real_url = unshorten_url(url)
+    target_url = clean_social_url(url)
     timestamp = int(time.time())
     out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_%(id)s.%(ext)s")
 
@@ -491,45 +498,62 @@ def extract_and_download_social(url: str, user_id: int):
         'noplaylist': True,
         'max_filesize': 1900 * 1024 * 1024,
         'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'ios', 'web']
-            }
+            'youtube': {'player_client': ['android', 'ios', 'web']},
+            'instagram': {'api_key': ''}
         },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1',
             'Accept-Language': 'en-US,en;q=0.9',
         }
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(real_url, download=True)
-        if not info:
-            return None, None, 0, 0, 0
+    # Primary Download Attempt
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(target_url, download=True)
+            if info:
+                file_path = ydl.prepare_filename(info)
+                if not os.path.exists(file_path):
+                    base, _ = os.path.splitext(file_path)
+                    for ext in [".mp4", ".mkv", ".webm", ".mov"]:
+                        if os.path.exists(base + ext):
+                            file_path = base + ext
+                            break
 
-        file_path = ydl.prepare_filename(info)
-        if not os.path.exists(file_path):
-            base, _ = os.path.splitext(file_path)
-            for ext in [".mp4", ".mkv", ".webm", ".mov"]:
-                if os.path.exists(base + ext):
-                    file_path = base + ext
-                    break
+                if not os.path.exists(file_path):
+                    prefix = f"{user_id}_{timestamp}_"
+                    for f in os.listdir(DOWNLOAD_DIR):
+                        if f.startswith(prefix) and not f.endswith(".part"):
+                            file_path = os.path.join(DOWNLOAD_DIR, f)
+                            break
 
-        if not os.path.exists(file_path):
-            prefix = f"{user_id}_{timestamp}_"
-            for f in os.listdir(DOWNLOAD_DIR):
-                if f.startswith(prefix) and not f.endswith(".part"):
-                    file_path = os.path.join(DOWNLOAD_DIR, f)
-                    break
+                if os.path.exists(file_path):
+                    title = str(info.get('title') or "Video")
+                    duration = int(info.get('duration') or 0)
+                    width = int(info.get('width') or 0)
+                    height = int(info.get('height') or 0)
+                    return file_path, title, duration, width, height
+    except Exception as e:
+        logger.warning(f"Primary yt-dlp attempt failed: {e}")
 
-        if not os.path.exists(file_path):
-            return None, None, 0, 0, 0
+    # Fallback specifically for Instagram (via ddinstagram proxy)
+    if "instagram.com" in target_url or "instagr.am" in target_url:
+        try:
+            fallback_url = target_url.replace("instagram.com", "ddinstagram.com").replace("instagr.am", "ddinstagram.com")
+            logger.info(f"Attempting Instagram fallback: {fallback_url}")
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(fallback_url, download=True)
+                if info:
+                    prefix = f"{user_id}_{timestamp}_"
+                    for f in os.listdir(DOWNLOAD_DIR):
+                        if f.startswith(prefix) and not f.endswith(".part"):
+                            file_path = os.path.join(DOWNLOAD_DIR, f)
+                            title = str(info.get('title') or "Instagram Reel")
+                            return file_path, title, int(info.get('duration') or 0), int(info.get('width') or 0), int(info.get('height') or 0)
+        except Exception as fb_err:
+            logger.error(f"Fallback attempt also failed: {fb_err}")
 
-        title = str(info.get('title') or "Video")
-        duration = int(info.get('duration') or 0)
-        width = int(info.get('width') or 0)
-        height = int(info.get('height') or 0)
-
-        return file_path, title, duration, width, height
+    return None, None, 0, 0, 0
 
 # ----------------- MESSAGE HANDLER ----------------- #
 
@@ -778,7 +802,7 @@ async def private_message_handler(client: Client, message: Message):
             "Send any supported link to download:\n"
             "• **Supported:** Telegram, YouTube, TikTok, Instagram, Facebook\n"
             "• Sent media auto-deletes in 5 minutes.\n"
-            "• Google Drive upload support included."
+            "• Google Drive backup included."
         )
         await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
@@ -791,7 +815,6 @@ async def private_message_handler(client: Client, message: Message):
         target_url = social_match.group(0)
         platform_name = detect_social_platform(target_url)
 
-        # Log URL to Database
         asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, target_url, platform_name))
 
         status = await message.reply_text("Processing video...")
@@ -805,7 +828,6 @@ async def private_message_handler(client: Client, message: Message):
                 await status.edit_text("Failed to download video. Post might be private or link is expired.")
                 return
 
-            # Google Drive Upload with Status Notice
             drive_link = None
             if GDRIVE_KEY_RAW:
                 fname = os.path.basename(file_path)
@@ -846,7 +868,6 @@ async def private_message_handler(client: Client, message: Message):
             if os.path.exists(file_path):
                 os.remove(file_path)
 
-            # Metrics Tracking
             asyncio.create_task(asyncio.to_thread(sync_increment_downloads, platform_name, 1))
             asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, platform_name, 1))
             await status.delete()
@@ -931,7 +952,6 @@ async def private_message_handler(client: Client, message: Message):
                         if file_path:
                             downloaded_files.append(file_path)
 
-                            # Upload items to Google Drive
                             if GDRIVE_KEY_RAW:
                                 asyncio.create_task(asyncio.to_thread(upload_file_to_drive, file_path, os.path.basename(file_path)))
 
@@ -991,7 +1011,6 @@ async def private_message_handler(client: Client, message: Message):
                     await status.edit_text("Failed to download media file.")
                     return
 
-                # Google Drive Upload with Notice
                 drive_link = None
                 if GDRIVE_KEY_RAW:
                     fname = os.path.basename(file_path)
@@ -1037,7 +1056,6 @@ async def private_message_handler(client: Client, message: Message):
                 if os.path.exists(file_path):
                     os.remove(file_path)
 
-                # Metrics Tracking
                 asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, photos_count, videos_count))
                 asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, photos_count, videos_count))
                 await status.delete()
