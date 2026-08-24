@@ -1,4 +1,3 @@
-
 import os
 import re
 import time
@@ -20,6 +19,11 @@ from hydrogram.errors import (
 import firebase_admin
 from firebase_admin import credentials, firestore
 
+# Google Drive Imports
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+
 # Auto Setup FFmpeg
 try:
     import static_ffmpeg
@@ -39,6 +43,8 @@ API_ID = int(os.environ.get("API_ID", "35039821"))
 API_HASH = os.environ.get("API_HASH", "77df805f1700eeefec861de6c93ee2ae").strip()
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8952918726:AAGnKZm-S8hmBaWzltPfrdWRcyVHGVx44d0").strip()
 FIREBASE_KEY_RAW = os.environ.get("FIREBASE_KEY", "").strip()
+GDRIVE_KEY_RAW = os.environ.get("GDRIVE_KEY", "").strip()
+GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "").strip()
 OWNER_ID = 6142774415
 PORT = int(os.environ.get("PORT", "8080"))
 
@@ -70,6 +76,52 @@ bot = Client(
 admin_states = {}
 login_clients = {}
 progress_status = {}
+
+# ----------------- GOOGLE DRIVE HELPERS ----------------- #
+
+def get_drive_service():
+    if not GDRIVE_KEY_RAW:
+        return None
+    try:
+        cred_dict = json.loads(GDRIVE_KEY_RAW)
+        creds = service_account.Credentials.from_service_account_info(
+            cred_dict,
+            scopes=['https://www.googleapis.com/auth/drive']
+        )
+        return build('drive', 'v3', credentials=creds, cache_discovery=False)
+    except Exception as e:
+        logger.error(f"Google Drive Init Error: {e}")
+        return None
+
+def upload_file_to_drive(file_path: str, file_name: str):
+    """Uploads file to Google Drive and creates a direct sharable link."""
+    service = get_drive_service()
+    if not service:
+        return None, "Google Drive service is not configured."
+
+    try:
+        file_metadata = {'name': file_name}
+        if GDRIVE_FOLDER_ID:
+            file_metadata['parents'] = [GDRIVE_FOLDER_ID]
+
+        media = MediaFileUpload(file_path, resumable=True)
+        file = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id, webViewLink, webContentLink'
+        ).execute()
+
+        file_id = file.get('id')
+
+        # Make file public (Anyone with link can view/download)
+        permission = {'type': 'anyone', 'role': 'reader'}
+        service.permissions().create(fileId=file_id, body=permission).execute()
+
+        web_link = file.get('webViewLink')
+        return web_link, "Success"
+    except Exception as e:
+        logger.error(f"G-Drive Upload Error: {e}")
+        return None, str(e)
 
 # ----------------- DATABASE HELPERS ----------------- #
 
@@ -181,13 +233,13 @@ def sync_cleanup_expired_urls():
             doc.reference.delete()
             deleted_count += 1
         if deleted_count > 0:
-            logger.info(f"Cleaned up {deleted_count} expired URLs from database.")
+            logger.info(f"Cleaned up {deleted_count} expired URLs.")
     except Exception as e:
         logger.error(f"Cleanup URLs Error: {e}")
 
 async def url_cleanup_daemon():
     while True:
-        await asyncio.sleep(3600)  # Run cleanup check every 1 hour
+        await asyncio.sleep(3600)  # Check every 1 hour
         await asyncio.to_thread(sync_cleanup_expired_urls)
 
 def sync_increment_downloads(platform: str, count: int = 1, photos: int = 0, videos: int = 0):
@@ -195,7 +247,6 @@ def sync_increment_downloads(platform: str, count: int = 1, photos: int = 0, vid
         return
     try:
         today_str = datetime.now().strftime("%Y-%m-%d")
-
         update_payload = {
             "total_downloads": firestore.Increment(count),
             f"count_{platform.lower()}": firestore.Increment(count)
@@ -260,12 +311,8 @@ def sync_get_stats():
         total_dl = 0
         tg_photos, tg_videos = 0, 0
         platform_counts = {
-            "Telegram": 0,
-            "YouTube": 0,
-            "TikTok": 0,
-            "Instagram": 0,
-            "Facebook": 0,
-            "Others": 0
+            "Telegram": 0, "YouTube": 0, "TikTok": 0,
+            "Instagram": 0, "Facebook": 0, "Others": 0
         }
 
         if stat_doc.exists:
@@ -307,11 +354,13 @@ async def generate_admin_dashboard():
     users, downloads, platforms, today_dl, daily_avg, tg_photos, tg_videos = await asyncio.to_thread(sync_get_stats)
     all_sess = await asyncio.to_thread(sync_get_all_sessions)
     db_status = "Online 🟢" if db else "Offline 🔴"
+    drive_status = "Online 🟢" if GDRIVE_KEY_RAW else "Offline 🔴"
 
     text = (
         "👑 **Admin Management Dashboard**\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"• **Database:** `{db_status}`\n"
+        f"• **Google Drive:** `{drive_status}`\n"
         f"• **Total Users:** `{users:,}`\n"
         f"• **Total Media Downloaded:** `{downloads:,}`\n"
         f"• **Today's Downloads:** `{today_dl:,}`\n"
@@ -722,7 +771,8 @@ async def private_message_handler(client: Client, message: Message):
             f"**Hello {user.first_name},**\n\n"
             "Send any supported link to download:\n"
             "• **Supported:** Telegram, YouTube, TikTok, Instagram, Facebook\n"
-            "• Sent media auto-deletes in 5 minutes."
+            "• Sent media auto-deletes in 5 minutes.\n"
+            "• Google Drive upload link support included."
         )
         await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
@@ -735,7 +785,7 @@ async def private_message_handler(client: Client, message: Message):
         target_url = social_match.group(0)
         platform_name = detect_social_platform(target_url)
 
-        # Log URL to Database for Admin view (Auto-expires in 24h)
+        # Log URL to Database
         asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, target_url, platform_name))
 
         status = await message.reply_text("Processing video...")
@@ -749,12 +799,26 @@ async def private_message_handler(client: Client, message: Message):
                 await status.edit_text("Failed to download video. Post might be private or link is expired.")
                 return
 
+            # Check Google Drive Link Option
+            drive_link = None
+            if GDRIVE_KEY_RAW:
+                fname = os.path.basename(file_path)
+                drive_link, _ = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
+
             progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
+
+            caption_txt = f"**{title[:60]}**" if title else ""
+            reply_markup = None
+            if drive_link:
+                reply_markup = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("☁️ Google Drive Link", url=drive_link)]
+                ])
 
             send_kwargs = {
                 "chat_id": message.chat.id,
                 "video": file_path,
-                "caption": f"**{title[:60]}**" if title else "",
+                "caption": caption_txt,
+                "reply_markup": reply_markup,
                 "supports_streaming": True,
                 "progress": progress_bar,
                 "progress_args": (status, "Uploading Video", user_id)
@@ -790,7 +854,6 @@ async def private_message_handler(client: Client, message: Message):
 
     if private_match or public_match:
         tg_url = text_str.strip()
-        # Log Telegram URL to Database for Admin view (Auto-expires in 24h)
         asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, tg_url, "telegram"))
 
         status = await message.reply_text("Fetching Telegram post...")
@@ -913,6 +976,18 @@ async def private_message_handler(client: Client, message: Message):
                     await status.edit_text("Failed to download media file.")
                     return
 
+                # Optional Google Drive Upload for Large/Single Files
+                drive_link = None
+                if GDRIVE_KEY_RAW:
+                    fname = os.path.basename(file_path)
+                    drive_link, _ = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
+
+                reply_markup = None
+                if drive_link:
+                    reply_markup = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("☁️ Google Drive Link", url=drive_link)]
+                    ])
+
                 progress_status[user_id]["start_time"] = time.time()
                 sent_msg = None
 
@@ -921,26 +996,22 @@ async def private_message_handler(client: Client, message: Message):
 
                 if is_gif:
                     sent_msg = await client.send_animation(
-                        chat_id=message.chat.id, animation=file_path, caption=caption,
+                        chat_id=message.chat.id, animation=file_path, caption=caption, reply_markup=reply_markup,
                         progress=progress_bar, progress_args=(status, f"Uploading {media_type}", user_id)
                     )
                 elif target_msg.video:
                     sent_msg = await client.send_video(
-                        chat_id=message.chat.id,
-                        video=file_path,
-                        caption=caption,
-                        supports_streaming=True,
-                        progress=progress_bar,
-                        progress_args=(status, f"Uploading {media_type}", user_id)
+                        chat_id=message.chat.id, video=file_path, caption=caption, reply_markup=reply_markup,
+                        supports_streaming=True, progress=progress_bar, progress_args=(status, f"Uploading {media_type}", user_id)
                     )
                 elif target_msg.photo:
                     sent_msg = await client.send_photo(
-                        chat_id=message.chat.id, photo=file_path, caption=caption,
+                        chat_id=message.chat.id, photo=file_path, caption=caption, reply_markup=reply_markup,
                         progress=progress_bar, progress_args=(status, f"Uploading {media_type}", user_id)
                     )
                 elif target_msg.document or target_msg.audio or target_msg.voice:
                     sent_msg = await client.send_document(
-                        chat_id=message.chat.id, document=file_path, caption=caption,
+                        chat_id=message.chat.id, document=file_path, caption=caption, reply_markup=reply_markup,
                         progress=progress_bar, progress_args=(status, f"Uploading {media_type}", user_id)
                     )
 
