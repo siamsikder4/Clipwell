@@ -1,3 +1,4 @@
+
 import os
 import re
 import time
@@ -13,9 +14,7 @@ from hydrogram.types import (
     Message, InputMediaVideo, InputMediaPhoto,
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ForceReply
 )
-from hydrogram.enums import ChatMemberStatus
 from hydrogram.errors import (
-    UserNotParticipant, ChatAdminRequired, PeerIdInvalid,
     SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired, PasswordHashInvalid
 )
 import firebase_admin
@@ -118,50 +117,6 @@ def sync_delete_session(doc_id: str):
         logger.error(f"Delete Session Error: {e}")
         return False
 
-# F-Sub Functions
-def sync_get_fsub_channels():
-    if not db:
-        return []
-    try:
-        docs = db.collection("fsub_channels").stream()
-        channels = []
-        for doc in docs:
-            data = doc.to_dict()
-            channels.append({
-                "doc_id": doc.id,
-                "chat_id": data.get("chat_id"),
-                "invite_link": data.get("invite_link"),
-                "channel_name": data.get("channel_name", "Join Channel")
-            })
-        return channels
-    except Exception as e:
-        logger.error(f"Get F-Sub Channels Error: {e}")
-        return []
-
-def sync_add_fsub_channel(chat_id: str, invite_link: str, channel_name: str):
-    if not db:
-        return False, "Database offline"
-    try:
-        db.collection("fsub_channels").add({
-            "chat_id": chat_id.strip(),
-            "invite_link": invite_link.strip(),
-            "channel_name": channel_name.strip(),
-            "created_at": time.time()
-        })
-        return True, "Success"
-    except Exception as e:
-        return False, str(e)
-
-def sync_delete_fsub_channel(doc_id: str):
-    if not db:
-        return False
-    try:
-        db.collection("fsub_channels").document(doc_id).delete()
-        return True
-    except Exception as e:
-        logger.error(f"Delete F-Sub Channel Error: {e}")
-        return False
-
 # User Tracking & Granular Analytics
 def sync_track_user(user_id: int, username: str, name: str) -> bool:
     if not db:
@@ -186,20 +141,74 @@ def sync_track_user(user_id: int, username: str, name: str) -> bool:
         logger.error(f"Tracking Error: {e}")
         return False
 
-def sync_increment_downloads(platform: str, count: int = 1):
+# URL Logging & 1-Day Auto-Cleanup
+def sync_log_url(user_id: int, user_name: str, url: str, platform: str):
+    if not db:
+        return
+    try:
+        db.collection("submitted_urls").add({
+            "user_id": user_id,
+            "user_name": user_name or "Unknown",
+            "url": url,
+            "platform": platform,
+            "timestamp": time.time()
+        })
+    except Exception as e:
+        logger.error(f"URL Log Error: {e}")
+
+def sync_get_active_urls(limit: int = 25):
+    if not db:
+        return []
+    try:
+        one_day_ago = time.time() - 86400
+        docs = db.collection("submitted_urls").where("timestamp", ">=", one_day_ago).order_by("timestamp", direction=firestore.Query.DESCENDING).limit(limit).stream()
+        results = []
+        for doc in docs:
+            results.append(doc.to_dict())
+        return results
+    except Exception as e:
+        logger.error(f"Get URLs Error: {e}")
+        return []
+
+def sync_cleanup_expired_urls():
+    if not db:
+        return
+    try:
+        one_day_ago = time.time() - 86400
+        docs = db.collection("submitted_urls").where("timestamp", "<", one_day_ago).stream()
+        deleted_count = 0
+        for doc in docs:
+            doc.reference.delete()
+            deleted_count += 1
+        if deleted_count > 0:
+            logger.info(f"Cleaned up {deleted_count} expired URLs from database.")
+    except Exception as e:
+        logger.error(f"Cleanup URLs Error: {e}")
+
+async def url_cleanup_daemon():
+    while True:
+        await asyncio.sleep(3600)  # Run cleanup check every 1 hour
+        await asyncio.to_thread(sync_cleanup_expired_urls)
+
+def sync_increment_downloads(platform: str, count: int = 1, photos: int = 0, videos: int = 0):
     if not db or count <= 0:
         return
     try:
         today_str = datetime.now().strftime("%Y-%m-%d")
 
-        # Global totals
-        doc_ref = db.collection("bot_stats").document("global_analytics")
-        doc_ref.set({
+        update_payload = {
             "total_downloads": firestore.Increment(count),
             f"count_{platform.lower()}": firestore.Increment(count)
-        }, merge=True)
+        }
+        if platform.lower() == "telegram":
+            if photos > 0:
+                update_payload["tg_photos"] = firestore.Increment(photos)
+            if videos > 0:
+                update_payload["tg_videos"] = firestore.Increment(videos)
 
-        # Daily analytics logging
+        doc_ref = db.collection("bot_stats").document("global_analytics")
+        doc_ref.set(update_payload, merge=True)
+
         daily_ref = db.collection("bot_stats").document("daily_analytics").collection("days").document(today_str)
         daily_ref.set({
             "date": today_str,
@@ -208,7 +217,7 @@ def sync_increment_downloads(platform: str, count: int = 1):
     except Exception as e:
         logger.error(f"Metric Error: {e}")
 
-def sync_increment_user_downloads(user_id: int, platform: str, count: int = 1):
+def sync_increment_user_downloads(user_id: int, platform: str, count: int = 1, photos: int = 0, videos: int = 0):
     if not db or count <= 0:
         return
     try:
@@ -219,6 +228,10 @@ def sync_increment_user_downloads(user_id: int, platform: str, count: int = 1):
         }
         if platform.lower() == "telegram":
             update_data["telegram_downloads"] = firestore.Increment(count)
+            if photos > 0:
+                update_data["tg_photos"] = firestore.Increment(photos)
+            if videos > 0:
+                update_data["tg_videos"] = firestore.Increment(videos)
         else:
             update_data["social_downloads"] = firestore.Increment(count)
             update_data[f"count_{platform.lower()}"] = firestore.Increment(count)
@@ -239,12 +252,13 @@ def sync_get_user_info(user_id: str):
 
 def sync_get_stats():
     if not db:
-        return 0, 0, {}, 0, 0.0
+        return 0, 0, {}, 0, 0.0, 0, 0
     try:
         users = sum(1 for _ in db.collection("bot_users").stream())
         stat_doc = db.collection("bot_stats").document("global_analytics").get()
 
         total_dl = 0
+        tg_photos, tg_videos = 0, 0
         platform_counts = {
             "Telegram": 0,
             "YouTube": 0,
@@ -257,6 +271,8 @@ def sync_get_stats():
         if stat_doc.exists:
             data = stat_doc.to_dict()
             total_dl = data.get("total_downloads", 0)
+            tg_photos = data.get("tg_photos", 0)
+            tg_videos = data.get("tg_videos", 0)
             platform_counts = {
                 "Telegram": data.get("count_telegram", 0),
                 "YouTube": data.get("count_youtube", 0),
@@ -266,7 +282,6 @@ def sync_get_stats():
                 "Others": data.get("count_others", 0)
             }
 
-        # Daily analytics calculation
         today_str = datetime.now().strftime("%Y-%m-%d")
         daily_docs = list(db.collection("bot_stats").document("daily_analytics").collection("days").stream())
 
@@ -283,15 +298,14 @@ def sync_get_stats():
 
         daily_avg = (sum_daily_dl / max(total_days, 1)) if total_days > 0 else float(total_dl)
 
-        return users, total_dl, platform_counts, today_downloads, daily_avg
+        return users, total_dl, platform_counts, today_downloads, daily_avg, tg_photos, tg_videos
     except Exception as e:
         logger.error(f"Stats Error: {e}")
-        return 0, 0, {}, 0, 0.0
+        return 0, 0, {}, 0, 0.0, 0, 0
 
 async def generate_admin_dashboard():
-    users, downloads, platforms, today_dl, daily_avg = await asyncio.to_thread(sync_get_stats)
+    users, downloads, platforms, today_dl, daily_avg, tg_photos, tg_videos = await asyncio.to_thread(sync_get_stats)
     all_sess = await asyncio.to_thread(sync_get_all_sessions)
-    fsub_list = await asyncio.to_thread(sync_get_fsub_channels)
     db_status = "Online 🟢" if db else "Offline 🔴"
 
     text = (
@@ -302,10 +316,10 @@ async def generate_admin_dashboard():
         f"• **Total Media Downloaded:** `{downloads:,}`\n"
         f"• **Today's Downloads:** `{today_dl:,}`\n"
         f"• **Daily Average:** `{daily_avg:.1f} / day`\n"
-        f"• **Active Sessions:** `{len(all_sess)}`\n"
-        f"• **F-Sub Channels:** `{len(fsub_list)}`\n\n"
+        f"• **Active Sessions:** `{len(all_sess)}`\n\n"
         "📊 **Platform Breakdown:**\n"
         f"• 📂 Telegram: `{platforms.get('Telegram', 0):,}`\n"
+        f"   └ 🖼️ Photos: `{tg_photos:,}` | 🎥 Videos: `{tg_videos:,}`\n"
         f"• 🔴 YouTube: `{platforms.get('YouTube', 0):,}`\n"
         f"• 🎵 TikTok: `{platforms.get('TikTok', 0):,}`\n"
         f"• 📸 Instagram: `{platforms.get('Instagram', 0):,}`\n"
@@ -324,7 +338,7 @@ async def generate_admin_dashboard():
             InlineKeyboardButton("🗑️ Delete Session", callback_data="btn_del_menu")
         ],
         [
-            InlineKeyboardButton("📢 Force Sub Menu", callback_data="btn_fsub_menu"),
+            InlineKeyboardButton("🔗 Recent URLs (24h)", callback_data="btn_view_urls"),
             InlineKeyboardButton("🔄 Refresh Stats", callback_data="btn_refresh_admin")
         ]
     ])
@@ -462,37 +476,6 @@ def extract_and_download_social(url: str, user_id: int):
 
         return file_path, title, duration, width, height
 
-async def check_user_fsub(client: Client, user_id: int):
-    if user_id == OWNER_ID:
-        return []
-
-    fsub_channels = await asyncio.to_thread(sync_get_fsub_channels)
-    if not fsub_channels:
-        return []
-
-    unjoined_channels = []
-    for ch in fsub_channels:
-        try:
-            chat_id = int(ch['chat_id']) if ch['chat_id'].startswith("-100") or ch['chat_id'].isdigit() or ch['chat_id'].startswith("-") else ch['chat_id']
-            member = await client.get_chat_member(chat_id, user_id)
-            if member.status in [ChatMemberStatus.BANNED, ChatMemberStatus.LEFT]:
-                unjoined_channels.append(ch)
-        except UserNotParticipant:
-            unjoined_channels.append(ch)
-        except (ChatAdminRequired, PeerIdInvalid) as e:
-            logger.warning(f"Bot cannot check status for {ch['chat_id']}: {e}. Make sure the bot is an Admin.")
-        except Exception as e:
-            logger.error(f"FSub check error for {ch['chat_id']}: {e}")
-
-    return unjoined_channels
-
-def get_fsub_keyboard(unjoined_channels):
-    buttons = []
-    for ch in unjoined_channels:
-        buttons.append([InlineKeyboardButton(f"📢 {ch['channel_name']}", url=ch['invite_link'])])
-    buttons.append([InlineKeyboardButton("🔄 Joined / Try Again", callback_data="btn_check_fsub")])
-    return InlineKeyboardMarkup(buttons)
-
 # ----------------- MESSAGE HANDLER ----------------- #
 
 @bot.on_message(filters.private)
@@ -551,6 +534,8 @@ async def private_message_handler(client: Client, message: Message):
             return
 
         tg_dl = user_info.get("telegram_downloads", 0)
+        tg_photos = user_info.get("tg_photos", 0)
+        tg_videos = user_info.get("tg_videos", 0)
         social_dl = user_info.get("social_downloads", 0)
         total_dl = user_info.get("total_downloads", 0)
         last_seen = time.strftime('%Y-%m-%d %I:%M %p', time.localtime(user_info.get('last_active', 0)))
@@ -563,7 +548,9 @@ async def private_message_handler(client: Client, message: Message):
             f"• **User ID:** `{user_info.get('user_id')}`\n"
             f"• **Last Active:** `{last_seen}`\n\n"
             f"📊 **Download Breakdown:**\n"
-            f"• 📂 **Telegram Media:** `{tg_dl:,}`\n"
+            f"• 📂 **Telegram Total:** `{tg_dl:,}`\n"
+            f"   └ 🖼️ Photos: `{tg_photos:,}`\n"
+            f"   └ 🎥 Videos: `{tg_videos:,}`\n"
             f"• 🌐 **Social Media:** `{social_dl:,}`\n"
             f"• 🚀 **Total Items:** `{total_dl:,}`\n"
             f"━━━━━━━━━━━━━━━━━━"
@@ -722,33 +709,6 @@ async def private_message_handler(client: Client, message: Message):
             await status_msg.edit_text(f"❌ Verification failed: `{str(e)}`")
         return
 
-    # 5. Admin F-Sub Channel Input
-    if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_FSUB":
-        admin_states.pop(user_id, None)
-        parts = [p.strip() for p in text_str.split("|")]
-        if len(parts) < 3:
-            await message.reply_text(
-                "❌ **Invalid Format!**\n\nPlease send like this:\n`Chat_ID | Invite_Link | Channel Name`\n\nExample:\n`-100123456789 | https://t.me/+AbCdEf | Join Updates`"
-            )
-            return
-
-        c_id, c_link, c_name = parts[0], parts[1], parts[2]
-        success, err = await asyncio.to_thread(sync_add_fsub_channel, c_id, c_link, c_name)
-        if success:
-            await message.reply_text(f"✅ **Force Sub channel added!**\n\n• Name: `{c_name}`\n• Chat ID: `{c_id}`")
-        else:
-            await message.reply_text(f"❌ Failed to add channel: `{err}`")
-        return
-
-    # --- FORCE SUBSCRIBE CHECK (GENERAL USERS) ---
-    unjoined = await check_user_fsub(client, user_id)
-    if unjoined:
-        await message.reply_text(
-            "⚠️ **You must join our channel(s) first to use this bot!**\n\nPlease join the channels below and click **'Joined / Try Again'**.",
-            reply_markup=get_fsub_keyboard(unjoined)
-        )
-        return
-
     # /start
     if text_str.startswith("/start"):
         buttons = [[
@@ -774,6 +734,10 @@ async def private_message_handler(client: Client, message: Message):
     if social_match:
         target_url = social_match.group(0)
         platform_name = detect_social_platform(target_url)
+
+        # Log URL to Database for Admin view (Auto-expires in 24h)
+        asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, target_url, platform_name))
+
         status = await message.reply_text("Processing video...")
 
         try:
@@ -807,14 +771,13 @@ async def private_message_handler(client: Client, message: Message):
             if os.path.exists(file_path):
                 os.remove(file_path)
 
-            # Metrics Tracking (1 item)
+            # Metrics Tracking
             asyncio.create_task(asyncio.to_thread(sync_increment_downloads, platform_name, 1))
             asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, platform_name, 1))
             await status.delete()
 
             if sent_msg:
-                del_ids = [message.id, sent_msg.id]
-                asyncio.create_task(auto_delete_messages(message.chat.id, del_ids, 300))
+                asyncio.create_task(auto_delete_messages(message.chat.id, [sent_msg.id], delay_seconds=300))
 
         except Exception as e:
             logger.error(f"Social download error: {e}", exc_info=True)
@@ -826,6 +789,10 @@ async def private_message_handler(client: Client, message: Message):
     public_match = re.search(r"t\.me/([a-zA-Z0-9_]+)/(\d+)", text_str)
 
     if private_match or public_match:
+        tg_url = text_str.strip()
+        # Log Telegram URL to Database for Admin view (Auto-expires in 24h)
+        asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, tg_url, "telegram"))
+
         status = await message.reply_text("Fetching Telegram post...")
         target_msg = None
         working_client = None
@@ -873,10 +840,11 @@ async def private_message_handler(client: Client, message: Message):
 
             progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
 
-            # Handle Album (Track exact media counts)
+            # Handle Album
             if target_msg.media_group_id:
                 group_messages = await working_client.get_media_group(target_msg.chat.id, target_msg.id)
                 downloaded_files, media_list, gif_files = [], [], []
+                photos_count, videos_count = 0, 0
 
                 for idx, msg in enumerate(group_messages):
                     if has_media(msg):
@@ -891,13 +859,16 @@ async def private_message_handler(client: Client, message: Message):
 
                             if is_gif_message(msg):
                                 gif_files.append((file_path, msg.caption or ""))
+                                videos_count += 1
                                 continue
 
                             cap = msg.caption.strip() if msg.caption else ""
                             if msg.video or (msg.document and msg.document.mime_type and "video" in msg.document.mime_type):
                                 media_list.append(InputMediaVideo(file_path, caption=cap))
+                                videos_count += 1
                             elif msg.photo or (msg.document and msg.document.mime_type and "image" in msg.document.mime_type):
                                 media_list.append(InputMediaPhoto(file_path, caption=cap))
+                                photos_count += 1
 
                 sent_msgs = []
                 if media_list:
@@ -917,11 +888,10 @@ async def private_message_handler(client: Client, message: Message):
                 total_items_in_album = len(downloaded_files)
 
                 if total_items_in_album > 0:
-                    # Granular counting: increments total downloaded files by exact count inside album
-                    asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", total_items_in_album))
-                    asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", total_items_in_album))
+                    asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", total_items_in_album, photos_count, videos_count))
+                    asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", total_items_in_album, photos_count, videos_count))
                     await status.delete()
-                    del_ids = [message.id] + [m.id for m in sent_msgs]
+                    del_ids = [m.id for m in sent_msgs]
                     asyncio.create_task(auto_delete_messages(message.chat.id, del_ids, 300))
                 else:
                     await status.edit_text("No downloadable media in this album.")
@@ -945,6 +915,9 @@ async def private_message_handler(client: Client, message: Message):
 
                 progress_status[user_id]["start_time"] = time.time()
                 sent_msg = None
+
+                photos_count = 1 if target_msg.photo or (target_msg.document and target_msg.document.mime_type and "image" in target_msg.document.mime_type) else 0
+                videos_count = 1 if (target_msg.video or is_gif or (target_msg.document and target_msg.document.mime_type and "video" in target_msg.document.mime_type)) else 0
 
                 if is_gif:
                     sent_msg = await client.send_animation(
@@ -974,14 +947,13 @@ async def private_message_handler(client: Client, message: Message):
                 if os.path.exists(file_path):
                     os.remove(file_path)
 
-                # Metrics Tracking (1 item)
-                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1))
-                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1))
+                # Metrics Tracking
+                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, photos_count, videos_count))
+                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, photos_count, videos_count))
                 await status.delete()
 
                 if sent_msg:
-                    del_ids = [message.id, sent_msg.id]
-                    asyncio.create_task(auto_delete_messages(message.chat.id, del_ids, 300))
+                    asyncio.create_task(auto_delete_messages(message.chat.id, [sent_msg.id], 300))
 
         except Exception as e:
             logger.error(f"Download/Upload error: {e}", exc_info=True)
@@ -1000,18 +972,6 @@ async def private_message_handler(client: Client, message: Message):
 async def callback_handler(client: Client, callback_query: CallbackQuery):
     data = callback_query.data
     user_id = callback_query.from_user.id
-
-    # F-Sub Check
-    if data == "btn_check_fsub":
-        unjoined = await check_user_fsub(client, user_id)
-        if not unjoined:
-            await callback_query.answer("✅ Verified! You can now use the bot.", show_alert=True)
-            await callback_query.message.edit_text(
-                "✅ **Verification Successful!**\n\nYou can now send any video/media link to download."
-            )
-        else:
-            await callback_query.answer("❌ You still haven't joined all required channels!", show_alert=True)
-        return
 
     if data == "btn_ping":
         start_ping = time.time()
@@ -1115,70 +1075,28 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
         )
         await callback_query.answer()
 
-    # --- F-Sub Management ---
-    elif data == "btn_fsub_menu":
-        fsub_list = await asyncio.to_thread(sync_get_fsub_channels)
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ Add F-Sub Channel", callback_data="btn_add_fsub")],
-            [InlineKeyboardButton(f"📋 List Channels ({len(fsub_list)})", callback_data="btn_list_fsub")],
-            [InlineKeyboardButton("🗑️ Remove Channel", callback_data="btn_del_fsub_menu")],
-            [InlineKeyboardButton("🔙 Back to Admin", callback_data="btn_back_admin")]
-        ])
-        await callback_query.message.edit_text(
-            f"**Force Subscribe Settings**\n\nConfigured Channels: `{len(fsub_list)}`",
-            reply_markup=keyboard
-        )
-        await callback_query.answer()
-
-    elif data == "btn_add_fsub":
-        admin_states[user_id] = "WAITING_FSUB"
-        await callback_query.message.reply(
-            "Send channel details in the following format:\n\n"
-            "`Chat_ID | Invite_Link | Button Title`\n\n"
-            "**Example:**\n`-100234567890 | https://t.me/+AbCdEf | Join Main Channel`\n\n"
-            "⚠️ *Make sure the bot is an Admin in that channel.*",
-            reply_markup=ForceReply(selective=True)
-        )
-        await callback_query.answer()
-
-    elif data == "btn_list_fsub":
-        fsub_list = await asyncio.to_thread(sync_get_fsub_channels)
-        if not fsub_list:
-            text = "No Force Subscribe channels configured."
+    # View Submitted URLs (Last 24 Hours)
+    elif data == "btn_view_urls":
+        urls = await asyncio.to_thread(sync_get_active_urls, 25)
+        if not urls:
+            await callback_query.message.edit_text(
+                "📭 No URLs submitted in the last 24 hours.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_back_admin")]])
+            )
         else:
-            text = "**Configured F-Sub Channels:**\n\n"
-            for idx, ch in enumerate(fsub_list, 1):
-                text += f"{idx}. **{ch['channel_name']}**\n• Chat ID: `{ch['chat_id']}`\n• Link: {ch['invite_link']}\n\n"
-
-        await callback_query.message.edit_text(
-            text,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_fsub_menu")]])
-        )
-        await callback_query.answer()
-
-    elif data == "btn_del_fsub_menu":
-        fsub_list = await asyncio.to_thread(sync_get_fsub_channels)
-        if not fsub_list:
-            await callback_query.answer("No channels to remove.", show_alert=True)
-            return
-
-        buttons = [[InlineKeyboardButton(f"🗑️ {ch['channel_name']}", callback_data=f"delfsub_{ch['doc_id']}")] for ch in fsub_list]
-        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="btn_fsub_menu")])
-
-        await callback_query.message.edit_text(
-            "Select a channel to remove from Force Sub:",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-        await callback_query.answer()
-
-    elif data.startswith("delfsub_"):
-        doc_id = data.split("delfsub_")[1]
-        success = await asyncio.to_thread(sync_delete_fsub_channel, doc_id)
-        msg = "✅ Channel removed successfully." if success else "❌ Failed to remove channel."
-        await callback_query.message.edit_text(
-            msg,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_fsub_menu")]])
-        )
+            lines = ["🔗 **Recent Submitted URLs (Last 24h):**\n"]
+            for idx, item in enumerate(urls, 1):
+                t_str = time.strftime('%I:%M %p', time.localtime(item.get("timestamp", 0)))
+                lines.append(
+                    f"{idx}. **User:** {item.get('user_name')} (`{item.get('user_id')}`)\n"
+                    f"   • **Platform:** `{item.get('platform')}` | **Time:** `{t_str}`\n"
+                    f"   • **URL:** {item.get('url')}\n"
+                )
+            await callback_query.message.edit_text(
+                "\n".join(lines),
+                disable_web_page_preview=True,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_back_admin")]])
+            )
         await callback_query.answer()
 
 # Background Web Server
@@ -1193,5 +1111,6 @@ async def start_web_server():
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.create_task(start_web_server())
+    loop.create_task(url_cleanup_daemon())
     logger.info("Starting bot using native runner...")
     bot.run()
