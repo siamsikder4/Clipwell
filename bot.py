@@ -5,6 +5,7 @@ import json
 import asyncio
 import logging
 import urllib.request
+import urllib.parse
 from datetime import datetime
 from aiohttp import web
 import yt_dlp
@@ -44,7 +45,7 @@ API_HASH = os.environ.get("API_HASH", "77df805f1700eeefec861de6c93ee2ae").strip(
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8952918726:AAGnKZm-S8hmBaWzltPfrdWRcyVHGVx44d0").strip()
 FIREBASE_KEY_RAW = os.environ.get("FIREBASE_KEY", "").strip()
 GDRIVE_KEY_RAW = os.environ.get("GDRIVE_KEY", "").strip()
-GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "").strip()
+GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "1aCU7K2Kd-pIdibVY-TSYX2qHaoG65bHR").strip()
 OWNER_ID = 6142774415
 PORT = int(os.environ.get("PORT", "8080"))
 
@@ -77,33 +78,34 @@ admin_states = {}
 login_clients = {}
 progress_status = {}
 
-# ----------------- GOOGLE DRIVE HELPERS (FIXED) ----------------- #
+# ----------------- GOOGLE DRIVE HELPERS ----------------- #
 
 def get_drive_service():
     if not GDRIVE_KEY_RAW:
-        return None
+        return None, "GDRIVE_KEY missing in environment variables"
     try:
         cred_dict = json.loads(GDRIVE_KEY_RAW)
         creds = service_account.Credentials.from_service_account_info(
             cred_dict,
             scopes=['https://www.googleapis.com/auth/drive']
         )
-        return build('drive', 'v3', credentials=creds, cache_discovery=False)
+        service = build('drive', 'v3', credentials=creds, cache_discovery=False)
+        return service, None
     except Exception as e:
         logger.error(f"Google Drive Init Error: {e}")
-        return None
+        return None, str(e)
 
 def upload_file_to_drive(file_path: str, file_name: str):
-    """Uploads file to Google Drive and generates a publicly accessible link."""
-    service = get_drive_service()
+    """Uploads file to Google Drive and creates a direct sharable link."""
+    service, auth_err = get_drive_service()
     if not service:
-        logger.error("Drive upload failed: Service is None")
-        return None, "Google Drive service is not configured."
+        logger.error(f"Drive upload failed: {auth_err}")
+        return None, f"Drive Init Error: {auth_err}"
 
     try:
         file_metadata = {'name': file_name}
         if GDRIVE_FOLDER_ID:
-            file_metadata['parents'] = [GDRIVE_FOLDER_ID.strip()]
+            file_metadata['parents'] = [GDRIVE_FOLDER_ID]
 
         media = MediaFileUpload(file_path, resumable=True)
         file = service.files().create(
@@ -115,7 +117,7 @@ def upload_file_to_drive(file_path: str, file_name: str):
 
         file_id = file.get('id')
 
-        # Make file publicly readable
+        # Make file public
         try:
             permission = {'type': 'anyone', 'role': 'reader'}
             service.permissions().create(
@@ -124,11 +126,11 @@ def upload_file_to_drive(file_path: str, file_name: str):
                 supportsAllDrives=True
             ).execute()
         except Exception as p_err:
-            logger.warning(f"Drive permission notice: {p_err}")
+            logger.warning(f"Permission error (ignored): {p_err}")
 
         web_link = file.get('webViewLink') or f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
         logger.info(f"Drive upload successful! Link: {web_link}")
-        return web_link, "Success"
+        return web_link, None
     except Exception as e:
         logger.error(f"G-Drive Upload Exception: {e}", exc_info=True)
         return None, str(e)
@@ -179,7 +181,6 @@ def sync_delete_session(doc_id: str):
         logger.error(f"Delete Session Error: {e}")
         return False
 
-# User Tracking & Analytics
 def sync_track_user(user_id: int, username: str, name: str) -> bool:
     if not db:
         return False
@@ -203,7 +204,6 @@ def sync_track_user(user_id: int, username: str, name: str) -> bool:
         logger.error(f"Tracking Error: {e}")
         return False
 
-# URL Logging & Cleanup
 def sync_log_url(user_id: int, user_name: str, url: str, platform: str):
     if not db:
         return
@@ -458,17 +458,6 @@ def is_gif_message(msg):
 def has_media(msg):
     return bool(msg and (msg.video or msg.photo or msg.document or msg.audio or msg.voice or msg.animation or msg.media_group_id))
 
-def unshorten_url(url: str) -> str:
-    try:
-        req = urllib.request.Request(
-            url,
-            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        )
-        with urllib.request.urlopen(req, timeout=10) as response:
-            return response.geturl()
-    except Exception:
-        return url
-
 def detect_social_platform(url: str) -> str:
     url_lower = url.lower()
     if "tiktok.com" in url_lower:
@@ -482,58 +471,66 @@ def detect_social_platform(url: str) -> str:
     return "others"
 
 def extract_and_download_social(url: str, user_id: int):
-    real_url = unshorten_url(url)
+    clean_url = url.split("?")[0].strip()
     timestamp = int(time.time())
     out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_%(id)s.%(ext)s")
 
+    # Instagram API Fallback Engine
+    if "instagram.com" in clean_url or "instagr.am" in clean_url:
+        try:
+            api_url = f"https://api.vkrdown.com/api/insta?url={urllib.parse.quote(clean_url)}"
+            req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+                if data.get("status") == "success" and data.get("data"):
+                    media_url = data["data"][0].get("url")
+                    out_path = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_insta.mp4")
+                    urllib.request.urlretrieve(media_url, out_path)
+                    if os.path.exists(out_path):
+                        return out_path, "Instagram Reel", 0, 0, 0
+        except Exception as api_err:
+            logger.warning(f"Instagram Direct API fallback: {api_err}")
+
+    # Standard yt-dlp
     ydl_opts = {
-        'format': 'bestvideo+bestaudio/best',
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'outtmpl': out_template,
         'merge_output_format': 'mp4',
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
         'max_filesize': 1900 * 1024 * 1024,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'ios', 'web']
-            }
-        },
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
         }
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(real_url, download=True)
-        if not info:
-            return None, None, 0, 0, 0
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(clean_url, download=True)
+            if info:
+                file_path = ydl.prepare_filename(info)
+                if not os.path.exists(file_path):
+                    base, _ = os.path.splitext(file_path)
+                    for ext in [".mp4", ".mkv", ".webm", ".mov"]:
+                        if os.path.exists(base + ext):
+                            file_path = base + ext
+                            break
 
-        file_path = ydl.prepare_filename(info)
-        if not os.path.exists(file_path):
-            base, _ = os.path.splitext(file_path)
-            for ext in [".mp4", ".mkv", ".webm", ".mov"]:
-                if os.path.exists(base + ext):
-                    file_path = base + ext
-                    break
+                if not os.path.exists(file_path):
+                    prefix = f"{user_id}_{timestamp}_"
+                    for f in os.listdir(DOWNLOAD_DIR):
+                        if f.startswith(prefix) and not f.endswith(".part"):
+                            file_path = os.path.join(DOWNLOAD_DIR, f)
+                            break
 
-        if not os.path.exists(file_path):
-            prefix = f"{user_id}_{timestamp}_"
-            for f in os.listdir(DOWNLOAD_DIR):
-                if f.startswith(prefix) and not f.endswith(".part"):
-                    file_path = os.path.join(DOWNLOAD_DIR, f)
-                    break
+                if os.path.exists(file_path):
+                    return file_path, str(info.get('title') or "Video"), int(info.get('duration') or 0), int(info.get('width') or 0), int(info.get('height') or 0)
+    except Exception as e:
+        logger.error(f"yt-dlp general failure: {e}")
 
-        if not os.path.exists(file_path):
-            return None, None, 0, 0, 0
-
-        title = str(info.get('title') or "Video")
-        duration = int(info.get('duration') or 0)
-        width = int(info.get('width') or 0)
-        height = int(info.get('height') or 0)
-
-        return file_path, title, duration, width, height
+    return None, None, 0, 0, 0
 
 # ----------------- MESSAGE HANDLER ----------------- #
 
@@ -545,9 +542,8 @@ async def private_message_handler(client: Client, message: Message):
     user_id = user.id
     text_str = (message.text or message.caption or "").strip()
 
-    logger.info(f"Incoming update from {user_id} ({user.first_name}): {text_str}")
+    logger.info(f"Update from {user_id} ({user.first_name}): {text_str}")
 
-    # Track User & Send Admin Alert for New Users
     async def track_and_notify():
         is_new = await asyncio.to_thread(sync_track_user, user_id, user.username, user.first_name)
         if is_new and user_id != OWNER_ID:
@@ -562,8 +558,8 @@ async def private_message_handler(client: Client, message: Message):
             )
             try:
                 await client.send_message(chat_id=OWNER_ID, text=alert_text)
-            except Exception as ex:
-                logger.error(f"Admin alert failed: {ex}")
+            except Exception:
+                pass
 
     asyncio.create_task(track_and_notify())
 
@@ -577,13 +573,13 @@ async def private_message_handler(client: Client, message: Message):
         await message.reply_text(dash_text, reply_markup=dash_markup)
         return
 
-    # Check Specific User Details (/user <ID>)
+    # /user Info
     if text_str.startswith("/user"):
         if user_id != OWNER_ID:
             return
         parts = text_str.split()
         if len(parts) < 2:
-            await message.reply_text("💡 **Usage:** `/user <User_ID>`\n\n**Example:** `/user 1234567890`")
+            await message.reply_text("💡 **Usage:** `/user <User_ID>`")
             return
 
         target_id = parts[1].strip()
@@ -608,8 +604,7 @@ async def private_message_handler(client: Client, message: Message):
             f"• **Last Active:** `{last_seen}`\n\n"
             f"📊 **Download Breakdown:**\n"
             f"• 📂 **Telegram Total:** `{tg_dl:,}`\n"
-            f"   └ 🖼️ Photos: `{tg_photos:,}`\n"
-            f"   └ 🎥 Videos: `{tg_videos:,}`\n"
+            f"   └ 🖼️ Photos: `{tg_photos:,}` | 🎥 Videos: `{tg_videos:,}`\n"
             f"• 🌐 **Social Media:** `{social_dl:,}`\n"
             f"• 🚀 **Total Items:** `{total_dl:,}`\n"
             f"━━━━━━━━━━━━━━━━━━"
@@ -617,9 +612,7 @@ async def private_message_handler(client: Client, message: Message):
         await message.reply_text(response_text)
         return
 
-    # ----------------- ADMIN STATES (ONLY OWNER) ----------------- #
-
-    # 1. Manual Session Input State
+    # Admin Login States
     if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_SESSION":
         admin_states.pop(user_id, None)
         status_msg = await message.reply_text("Validating session string...")
@@ -633,25 +626,19 @@ async def private_message_handler(client: Client, message: Message):
 
             success, err_msg = await asyncio.to_thread(sync_add_session, text_str, acc_name)
             if success:
-                await status_msg.edit_text(f"✅ **Session saved to database!**\n\n• Account: `{acc_name}`")
+                await status_msg.edit_text(f"✅ **Session saved!**\n\n• Account: `{acc_name}`")
             else:
                 await status_msg.edit_text(f"❌ Error: `{err_msg}`")
         except Exception as e:
             await status_msg.edit_text(f"❌ Invalid session: `{str(e)}`")
         return
 
-    # 2. In-Bot Session Generator - Step 1: Phone
     if user_id == OWNER_ID and admin_states.get(user_id) == "LOGIN_PHONE":
         admin_states.pop(user_id, None)
         phone_number = text_str.replace(" ", "").strip()
         status_msg = await message.reply_text("⏳ Sending Telegram login OTP code...")
 
-        temp_client = Client(
-            f"login_{int(time.time())}",
-            api_id=API_ID,
-            api_hash=API_HASH,
-            in_memory=True
-        )
+        temp_client = Client(f"login_{int(time.time())}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
         try:
             await temp_client.connect()
             code_info = await temp_client.send_code(phone_number)
@@ -662,8 +649,7 @@ async def private_message_handler(client: Client, message: Message):
             }
             admin_states[user_id] = "LOGIN_OTP"
             await status_msg.edit_text(
-                "📩 **Send the Telegram login OTP code:**\n\n"
-                "💡 *Tip:* Separate digits with spaces to avoid Telegram message filters (e.g., `1 2 3 4 5`).",
+                "📩 **Send the Telegram OTP code:**\n\n💡 *Tip:* Separate digits with space (e.g. `1 2 3 4 5`).",
                 reply_markup=ForceReply(selective=True)
             )
         except Exception as e:
@@ -672,23 +658,20 @@ async def private_message_handler(client: Client, message: Message):
             await status_msg.edit_text(f"❌ Failed to send OTP: `{str(e)}`")
         return
 
-    # 3. In-Bot Session Generator - Step 2: OTP Code
     if user_id == OWNER_ID and admin_states.get(user_id) == "LOGIN_OTP":
         otp_code = text_str.replace(" ", "").replace("-", "").strip()
         session_data = login_clients.get(user_id)
 
         if not session_data:
             admin_states.pop(user_id, None)
-            await message.reply_text("❌ Session timed out. Please try again.")
+            await message.reply_text("❌ Session timed out.")
             return
 
         temp_client = session_data["client"]
-        phone = session_data["phone"]
-        phone_code_hash = session_data["phone_code_hash"]
         status_msg = await message.reply_text("⏳ Verifying OTP code...")
 
         try:
-            await temp_client.sign_in(phone, phone_code_hash, otp_code)
+            await temp_client.sign_in(session_data["phone"], session_data["phone_code_hash"], otp_code)
             session_string = await temp_client.export_session_string()
             me = await temp_client.get_me()
             acc_name = f"{me.first_name} (@{me.username})" if me.username else me.first_name
@@ -697,25 +680,22 @@ async def private_message_handler(client: Client, message: Message):
             admin_states.pop(user_id, None)
 
             result_text = (
-                f"✅ **Session generated successfully!**\n"
+                f"✅ **Session generated!**\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"• **Account:** `{acc_name}`\n"
                 f"• **User ID:** `{me.id}`\n\n"
                 f"📋 **Pyrogram Session String (Tap to Copy):**\n\n"
                 f"`{session_string}`\n\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
-                f"💡 Copy this string and save it via Admin Panel -> **'➕ Paste Session'**."
+                f"💡 Save this via Admin Panel -> **'➕ Paste Session'**."
             )
             await status_msg.edit_text(result_text)
 
         except SessionPasswordNeeded:
             admin_states[user_id] = "LOGIN_2FA"
-            await status_msg.edit_text(
-                "🔐 **Two-Step Verification (2FA) is enabled on this account.**\n\nPlease send your 2FA password:",
-                reply_markup=ForceReply(selective=True)
-            )
+            await status_msg.edit_text("🔐 **Send your 2FA password:**", reply_markup=ForceReply(selective=True))
         except (PhoneCodeInvalid, PhoneCodeExpired):
-            await status_msg.edit_text("❌ Invalid or expired OTP. Please reply with the correct code:")
+            await status_msg.edit_text("❌ Invalid or expired OTP. Please try again:")
         except Exception as e:
             if temp_client.is_connected:
                 await temp_client.disconnect()
@@ -724,7 +704,6 @@ async def private_message_handler(client: Client, message: Message):
             await status_msg.edit_text(f"❌ Login error: `{str(e)}`")
         return
 
-    # 4. In-Bot Session Generator - Step 3: 2FA Password
     if user_id == OWNER_ID and admin_states.get(user_id) == "LOGIN_2FA":
         password = text_str.strip()
         session_data = login_clients.get(user_id)
@@ -735,7 +714,7 @@ async def private_message_handler(client: Client, message: Message):
             return
 
         temp_client = session_data["client"]
-        status_msg = await message.reply_text("⏳ Verifying 2FA password...")
+        status_msg = await message.reply_text("⏳ Verifying 2FA...")
 
         try:
             await temp_client.check_password(password)
@@ -747,19 +726,14 @@ async def private_message_handler(client: Client, message: Message):
             admin_states.pop(user_id, None)
 
             result_text = (
-                f"✅ **Session generated successfully!**\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
+                f"✅ **Session generated!**\n\n"
                 f"• **Account:** `{acc_name}`\n"
-                f"• **User ID:** `{me.id}`\n\n"
-                f"📋 **Pyrogram Session String (Tap to Copy):**\n\n"
-                f"`{session_string}`\n\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"💡 Copy this string and save it via Admin Panel -> **'➕ Paste Session'**."
+                f"`{session_string}`"
             )
             await status_msg.edit_text(result_text)
 
         except PasswordHashInvalid:
-            await status_msg.edit_text("❌ Incorrect 2FA password. Please try again:")
+            await status_msg.edit_text("❌ Incorrect 2FA password.")
         except Exception as e:
             if temp_client.is_connected:
                 await temp_client.disconnect()
@@ -782,12 +756,12 @@ async def private_message_handler(client: Client, message: Message):
             "Send any supported link to download:\n"
             "• **Supported:** Telegram, YouTube, TikTok, Instagram, Facebook\n"
             "• Sent media auto-deletes in 5 minutes.\n"
-            "• Google Drive upload link support included."
+            "• Google Drive backup included."
         )
         await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
 
-    # Social Media URL
+    # ----------------- SOCIAL MEDIA HANDLER ----------------- #
     social_pattern = r"(https?://(?:[a-zA-Z0-9-_]+\.)*(?:youtube\.com|youtu\.be|instagram\.com|instagr\.am|tiktok\.com|facebook\.com|fb\.watch)/[^\s]+)"
     social_match = re.search(social_pattern, text_str)
 
@@ -797,7 +771,7 @@ async def private_message_handler(client: Client, message: Message):
 
         asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, target_url, platform_name))
 
-        status = await message.reply_text("Processing video...")
+        status = await message.reply_text("⏳ Processing video...")
 
         try:
             file_path, title, duration, width, height = await asyncio.to_thread(
@@ -805,21 +779,21 @@ async def private_message_handler(client: Client, message: Message):
             )
 
             if not file_path or not os.path.exists(file_path):
-                await status.edit_text("Failed to download video. Post might be private or link is expired.")
+                await status.edit_text("❌ Failed to download video. Post might be private or restricted.")
                 return
 
-            # Google Drive Upload
             drive_link = None
             if GDRIVE_KEY_RAW:
                 fname = os.path.basename(file_path)
-                await status.edit_text("Uploading to Google Drive & Telegram...")
-                drive_link, _ = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
+                await status.edit_text("⏳ Uploading to Google Drive...")
+                drive_link, drive_err = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
+                if drive_err:
+                    await message.reply_text(f"⚠️ **Google Drive Upload Notice:**\n`{drive_err}`")
 
             progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
 
             caption_txt = f"**{title[:60]}**" if title else ""
             
-            # Inline Button for Drive Link
             reply_markup = None
             if drive_link:
                 reply_markup = InlineKeyboardMarkup([
@@ -833,7 +807,7 @@ async def private_message_handler(client: Client, message: Message):
                 "reply_markup": reply_markup,
                 "supports_streaming": True,
                 "progress": progress_bar,
-                "progress_args": (status, "Uploading Video", user_id)
+                "progress_args": (status, "Uploading Video to Telegram", user_id)
             }
             if duration > 0:
                 send_kwargs["duration"] = duration
@@ -859,7 +833,7 @@ async def private_message_handler(client: Client, message: Message):
             await status.edit_text(f"Download Error: `{str(e)[:120]}`")
         return
 
-    # Telegram URL
+    # ----------------- TELEGRAM URL HANDLER ----------------- #
     private_match = re.search(r"t\.me/c/(\d+)/(\d+)", text_str)
     public_match = re.search(r"t\.me/([a-zA-Z0-9_]+)/(\d+)", text_str)
 
@@ -974,7 +948,7 @@ async def private_message_handler(client: Client, message: Message):
                 else:
                     await status.edit_text("No downloadable media in this album.")
 
-            # Handle Single File
+            # Handle Single File (Video, Photo, GIF, Doc)
             else:
                 is_gif = is_gif_message(target_msg)
                 caption = target_msg.caption.strip() if target_msg.caption else ""
@@ -991,12 +965,14 @@ async def private_message_handler(client: Client, message: Message):
                     await status.edit_text("Failed to download media file.")
                     return
 
-                # Google Drive Upload
+                # Direct Google Drive Upload (Sync wait to attach button)
                 drive_link = None
                 if GDRIVE_KEY_RAW:
                     fname = os.path.basename(file_path)
-                    await status.edit_text(f"Uploading {media_type} to Drive & Telegram...")
-                    drive_link, _ = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
+                    await status.edit_text(f"⏳ Uploading {media_type} to Google Drive...")
+                    drive_link, drive_err = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
+                    if drive_err:
+                        await message.reply_text(f"⚠️ **Google Drive Notice:** `{drive_err}`")
 
                 reply_markup = None
                 if drive_link:
@@ -1013,22 +989,22 @@ async def private_message_handler(client: Client, message: Message):
                 if is_gif:
                     sent_msg = await client.send_animation(
                         chat_id=message.chat.id, animation=file_path, caption=caption, reply_markup=reply_markup,
-                        progress=progress_bar, progress_args=(status, f"Uploading {media_type}", user_id)
+                        progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
                     )
                 elif target_msg.video:
                     sent_msg = await client.send_video(
                         chat_id=message.chat.id, video=file_path, caption=caption, reply_markup=reply_markup,
-                        supports_streaming=True, progress=progress_bar, progress_args=(status, f"Uploading {media_type}", user_id)
+                        supports_streaming=True, progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
                     )
                 elif target_msg.photo:
                     sent_msg = await client.send_photo(
                         chat_id=message.chat.id, photo=file_path, caption=caption, reply_markup=reply_markup,
-                        progress=progress_bar, progress_args=(status, f"Uploading {media_type}", user_id)
+                        progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
                     )
                 elif target_msg.document or target_msg.audio or target_msg.voice:
                     sent_msg = await client.send_document(
                         chat_id=message.chat.id, document=file_path, caption=caption, reply_markup=reply_markup,
-                        progress=progress_bar, progress_args=(status, f"Uploading {media_type}", user_id)
+                        progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
                     )
 
                 if os.path.exists(file_path):
@@ -1161,7 +1137,7 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
         )
         await callback_query.answer()
 
-    # View Submitted URLs
+    # View Submitted URLs (Last 24 Hours)
     elif data == "btn_view_urls":
         urls = await asyncio.to_thread(sync_get_active_urls, 25)
         if not urls:
