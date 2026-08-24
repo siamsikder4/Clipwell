@@ -92,10 +92,10 @@ def get_drive_service():
     try:
         creds = Credentials(
             token=None,
-            refresh_token=GDRIVE_REFRESH_TOKEN,
+            refresh_token=GDRIVE_REFRESH_TOKEN.strip(),
             token_uri="https://oauth2.googleapis.com/token",
-            client_id=GDRIVE_CLIENT_ID,
-            client_secret=GDRIVE_CLIENT_SECRET,
+            client_id=GDRIVE_CLIENT_ID.strip(),
+            client_secret=GDRIVE_CLIENT_SECRET.strip(),
             scopes=['https://www.googleapis.com/auth/drive']
         )
         creds.refresh(Request())
@@ -116,7 +116,7 @@ def upload_file_to_drive(file_path: str, file_name: str):
 
     try:
         file_metadata = {'name': file_name}
-        if GDRIVE_FOLDER_ID:
+        if GDRIVE_FOLDER_ID and GDRIVE_FOLDER_ID.strip():
             file_metadata['parents'] = [GDRIVE_FOLDER_ID.strip()]
 
         media = MediaFileUpload(file_path, resumable=True)
@@ -914,73 +914,134 @@ async def private_message_handler(client: Client, message: Message):
 
             progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
 
-            # Handle Single File / Photo / Video
-            is_gif = is_gif_message(target_msg)
-            caption = target_msg.caption.strip() if target_msg.caption else ""
-            media_type = "GIF" if is_gif else ("Video" if target_msg.video else ("Photo" if target_msg.photo else "Document"))
+            # Handle Album
+            if target_msg.media_group_id:
+                group_messages = await working_client.get_media_group(target_msg.chat.id, target_msg.id)
+                downloaded_files, media_list, gif_files = [], [], []
+                photos_count, videos_count = 0, 0
 
-            progress_status[user_id]["start_time"] = time.time()
-            file_path = await working_client.download_media(
-                target_msg,
-                progress=progress_bar,
-                progress_args=(status, f"Downloading {media_type}", user_id)
-            )
+                for idx, msg in enumerate(group_messages):
+                    if has_media(msg):
+                        progress_status[user_id]["start_time"] = time.time()
+                        file_path = await working_client.download_media(
+                            msg,
+                            progress=progress_bar,
+                            progress_args=(status, f"Downloading ({idx+1}/{len(group_messages)})", user_id)
+                        )
+                        if file_path:
+                            downloaded_files.append(file_path)
 
-            if not file_path or not os.path.exists(file_path):
-                await status.edit_text("Failed to download media file.")
-                return
+                            # Upload Album Item to Google Drive
+                            if GDRIVE_REFRESH_TOKEN:
+                                asyncio.create_task(asyncio.to_thread(upload_file_to_drive, file_path, os.path.basename(file_path)))
 
-            # Direct Google Drive Upload (OAuth 2.0)
-            drive_link = None
-            if GDRIVE_REFRESH_TOKEN:
-                fname = os.path.basename(file_path)
-                await status.edit_text(f"⏳ Uploading {media_type} to Google Drive...")
-                drive_link, drive_err = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
-                if not drive_link:
-                    logger.warning(f"Drive upload failed: {drive_err}")
+                            if is_gif_message(msg):
+                                gif_files.append((file_path, msg.caption or ""))
+                                videos_count += 1
+                                continue
 
-            reply_markup = None
-            if drive_link:
-                reply_markup = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("☁️ Google Drive Link", url=drive_link)]
-                ])
+                            cap = msg.caption.strip() if msg.caption else ""
+                            if msg.video or (msg.document and msg.document.mime_type and "video" in msg.document.mime_type):
+                                media_list.append(InputMediaVideo(file_path, caption=cap))
+                                videos_count += 1
+                            elif msg.photo or (msg.document and msg.document.mime_type and "image" in msg.document.mime_type):
+                                media_list.append(InputMediaPhoto(file_path, caption=cap))
+                                photos_count += 1
 
-            progress_status[user_id]["start_time"] = time.time()
-            sent_msg = None
+                sent_msgs = []
+                if media_list:
+                    await status.edit_text("Uploading album...")
+                    sent_msgs = await client.send_media_group(chat_id=message.chat.id, media=media_list)
 
-            photos_count = 1 if target_msg.photo or (target_msg.document and target_msg.document.mime_type and "image" in target_msg.document.mime_type) else 0
-            videos_count = 1 if (target_msg.video or is_gif or (target_msg.document and target_msg.document.mime_type and "video" in target_msg.document.mime_type)) else 0
+                if gif_files:
+                    await status.edit_text("Uploading GIF(s)...")
+                    for gpath, gcap in gif_files:
+                        gmsg = await client.send_animation(chat_id=message.chat.id, animation=gpath, caption=gcap)
+                        sent_msgs.append(gmsg)
 
-            if is_gif:
-                sent_msg = await client.send_animation(
-                    chat_id=message.chat.id, animation=file_path, caption=caption, reply_markup=reply_markup,
-                    progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
+                for path in downloaded_files:
+                    if os.path.exists(path):
+                        os.remove(path)
+
+                total_items_in_album = len(downloaded_files)
+
+                if total_items_in_album > 0:
+                    asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", total_items_in_album, photos_count, videos_count))
+                    asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", total_items_in_album, photos_count, videos_count))
+                    await status.delete()
+                    del_ids = [m.id for m in sent_msgs]
+                    asyncio.create_task(auto_delete_messages(message.chat.id, del_ids, 300))
+                else:
+                    await status.edit_text("No downloadable media in this album.")
+
+            # Handle Single File (Video, Photo, GIF, Doc)
+            else:
+                is_gif = is_gif_message(target_msg)
+                caption = target_msg.caption.strip() if target_msg.caption else ""
+                media_type = "GIF" if is_gif else ("Video" if target_msg.video else ("Photo" if target_msg.photo else "Document"))
+
+                progress_status[user_id]["start_time"] = time.time()
+                file_path = await working_client.download_media(
+                    target_msg,
+                    progress=progress_bar,
+                    progress_args=(status, f"Downloading {media_type}", user_id)
                 )
-            elif target_msg.video:
-                sent_msg = await client.send_video(
-                    chat_id=message.chat.id, video=file_path, caption=caption, reply_markup=reply_markup,
-                    supports_streaming=True, progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
-                )
-            elif target_msg.photo:
-                sent_msg = await client.send_photo(
-                    chat_id=message.chat.id, photo=file_path, caption=caption, reply_markup=reply_markup,
-                    progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
-                )
-            elif target_msg.document or target_msg.audio or target_msg.voice:
-                sent_msg = await client.send_document(
-                    chat_id=message.chat.id, document=file_path, caption=caption, reply_markup=reply_markup,
-                    progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
-                )
 
-            if os.path.exists(file_path):
-                os.remove(file_path)
+                if not file_path or not os.path.exists(file_path):
+                    await status.edit_text("Failed to download media file.")
+                    return
 
-            asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, photos_count, videos_count))
-            asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, photos_count, videos_count))
-            await status.delete()
+                # Direct Google Drive Upload (OAuth 2.0)
+                drive_link = None
+                if GDRIVE_REFRESH_TOKEN:
+                    fname = os.path.basename(file_path)
+                    await status.edit_text(f"⏳ Uploading {media_type} to Google Drive...")
+                    drive_link, drive_err = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
+                    if not drive_link:
+                        logger.warning(f"Drive upload failed: {drive_err}")
 
-            if sent_msg:
-                asyncio.create_task(auto_delete_messages(message.chat.id, [sent_msg.id], 300))
+                reply_markup = None
+                if drive_link:
+                    reply_markup = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("☁️ Google Drive Link", url=drive_link)]
+                    ])
+
+                progress_status[user_id]["start_time"] = time.time()
+                sent_msg = None
+
+                photos_count = 1 if target_msg.photo or (target_msg.document and target_msg.document.mime_type and "image" in target_msg.document.mime_type) else 0
+                videos_count = 1 if (target_msg.video or is_gif or (target_msg.document and target_msg.document.mime_type and "video" in target_msg.document.mime_type)) else 0
+
+                if is_gif:
+                    sent_msg = await client.send_animation(
+                        chat_id=message.chat.id, animation=file_path, caption=caption, reply_markup=reply_markup,
+                        progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
+                    )
+                elif target_msg.video:
+                    sent_msg = await client.send_video(
+                        chat_id=message.chat.id, video=file_path, caption=caption, reply_markup=reply_markup,
+                        supports_streaming=True, progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
+                    )
+                elif target_msg.photo:
+                    sent_msg = await client.send_photo(
+                        chat_id=message.chat.id, photo=file_path, caption=caption, reply_markup=reply_markup,
+                        progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
+                    )
+                elif target_msg.document or target_msg.audio or target_msg.voice:
+                    sent_msg = await client.send_document(
+                        chat_id=message.chat.id, document=file_path, caption=caption, reply_markup=reply_markup,
+                        progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
+                    )
+
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+
+                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, photos_count, videos_count))
+                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, photos_count, videos_count))
+                await status.delete()
+
+                if sent_msg:
+                    asyncio.create_task(auto_delete_messages(message.chat.id, [sent_msg.id], 300))
 
         except Exception as e:
             logger.error(f"Download/Upload error: {e}", exc_info=True)
