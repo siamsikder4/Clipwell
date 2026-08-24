@@ -46,7 +46,7 @@ API_HASH = os.environ.get("API_HASH", "77df805f1700eeefec861de6c93ee2ae").strip(
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8952918726:AAGnKZm-S8hmBaWzltPfrdWRcyVHGVx44d0").strip()
 FIREBASE_KEY_RAW = os.environ.get("FIREBASE_KEY", "").strip()
 
-# Google Drive OAuth Configs (Google One Personal Plan)
+# Google Drive OAuth Configs
 GDRIVE_CLIENT_ID = os.environ.get("GDRIVE_CLIENT_ID", "203426313347-c4lv00u3rgr9e35upvani6mjhqf8jsap.apps.googleusercontent.com").strip()
 GDRIVE_CLIENT_SECRET = os.environ.get("GDRIVE_CLIENT_SECRET", "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").strip()
 GDRIVE_REFRESH_TOKEN = os.environ.get("GDRIVE_REFRESH_TOKEN", "1//04oj5g9drum_wCYIARAAGAQSNwF-L9Irb2WkEfSNazDQDF1SPldbINrtvurWmt3uEuGDrd1qUcIeSrEQm8BZ7LsjFakY6Z6xR9o").strip()
@@ -98,15 +98,17 @@ def get_drive_service():
             client_secret=GDRIVE_CLIENT_SECRET,
             scopes=['https://www.googleapis.com/auth/drive']
         )
-        if not creds.valid:
-            creds.refresh(Request())
+        creds.refresh(Request())
         service = build('drive', 'v3', credentials=creds, cache_discovery=False)
         return service, None
     except Exception as e:
-        logger.error(f"Google Drive OAuth Auth Error: {e}")
+        logger.error(f"Google Drive Auth Error: {e}")
         return None, str(e)
 
 def upload_file_to_drive(file_path: str, file_name: str):
+    if not os.path.exists(file_path):
+        return None, "File does not exist on disk"
+
     service, auth_err = get_drive_service()
     if not service:
         logger.error(f"Drive Service Auth Failed: {auth_err}")
@@ -117,7 +119,7 @@ def upload_file_to_drive(file_path: str, file_name: str):
         if GDRIVE_FOLDER_ID:
             file_metadata['parents'] = [GDRIVE_FOLDER_ID.strip()]
 
-        media = MediaFileUpload(file_path, resumable=False)
+        media = MediaFileUpload(file_path, resumable=True)
         file = service.files().create(
             body=file_metadata,
             media_body=media,
@@ -486,7 +488,6 @@ def extract_and_download_social(url: str, user_id: int):
     timestamp = int(time.time())
     out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_%(id)s.%(ext)s")
 
-    # Instagram API Fallback Engine
     if "instagram.com" in clean_url or "instagr.am" in clean_url:
         try:
             api_url = f"https://api.vkrdown.com/api/insta?url={urllib.parse.quote(clean_url)}"
@@ -502,7 +503,6 @@ def extract_and_download_social(url: str, user_id: int):
         except Exception as api_err:
             logger.warning(f"Instagram Direct API fallback: {api_err}")
 
-    # Standard yt-dlp
     ydl_opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'outtmpl': out_template,
@@ -539,7 +539,7 @@ def extract_and_download_social(url: str, user_id: int):
                 if os.path.exists(file_path):
                     return file_path, str(info.get('title') or "Video"), int(info.get('duration') or 0), int(info.get('width') or 0), int(info.get('height') or 0)
     except Exception as e:
-        logger.error(f"yt-dlp general failure: {e}")
+        logger.error(f"yt-dlp failure: {e}")
 
     return None, None, 0, 0, 0
 
@@ -589,18 +589,18 @@ async def private_message_handler(client: Client, message: Message):
         if user_id != OWNER_ID:
             return
         status = await message.reply_text("🔍 Testing Google Drive connection...")
-        test_file = "test.txt"
+        test_file = "test_drive.txt"
         with open(test_file, "w") as f:
-            f.write("Google drive connection test")
+            f.write("Google drive connection test file.")
             
-        link, err = await asyncio.to_thread(upload_file_to_drive, test_file, "test.txt")
+        link, err = await asyncio.to_thread(upload_file_to_drive, test_file, "test_drive.txt")
         if os.path.exists(test_file):
             os.remove(test_file)
             
         if link:
-            await status.edit_text(f"✅ **Google Drive Working (Google One)!**\n\n**Link:** {link}")
+            await status.edit_text(f"✅ **Google Drive Working!**\n\n🔗 **Link:** {link}")
         else:
-            await status.edit_text(f"❌ **Google Drive Failed!**\n\n**Exact Error:**\n`{err}`")
+            await status.edit_text(f"❌ **Google Drive Failed!**\n\n**Error:**\n`{err}`")
         return
 
     # /user Info
@@ -786,7 +786,7 @@ async def private_message_handler(client: Client, message: Message):
             "Send any supported link to download:\n"
             "• **Supported:** Telegram, YouTube, TikTok, Instagram, Facebook\n"
             "• Sent media auto-deletes in 5 minutes.\n"
-            "• Google Drive (Google One) backup included."
+            "• Google Drive backup included."
         )
         await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
@@ -800,7 +800,6 @@ async def private_message_handler(client: Client, message: Message):
         platform_name = detect_social_platform(target_url)
 
         asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, target_url, platform_name))
-
         status = await message.reply_text("⏳ Processing video...")
 
         try:
@@ -819,7 +818,6 @@ async def private_message_handler(client: Client, message: Message):
                 drive_link, drive_err = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
 
             progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
-
             caption_txt = f"**{title[:60]}**" if title else ""
             
             reply_markup = None
@@ -916,132 +914,73 @@ async def private_message_handler(client: Client, message: Message):
 
             progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
 
-            # Handle Album
-            if target_msg.media_group_id:
-                group_messages = await working_client.get_media_group(target_msg.chat.id, target_msg.id)
-                downloaded_files, media_list, gif_files = [], [], []
-                photos_count, videos_count = 0, 0
+            # Handle Single File / Photo / Video
+            is_gif = is_gif_message(target_msg)
+            caption = target_msg.caption.strip() if target_msg.caption else ""
+            media_type = "GIF" if is_gif else ("Video" if target_msg.video else ("Photo" if target_msg.photo else "Document"))
 
-                for idx, msg in enumerate(group_messages):
-                    if has_media(msg):
-                        progress_status[user_id]["start_time"] = time.time()
-                        file_path = await working_client.download_media(
-                            msg,
-                            progress=progress_bar,
-                            progress_args=(status, f"Downloading ({idx+1}/{len(group_messages)})", user_id)
-                        )
-                        if file_path:
-                            downloaded_files.append(file_path)
+            progress_status[user_id]["start_time"] = time.time()
+            file_path = await working_client.download_media(
+                target_msg,
+                progress=progress_bar,
+                progress_args=(status, f"Downloading {media_type}", user_id)
+            )
 
-                            # Upload Album Item to Google Drive
-                            if GDRIVE_REFRESH_TOKEN:
-                                asyncio.create_task(asyncio.to_thread(upload_file_to_drive, file_path, os.path.basename(file_path)))
+            if not file_path or not os.path.exists(file_path):
+                await status.edit_text("Failed to download media file.")
+                return
 
-                            if is_gif_message(msg):
-                                gif_files.append((file_path, msg.caption or ""))
-                                videos_count += 1
-                                continue
+            # Direct Google Drive Upload (OAuth 2.0)
+            drive_link = None
+            if GDRIVE_REFRESH_TOKEN:
+                fname = os.path.basename(file_path)
+                await status.edit_text(f"⏳ Uploading {media_type} to Google Drive...")
+                drive_link, drive_err = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
+                if not drive_link:
+                    logger.warning(f"Drive upload failed: {drive_err}")
 
-                            cap = msg.caption.strip() if msg.caption else ""
-                            if msg.video or (msg.document and msg.document.mime_type and "video" in msg.document.mime_type):
-                                media_list.append(InputMediaVideo(file_path, caption=cap))
-                                videos_count += 1
-                            elif msg.photo or (msg.document and msg.document.mime_type and "image" in msg.document.mime_type):
-                                media_list.append(InputMediaPhoto(file_path, caption=cap))
-                                photos_count += 1
+            reply_markup = None
+            if drive_link:
+                reply_markup = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("☁️ Google Drive Link", url=drive_link)]
+                ])
 
-                sent_msgs = []
-                if media_list:
-                    await status.edit_text("Uploading album...")
-                    sent_msgs = await client.send_media_group(chat_id=message.chat.id, media=media_list)
+            progress_status[user_id]["start_time"] = time.time()
+            sent_msg = None
 
-                if gif_files:
-                    await status.edit_text("Uploading GIF(s)...")
-                    for gpath, gcap in gif_files:
-                        gmsg = await client.send_animation(chat_id=message.chat.id, animation=gpath, caption=gcap)
-                        sent_msgs.append(gmsg)
+            photos_count = 1 if target_msg.photo or (target_msg.document and target_msg.document.mime_type and "image" in target_msg.document.mime_type) else 0
+            videos_count = 1 if (target_msg.video or is_gif or (target_msg.document and target_msg.document.mime_type and "video" in target_msg.document.mime_type)) else 0
 
-                for path in downloaded_files:
-                    if os.path.exists(path):
-                        os.remove(path)
-
-                total_items_in_album = len(downloaded_files)
-
-                if total_items_in_album > 0:
-                    asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", total_items_in_album, photos_count, videos_count))
-                    asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", total_items_in_album, photos_count, videos_count))
-                    await status.delete()
-                    del_ids = [m.id for m in sent_msgs]
-                    asyncio.create_task(auto_delete_messages(message.chat.id, del_ids, 300))
-                else:
-                    await status.edit_text("No downloadable media in this album.")
-
-            # Handle Single File (Video, Photo, GIF, Doc)
-            else:
-                is_gif = is_gif_message(target_msg)
-                caption = target_msg.caption.strip() if target_msg.caption else ""
-                media_type = "GIF" if is_gif else ("Video" if target_msg.video else ("Photo" if target_msg.photo else "Document"))
-
-                progress_status[user_id]["start_time"] = time.time()
-                file_path = await working_client.download_media(
-                    target_msg,
-                    progress=progress_bar,
-                    progress_args=(status, f"Downloading {media_type}", user_id)
+            if is_gif:
+                sent_msg = await client.send_animation(
+                    chat_id=message.chat.id, animation=file_path, caption=caption, reply_markup=reply_markup,
+                    progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
+                )
+            elif target_msg.video:
+                sent_msg = await client.send_video(
+                    chat_id=message.chat.id, video=file_path, caption=caption, reply_markup=reply_markup,
+                    supports_streaming=True, progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
+                )
+            elif target_msg.photo:
+                sent_msg = await client.send_photo(
+                    chat_id=message.chat.id, photo=file_path, caption=caption, reply_markup=reply_markup,
+                    progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
+                )
+            elif target_msg.document or target_msg.audio or target_msg.voice:
+                sent_msg = await client.send_document(
+                    chat_id=message.chat.id, document=file_path, caption=caption, reply_markup=reply_markup,
+                    progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
                 )
 
-                if not file_path or not os.path.exists(file_path):
-                    await status.edit_text("Failed to download media file.")
-                    return
+            if os.path.exists(file_path):
+                os.remove(file_path)
 
-                # Direct Google Drive Upload (OAuth 2.0)
-                drive_link = None
-                if GDRIVE_REFRESH_TOKEN:
-                    fname = os.path.basename(file_path)
-                    await status.edit_text(f"⏳ Uploading {media_type} to Google Drive...")
-                    drive_link, drive_err = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
+            asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, photos_count, videos_count))
+            asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, photos_count, videos_count))
+            await status.delete()
 
-                reply_markup = None
-                if drive_link:
-                    reply_markup = InlineKeyboardMarkup([
-                        [InlineKeyboardButton("☁️ Google Drive Link", url=drive_link)]
-                    ])
-
-                progress_status[user_id]["start_time"] = time.time()
-                sent_msg = None
-
-                photos_count = 1 if target_msg.photo or (target_msg.document and target_msg.document.mime_type and "image" in target_msg.document.mime_type) else 0
-                videos_count = 1 if (target_msg.video or is_gif or (target_msg.document and target_msg.document.mime_type and "video" in target_msg.document.mime_type)) else 0
-
-                if is_gif:
-                    sent_msg = await client.send_animation(
-                        chat_id=message.chat.id, animation=file_path, caption=caption, reply_markup=reply_markup,
-                        progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
-                    )
-                elif target_msg.video:
-                    sent_msg = await client.send_video(
-                        chat_id=message.chat.id, video=file_path, caption=caption, reply_markup=reply_markup,
-                        supports_streaming=True, progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
-                    )
-                elif target_msg.photo:
-                    sent_msg = await client.send_photo(
-                        chat_id=message.chat.id, photo=file_path, caption=caption, reply_markup=reply_markup,
-                        progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
-                    )
-                elif target_msg.document or target_msg.audio or target_msg.voice:
-                    sent_msg = await client.send_document(
-                        chat_id=message.chat.id, document=file_path, caption=caption, reply_markup=reply_markup,
-                        progress=progress_bar, progress_args=(status, f"Uploading {media_type} to Telegram", user_id)
-                    )
-
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-
-                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, photos_count, videos_count))
-                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, photos_count, videos_count))
-                await status.delete()
-
-                if sent_msg:
-                    asyncio.create_task(auto_delete_messages(message.chat.id, [sent_msg.id], 300))
+            if sent_msg:
+                asyncio.create_task(auto_delete_messages(message.chat.id, [sent_msg.id], 300))
 
         except Exception as e:
             logger.error(f"Download/Upload error: {e}", exc_info=True)
@@ -1096,18 +1035,15 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
         await callback_query.answer()
         return
 
-    # Admin Verification
     if user_id != OWNER_ID:
         await callback_query.answer("Unauthorized.", show_alert=True)
         return
 
-    # Refresh / Open Admin Dashboard
     if data in ["btn_admin_shortcut", "btn_back_admin", "btn_refresh_admin"]:
         dash_text, dash_markup = await generate_admin_dashboard()
         await callback_query.message.edit_text(dash_text, reply_markup=dash_markup)
         await callback_query.answer("Dashboard Refreshed")
 
-    # In-Bot Session Generator
     elif data == "btn_login_account":
         admin_states[user_id] = "LOGIN_PHONE"
         await callback_query.message.reply(
@@ -1116,7 +1052,6 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
         )
         await callback_query.answer()
 
-    # Manual Session Paste
     elif data == "btn_add_session":
         admin_states[user_id] = "WAITING_SESSION"
         await callback_query.message.reply(
@@ -1163,7 +1098,6 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
         )
         await callback_query.answer()
 
-    # View Submitted URLs (Last 24 Hours)
     elif data == "btn_view_urls":
         urls = await asyncio.to_thread(sync_get_active_urls, 25)
         if not urls:
