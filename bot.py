@@ -20,8 +20,9 @@ from hydrogram.errors import (
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# Google Drive Imports
-from google.oauth2 import service_account
+# Google Drive OAuth Imports
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
@@ -44,8 +45,13 @@ API_ID = int(os.environ.get("API_ID", "35039821"))
 API_HASH = os.environ.get("API_HASH", "77df805f1700eeefec861de6c93ee2ae").strip()
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8952918726:AAGnKZm-S8hmBaWzltPfrdWRcyVHGVx44d0").strip()
 FIREBASE_KEY_RAW = os.environ.get("FIREBASE_KEY", "").strip()
-GDRIVE_KEY_RAW = os.environ.get("GDRIVE_KEY", "").strip()
+
+# Google Drive OAuth Configs (Google One / OAuth 2.0)
+GDRIVE_CLIENT_ID = os.environ.get("GDRIVE_CLIENT_ID", "").strip()
+GDRIVE_CLIENT_SECRET = os.environ.get("GDRIVE_CLIENT_SECRET", "").strip()
+GDRIVE_REFRESH_TOKEN = os.environ.get("GDRIVE_REFRESH_TOKEN", "").strip()
 GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "1aCU7K2Kd-pIdibVY-TSYX2qHaoG65bHR").strip()
+
 OWNER_ID = 6142774415
 PORT = int(os.environ.get("PORT", "8080"))
 
@@ -78,21 +84,26 @@ admin_states = {}
 login_clients = {}
 progress_status = {}
 
-# ----------------- GOOGLE DRIVE HELPERS ----------------- #
+# ----------------- GOOGLE DRIVE OAUTH 2.0 ENGINE ----------------- #
 
 def get_drive_service():
-    if not GDRIVE_KEY_RAW:
-        return None, "GDRIVE_KEY missing"
+    if not (GDRIVE_CLIENT_ID and GDRIVE_CLIENT_SECRET and GDRIVE_REFRESH_TOKEN):
+        return None, "OAuth 2.0 Credentials missing (CLIENT_ID / SECRET / REFRESH_TOKEN)"
     try:
-        cred_dict = json.loads(GDRIVE_KEY_RAW)
-        creds = service_account.Credentials.from_service_account_info(
-            cred_dict,
+        creds = Credentials(
+            token=None,
+            refresh_token=GDRIVE_REFRESH_TOKEN,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=GDRIVE_CLIENT_ID,
+            client_secret=GDRIVE_CLIENT_SECRET,
             scopes=['https://www.googleapis.com/auth/drive']
         )
+        if not creds.valid:
+            creds.refresh(Request())
         service = build('drive', 'v3', credentials=creds, cache_discovery=False)
         return service, None
     except Exception as e:
-        logger.error(f"Google Drive Init Error: {e}")
+        logger.error(f"Google Drive OAuth Auth Error: {e}")
         return None, str(e)
 
 def upload_file_to_drive(file_path: str, file_name: str):
@@ -102,11 +113,9 @@ def upload_file_to_drive(file_path: str, file_name: str):
         return None, f"Drive Init Error: {auth_err}"
 
     try:
-        target_folder = GDRIVE_FOLDER_ID or "1aCU7K2Kd-pIdibVY-TSYX2qHaoG65bHR"
-        file_metadata = {
-            'name': file_name,
-            'parents': [target_folder.strip()]
-        }
+        file_metadata = {'name': file_name}
+        if GDRIVE_FOLDER_ID:
+            file_metadata['parents'] = [GDRIVE_FOLDER_ID.strip()]
 
         media = MediaFileUpload(file_path, resumable=False)
         file = service.files().create(
@@ -118,7 +127,7 @@ def upload_file_to_drive(file_path: str, file_name: str):
 
         file_id = file.get('id')
         if not file_id:
-            return None, "Drive did not return file ID"
+            return None, "Drive did not return a valid File ID."
 
         try:
             permission = {'type': 'anyone', 'role': 'reader'}
@@ -128,7 +137,7 @@ def upload_file_to_drive(file_path: str, file_name: str):
                 supportsAllDrives=True
             ).execute()
         except Exception as p_err:
-            logger.warning(f"Permission notice: {p_err}")
+            logger.warning(f"Permission create skipped: {p_err}")
 
         web_link = file.get('webViewLink') or f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
         logger.info(f"Drive upload successful! Link: {web_link}")
@@ -366,7 +375,7 @@ async def generate_admin_dashboard():
     users, downloads, platforms, today_dl, daily_avg, tg_photos, tg_videos = await asyncio.to_thread(sync_get_stats)
     all_sess = await asyncio.to_thread(sync_get_all_sessions)
     db_status = "Online 🟢" if db else "Offline 🔴"
-    drive_status = "Online 🟢" if GDRIVE_KEY_RAW else "Offline 🔴"
+    drive_status = "Online (OAuth 2.0) 🟢" if GDRIVE_REFRESH_TOKEN else "Offline 🔴"
 
     text = (
         "👑 **Admin Management Dashboard**\n"
@@ -575,6 +584,25 @@ async def private_message_handler(client: Client, message: Message):
         await message.reply_text(dash_text, reply_markup=dash_markup)
         return
 
+    # /testdrive Diagnostic Tool
+    if text_str == "/testdrive":
+        if user_id != OWNER_ID:
+            return
+        status = await message.reply_text("🔍 Testing Google Drive connection...")
+        test_file = "test.txt"
+        with open(test_file, "w") as f:
+            f.write("Google drive connection test")
+            
+        link, err = await asyncio.to_thread(upload_file_to_drive, test_file, "test.txt")
+        if os.path.exists(test_file):
+            os.remove(test_file)
+            
+        if link:
+            await status.edit_text(f"✅ **Google Drive Working (Google One)!**\n\n**Link:** {link}")
+        else:
+            await status.edit_text(f"❌ **Google Drive Failed!**\n\n**Exact Error:**\n`{err}`")
+        return
+
     # /user Info
     if text_str.startswith("/user"):
         if user_id != OWNER_ID:
@@ -758,7 +786,7 @@ async def private_message_handler(client: Client, message: Message):
             "Send any supported link to download:\n"
             "• **Supported:** Telegram, YouTube, TikTok, Instagram, Facebook\n"
             "• Sent media auto-deletes in 5 minutes.\n"
-            "• Google Drive backup included."
+            "• Google Drive (Google One) backup included."
         )
         await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
@@ -785,7 +813,7 @@ async def private_message_handler(client: Client, message: Message):
                 return
 
             drive_link = None
-            if GDRIVE_KEY_RAW:
+            if GDRIVE_REFRESH_TOKEN:
                 fname = os.path.basename(file_path)
                 await status.edit_text("⏳ Uploading to Google Drive...")
                 drive_link, drive_err = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
@@ -906,7 +934,7 @@ async def private_message_handler(client: Client, message: Message):
                             downloaded_files.append(file_path)
 
                             # Upload Album Item to Google Drive
-                            if GDRIVE_KEY_RAW:
+                            if GDRIVE_REFRESH_TOKEN:
                                 asyncio.create_task(asyncio.to_thread(upload_file_to_drive, file_path, os.path.basename(file_path)))
 
                             if is_gif_message(msg):
@@ -965,9 +993,9 @@ async def private_message_handler(client: Client, message: Message):
                     await status.edit_text("Failed to download media file.")
                     return
 
-                # Direct Google Drive Upload (Sync wait to attach button)
+                # Direct Google Drive Upload (OAuth 2.0)
                 drive_link = None
-                if GDRIVE_KEY_RAW:
+                if GDRIVE_REFRESH_TOKEN:
                     fname = os.path.basename(file_path)
                     await status.edit_text(f"⏳ Uploading {media_type} to Google Drive...")
                     drive_link, drive_err = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
