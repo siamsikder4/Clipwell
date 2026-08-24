@@ -82,7 +82,7 @@ progress_status = {}
 
 def get_drive_service():
     if not GDRIVE_KEY_RAW:
-        return None, "GDRIVE_KEY missing in environment variables"
+        return None, "GDRIVE_KEY missing"
     try:
         cred_dict = json.loads(GDRIVE_KEY_RAW)
         creds = service_account.Credentials.from_service_account_info(
@@ -96,18 +96,19 @@ def get_drive_service():
         return None, str(e)
 
 def upload_file_to_drive(file_path: str, file_name: str):
-    """Uploads file to Google Drive and creates a direct sharable link."""
     service, auth_err = get_drive_service()
     if not service:
-        logger.error(f"Drive upload failed: {auth_err}")
+        logger.error(f"Drive Service Auth Failed: {auth_err}")
         return None, f"Drive Init Error: {auth_err}"
 
     try:
-        file_metadata = {'name': file_name}
-        if GDRIVE_FOLDER_ID:
-            file_metadata['parents'] = [GDRIVE_FOLDER_ID]
+        target_folder = GDRIVE_FOLDER_ID or "1aCU7K2Kd-pIdibVY-TSYX2qHaoG65bHR"
+        file_metadata = {
+            'name': file_name,
+            'parents': [target_folder.strip()]
+        }
 
-        media = MediaFileUpload(file_path, resumable=True)
+        media = MediaFileUpload(file_path, resumable=False)
         file = service.files().create(
             body=file_metadata,
             media_body=media,
@@ -116,8 +117,9 @@ def upload_file_to_drive(file_path: str, file_name: str):
         ).execute()
 
         file_id = file.get('id')
+        if not file_id:
+            return None, "Drive did not return file ID"
 
-        # Make file public
         try:
             permission = {'type': 'anyone', 'role': 'reader'}
             service.permissions().create(
@@ -126,7 +128,7 @@ def upload_file_to_drive(file_path: str, file_name: str):
                 supportsAllDrives=True
             ).execute()
         except Exception as p_err:
-            logger.warning(f"Permission error (ignored): {p_err}")
+            logger.warning(f"Permission notice: {p_err}")
 
         web_link = file.get('webViewLink') or f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
         logger.info(f"Drive upload successful! Link: {web_link}")
@@ -787,8 +789,6 @@ async def private_message_handler(client: Client, message: Message):
                 fname = os.path.basename(file_path)
                 await status.edit_text("⏳ Uploading to Google Drive...")
                 drive_link, drive_err = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
-                if drive_err:
-                    await message.reply_text(f"⚠️ **Google Drive Upload Notice:**\n`{drive_err}`")
 
             progress_status[user_id] = {"last_time": time.time(), "start_time": time.time()}
 
@@ -971,8 +971,6 @@ async def private_message_handler(client: Client, message: Message):
                     fname = os.path.basename(file_path)
                     await status.edit_text(f"⏳ Uploading {media_type} to Google Drive...")
                     drive_link, drive_err = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
-                    if drive_err:
-                        await message.reply_text(f"⚠️ **Google Drive Notice:** `{drive_err}`")
 
                 reply_markup = None
                 if drive_link:
