@@ -4,9 +4,6 @@ import time
 import json
 import asyncio
 import logging
-import urllib.request
-import urllib.parse
-from datetime import datetime
 from aiohttp import web
 import yt_dlp
 from hydrogram import Client, filters
@@ -64,13 +61,47 @@ bot = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    in_memory=True
+    in_memory=True,
+    workers=16
 )
 
-# Global States
+# Global States & Pre-warmed Session Cache
 admin_states = {}
 login_clients = {}
 progress_status = {}
+loaded_user_clients = []
+
+# ----------------- SESSION POOL MANAGER (SUPER FAST) ----------------- #
+
+async def init_session_pool():
+    global loaded_user_clients
+    if not db:
+        return
+    sessions = await asyncio.to_thread(sync_get_all_sessions)
+    new_pool = []
+    for s in sessions:
+        try:
+            cl = Client(
+                f"pool_{s['doc_id']}",
+                api_id=API_ID,
+                api_hash=API_HASH,
+                session_string=s['session_string'],
+                in_memory=True
+            )
+            await cl.start()
+            new_pool.append((s['doc_id'], s['account_name'], cl))
+        except Exception as e:
+            logger.warning(f"Failed to start pool client {s['doc_id']}: {e}")
+    
+    # Close old clients safely
+    for _, _, old_cl in loaded_user_clients:
+        try:
+            if old_cl.is_connected:
+                await old_cl.stop()
+        except Exception:
+            pass
+    loaded_user_clients = new_pool
+    logger.info(f"Session Pool Ready: {len(loaded_user_clients)} active userbots.")
 
 # ----------------- DATABASE HELPERS ----------------- #
 
@@ -143,7 +174,7 @@ def sync_log_url(user_id: int, user_name: str, url: str, platform: str):
     except Exception:
         pass
 
-def sync_get_active_urls(limit: int = 25):
+def sync_get_active_urls(limit: int = 15):
     if not db:
         return []
     try:
@@ -248,7 +279,7 @@ async def generate_admin_dashboard():
     ])
     return text, keyboard
 
-# ----------------- UTILITY & PROGRESS ----------------- #
+# ----------------- UTILITY & ULTRA-FAST DOWNLOADER ----------------- #
 
 async def progress_bar(current, total, status_msg, action_name, user_id):
     if not total or total <= 0:
@@ -257,7 +288,7 @@ async def progress_bar(current, total, status_msg, action_name, user_id):
     user_data = progress_status.get(user_id, {})
     last_update = user_data.get("last_time", 0)
 
-    if (now - last_update < 3.0) and current < total:
+    if (now - last_update < 3.5) and current < total:
         return
 
     progress_status[user_id] = {"last_time": now}
@@ -299,6 +330,8 @@ def extract_and_download_social(url: str, user_id: int):
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
+        'concurrent_fragment_downloads': 4,
+        'buffersize': 1024 * 1024 * 16,
         'max_filesize': 1900 * 1024 * 1024,
     }
 
@@ -342,7 +375,7 @@ async def private_message_handler(client: Client, message: Message):
         await message.reply_text(dash_text, reply_markup=dash_markup)
         return
 
-    # Admin Login States
+    # Admin Login States (OTP / Session Input)
     if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_SESSION":
         admin_states.pop(user_id, None)
         status_msg = await message.reply_text("Validating session string...")
@@ -356,6 +389,7 @@ async def private_message_handler(client: Client, message: Message):
 
             success, err_msg = await asyncio.to_thread(sync_add_session, text_str, acc_name)
             if success:
+                asyncio.create_task(init_session_pool())
                 await status_msg.edit_text(f"✅ **Session saved!**\n\n• Account: `{acc_name}`")
             else:
                 await status_msg.edit_text(f"❌ Error: `{err_msg}`")
@@ -410,6 +444,7 @@ async def private_message_handler(client: Client, message: Message):
             admin_states.pop(user_id, None)
 
             await asyncio.to_thread(sync_add_session, session_string, acc_name)
+            asyncio.create_task(init_session_pool())
             await status_msg.edit_text(f"✅ **Account Connected & Saved!**\n\n• Name: `{acc_name}`")
 
         except SessionPasswordNeeded:
@@ -445,6 +480,7 @@ async def private_message_handler(client: Client, message: Message):
             admin_states.pop(user_id, None)
 
             await asyncio.to_thread(sync_add_session, session_string, acc_name)
+            asyncio.create_task(init_session_pool())
             await status_msg.edit_text(f"✅ **Account Connected & Saved!**\n\n• Name: `{acc_name}`")
 
         except Exception as e:
@@ -466,14 +502,14 @@ async def private_message_handler(client: Client, message: Message):
 
         text = (
             f"**Hello {user.first_name},**\n\n"
-            "Send any supported link to download:\n"
+            "Send any supported link to download instantly:\n"
             "• **Supported:** Telegram, YouTube, TikTok, Instagram, Facebook\n"
             "• Sent media auto-deletes in 5 minutes."
         )
         await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
 
-    # ----------------- TELEGRAM POST DOWNLOADER ----------------- #
+    # ----------------- TELEGRAM POST DOWNLOADER (INSTANT POOL) ----------------- #
     private_match = re.search(r"t\.me/c/(\d+)/(\d+)", text_str)
     public_match = re.search(r"t\.me/([a-zA-Z0-9_]+)/(\d+)", text_str)
 
@@ -481,11 +517,15 @@ async def private_message_handler(client: Client, message: Message):
         tg_url = text_str.strip()
         asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, tg_url, "telegram"))
 
-        status = await message.reply_text("⏳ Fetching Telegram post...")
-        working_client = None
+        status = await message.reply_text("⚡ Fetching...")
 
         try:
-            active_sessions = await asyncio.to_thread(sync_get_all_sessions)
+            if not loaded_user_clients:
+                await init_session_pool()
+
+            if not loaded_user_clients:
+                await status.edit_text("❌ No user session active. Add one via /admin.")
+                return
 
             if private_match:
                 chat_id = int("-100" + private_match.group(1))
@@ -494,30 +534,18 @@ async def private_message_handler(client: Client, message: Message):
                 chat_id = public_match.group(1)
                 msg_id = int(public_match.group(2))
 
-            if not active_sessions:
-                await status.edit_text("❌ No user session active. Add one via /admin.")
-                return
-
             target_msg = None
-            for sess in active_sessions:
-                temp_client = Client(
-                    f"sess_{int(time.time()*1000)}",
-                    api_id=API_ID,
-                    api_hash=API_HASH,
-                    session_string=sess['session_string'],
-                    in_memory=True
-                )
+            working_client = None
+
+            for _, _, u_client in loaded_user_clients:
                 try:
-                    await asyncio.wait_for(temp_client.start(), timeout=5)
-                    msg = await asyncio.wait_for(temp_client.get_messages(chat_id, msg_id), timeout=5)
+                    msg = await asyncio.wait_for(u_client.get_messages(chat_id, msg_id), timeout=3)
                     if has_media(msg):
                         target_msg = msg
-                        working_client = temp_client
+                        working_client = u_client
                         break
-                    await temp_client.stop()
                 except Exception:
-                    if temp_client.is_connected:
-                        await temp_client.stop()
+                    continue
 
             if not target_msg or not working_client:
                 await status.edit_text("❌ Media not found or account hasn't joined this channel.")
@@ -525,7 +553,7 @@ async def private_message_handler(client: Client, message: Message):
 
             # Handle Album
             if target_msg.media_group_id:
-                group_messages = await asyncio.wait_for(working_client.get_media_group(target_msg.chat.id, target_msg.id), timeout=8)
+                group_messages = await asyncio.wait_for(working_client.get_media_group(target_msg.chat.id, target_msg.id), timeout=5)
                 downloaded_files, media_list, gif_files = [], [], []
                 photos_count, videos_count = 0, 0
 
@@ -609,9 +637,6 @@ async def private_message_handler(client: Client, message: Message):
         except Exception as e:
             logger.error(f"Telegram Handler Error: {e}")
             await status.edit_text(f"❌ Error: `{str(e)}`")
-        finally:
-            if working_client and working_client.is_connected:
-                await working_client.stop()
         return
 
     # ----------------- SOCIAL MEDIA HANDLER ----------------- #
@@ -620,7 +645,7 @@ async def private_message_handler(client: Client, message: Message):
 
     if social_match:
         target_url = social_match.group(0)
-        status = await message.reply_text("⏳ Processing video...")
+        status = await message.reply_text("⚡ Processing...")
         try:
             file_path, title = await asyncio.to_thread(extract_and_download_social, target_url, user_id)
             if not file_path or not os.path.exists(file_path):
@@ -665,7 +690,7 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
 
     elif data == "btn_help":
         await callback_query.message.edit_text(
-            "**How to use:**\n\nSend any supported link (Telegram, YouTube, TikTok, Instagram, Facebook) to download media directly.",
+            "**How to use:**\n\nSend any supported link to download media directly.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_home")]])
         )
         await callback_query.answer()
@@ -739,6 +764,7 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
     elif data.startswith("del_"):
         doc_id = data.split("del_")[1]
         await asyncio.to_thread(sync_delete_session, doc_id)
+        asyncio.create_task(init_session_pool())
         await callback_query.message.edit_text(
             "✅ Session deleted.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_back_admin")]])
@@ -775,5 +801,6 @@ async def start_web_server():
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.create_task(start_web_server())
+    loop.create_task(init_session_pool())
     logger.info("Starting bot using native runner...")
     bot.run()
