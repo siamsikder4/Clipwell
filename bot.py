@@ -20,9 +20,8 @@ from hydrogram.errors import (
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# Google Drive OAuth Imports
-from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request
+# Google Drive Service Account Imports
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
@@ -46,10 +45,8 @@ API_HASH = os.environ.get("API_HASH", "77df805f1700eeefec861de6c93ee2ae").strip(
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8952918726:AAGnKZm-S8hmBaWzltPfrdWRcyVHGVx44d0").strip()
 FIREBASE_KEY_RAW = os.environ.get("FIREBASE_KEY", "").strip()
 
-# Google Drive OAuth Configs
-GDRIVE_CLIENT_ID = os.environ.get("GDRIVE_CLIENT_ID", "203426313347-c4lv00u3rgr9e35upvani6mjhqf8jsap.apps.googleusercontent.com").strip()
-GDRIVE_CLIENT_SECRET = os.environ.get("GDRIVE_CLIENT_SECRET", "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").strip()
-GDRIVE_REFRESH_TOKEN = os.environ.get("GDRIVE_REFRESH_TOKEN", "1//04oj5g9drum_wCYIARAAGAQSNwF-L9Irb2WkEfSNazDQDF1SPldbINrtvurWmt3uEuGDrd1qUcIeSrEQm8BZ7LsjFakY6Z6xR9o").strip()
+# Google Drive Service Account Configs
+SERVICE_ACCOUNT_RAW = os.environ.get("GDRIVE_SERVICE_ACCOUNT_JSON", "").strip()
 GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "1aCU7K2Kd-pIdibVY-TSYX2qHaoG65bHR").strip()
 
 OWNER_ID = 6142774415
@@ -84,34 +81,30 @@ admin_states = {}
 login_clients = {}
 progress_status = {}
 
-# ----------------- GOOGLE DRIVE OAUTH ENGINE ----------------- #
+# ----------------- GOOGLE DRIVE SERVICE ACCOUNT ENGINE ----------------- #
 
 def get_drive_service():
-    if not (GDRIVE_CLIENT_ID and GDRIVE_CLIENT_SECRET and GDRIVE_REFRESH_TOKEN):
-        return None, "OAuth 2.0 Credentials missing"
+    if not SERVICE_ACCOUNT_RAW:
+        return None, "GDRIVE_SERVICE_ACCOUNT_JSON variable missing in Environment"
     try:
-        creds = Credentials(
-            token=None,
-            refresh_token=GDRIVE_REFRESH_TOKEN.strip(),
-            token_uri="https://oauth2.googleapis.com/token",
-            client_id=GDRIVE_CLIENT_ID.strip(),
-            client_secret=GDRIVE_CLIENT_SECRET.strip(),
+        service_account_info = json.loads(SERVICE_ACCOUNT_RAW)
+        creds = service_account.Credentials.from_service_account_info(
+            service_account_info,
             scopes=['https://www.googleapis.com/auth/drive']
         )
-        creds.refresh(Request())
         service = build('drive', 'v3', credentials=creds, cache_discovery=False)
         return service, None
     except Exception as e:
-        logger.error(f"Google Drive Auth Error: {e}")
+        logger.error(f"Google Drive Service Account Auth Error: {e}")
         return None, str(e)
 
 def upload_file_to_drive(file_path: str, file_name: str):
     if not os.path.exists(file_path):
-        return None, "File does not exist on disk"
+        return None, "File does not exist on server"
 
     service, auth_err = get_drive_service()
     if not service:
-        logger.error(f"Drive Service Auth Failed: {auth_err}")
+        logger.error(f"Drive Service Init Failed: {auth_err}")
         return None, f"Drive Init Error: {auth_err}"
 
     try:
@@ -377,7 +370,7 @@ async def generate_admin_dashboard():
     users, downloads, platforms, today_dl, daily_avg, tg_photos, tg_videos = await asyncio.to_thread(sync_get_stats)
     all_sess = await asyncio.to_thread(sync_get_all_sessions)
     db_status = "Online 🟢" if db else "Offline 🔴"
-    drive_status = "Online (OAuth 2.0) 🟢" if GDRIVE_REFRESH_TOKEN else "Offline 🔴"
+    drive_status = "Online (Service Account) 🟢" if SERVICE_ACCOUNT_RAW else "Offline 🔴"
 
     text = (
         "👑 **Admin Management Dashboard**\n"
@@ -588,17 +581,17 @@ async def private_message_handler(client: Client, message: Message):
     if text_str == "/testdrive":
         if user_id != OWNER_ID:
             return
-        status = await message.reply_text("🔍 Testing Google Drive connection...")
+        status = await message.reply_text("🔍 Testing Google Drive (Service Account) connection...")
         test_file = "test_drive.txt"
         with open(test_file, "w") as f:
-            f.write("Google drive connection test file.")
+            f.write("Google drive connection test using service account.")
             
         link, err = await asyncio.to_thread(upload_file_to_drive, test_file, "test_drive.txt")
         if os.path.exists(test_file):
             os.remove(test_file)
             
         if link:
-            await status.edit_text(f"✅ **Google Drive Working!**\n\n🔗 **Link:** {link}")
+            await status.edit_text(f"✅ **Google Drive Working (Service Account)!**\n\n🔗 **Link:** {link}")
         else:
             await status.edit_text(f"❌ **Google Drive Failed!**\n\n**Error:**\n`{err}`")
         return
@@ -812,7 +805,7 @@ async def private_message_handler(client: Client, message: Message):
                 return
 
             drive_link = None
-            if GDRIVE_REFRESH_TOKEN:
+            if SERVICE_ACCOUNT_RAW:
                 fname = os.path.basename(file_path)
                 await status.edit_text("⏳ Uploading to Google Drive...")
                 drive_link, drive_err = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
@@ -931,8 +924,8 @@ async def private_message_handler(client: Client, message: Message):
                         if file_path:
                             downloaded_files.append(file_path)
 
-                            # Upload Album Item to Google Drive
-                            if GDRIVE_REFRESH_TOKEN:
+                            # Upload to Google Drive
+                            if SERVICE_ACCOUNT_RAW:
                                 asyncio.create_task(asyncio.to_thread(upload_file_to_drive, file_path, os.path.basename(file_path)))
 
                             if is_gif_message(msg):
@@ -991,9 +984,9 @@ async def private_message_handler(client: Client, message: Message):
                     await status.edit_text("Failed to download media file.")
                     return
 
-                # Direct Google Drive Upload (OAuth 2.0)
+                # Direct Google Drive Upload (Service Account)
                 drive_link = None
-                if GDRIVE_REFRESH_TOKEN:
+                if SERVICE_ACCOUNT_RAW:
                     fname = os.path.basename(file_path)
                     await status.edit_text(f"⏳ Uploading {media_type} to Google Drive...")
                     drive_link, drive_err = await asyncio.to_thread(upload_file_to_drive, file_path, fname)
