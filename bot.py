@@ -4,7 +4,6 @@ import time
 import json
 import asyncio
 import logging
-import aiohttp
 from aiohttp import web
 import yt_dlp
 from hydrogram import Client, filters
@@ -66,43 +65,13 @@ bot = Client(
     workers=16
 )
 
-# Global States
+# Global States & Pre-warmed Session Cache
 admin_states = {}
 login_clients = {}
 progress_status = {}
 loaded_user_clients = []
 
-# ----------------- GOFILE UPLOADER HELPER ----------------- #
-
-async def upload_to_gofile(file_path: str) -> str:
-    """GoFile API-তে ফাইল আপলোড করে ডাউনলোড লিংক দেয়"""
-    try:
-        timeout = aiohttp.ClientTimeout(total=1800) # ৩০ মিনিট পর্যন্ত টাইমআউট (বড় ফাইলের জন্য)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            # ১. সেরা সার্ভার নিয়ে আসা
-            async with session.get("https://api.gofile.io/servers") as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-                if data.get("status") != "ok":
-                    return None
-                server = data["data"]["servers"][0]["name"]
-
-            # ২. ফাইল আপলোড করা
-            upload_url = f"https://{server}.gofile.io/contents/uploadfile"
-            with open(file_path, "rb") as f:
-                form = aiohttp.FormData()
-                form.add_field("file", f, filename=os.path.basename(file_path))
-                async with session.post(upload_url, data=form) as upload_resp:
-                    if upload_resp.status == 200:
-                        res = await upload_resp.json()
-                        if res.get("status") == "ok":
-                            return res["data"]["downloadPage"]
-    except Exception as e:
-        logger.error(f"GoFile Upload Error: {e}")
-    return None
-
-# ----------------- SESSION POOL MANAGER ----------------- #
+# ----------------- SESSION POOL MANAGER (SUPER FAST) ----------------- #
 
 async def init_session_pool():
     global loaded_user_clients
@@ -124,6 +93,7 @@ async def init_session_pool():
         except Exception as e:
             logger.warning(f"Failed to start pool client {s['doc_id']}: {e}")
     
+    # Close old clients safely
     for _, _, old_cl in loaded_user_clients:
         try:
             if old_cl.is_connected:
@@ -309,7 +279,7 @@ async def generate_admin_dashboard():
     ])
     return text, keyboard
 
-# ----------------- UTILITY & DOWNLOADER ----------------- #
+# ----------------- UTILITY & ULTRA-FAST DOWNLOADER ----------------- #
 
 async def progress_bar(current, total, status_msg, action_name, user_id):
     if not total or total <= 0:
@@ -405,7 +375,7 @@ async def private_message_handler(client: Client, message: Message):
         await message.reply_text(dash_text, reply_markup=dash_markup)
         return
 
-    # Admin Login States
+    # Admin Login States (OTP / Session Input)
     if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_SESSION":
         admin_states.pop(user_id, None)
         status_msg = await message.reply_text("Validating session string...")
@@ -534,13 +504,12 @@ async def private_message_handler(client: Client, message: Message):
             f"**Hello {user.first_name},**\n\n"
             "Send any supported link to download instantly:\n"
             "• **Supported:** Telegram, YouTube, TikTok, Instagram, Facebook\n"
-            "• Sent media auto-deletes in 5 minutes.\n"
-            "• Large files (>45 MB) are uploaded directly to GoFile for fast downloading."
+            "• Sent media auto-deletes in 5 minutes."
         )
         await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
 
-    # ----------------- TELEGRAM POST DOWNLOADER ----------------- #
+    # ----------------- TELEGRAM POST DOWNLOADER (INSTANT POOL) ----------------- #
     private_match = re.search(r"t\.me/c/(\d+)/(\d+)", text_str)
     public_match = re.search(r"t\.me/([a-zA-Z0-9_]+)/(\d+)", text_str)
 
@@ -582,40 +551,70 @@ async def private_message_handler(client: Client, message: Message):
                 await status.edit_text("❌ Media not found or account hasn't joined this channel.")
                 return
 
-            # Single File / Large File Download
-            is_gif = is_gif_message(target_msg)
-            caption = target_msg.caption.strip() if target_msg.caption else ""
-            media_type = "GIF" if is_gif else ("Video" if target_msg.video else ("Photo" if target_msg.photo else "Document"))
+            # Handle Album
+            if target_msg.media_group_id:
+                group_messages = await asyncio.wait_for(working_client.get_media_group(target_msg.chat.id, target_msg.id), timeout=5)
+                downloaded_files, media_list, gif_files = [], [], []
+                photos_count, videos_count = 0, 0
 
-            file_path = await working_client.download_media(
-                target_msg,
-                progress=progress_bar,
-                progress_args=(status, f"Downloading {media_type}", user_id)
-            )
+                for idx, msg in enumerate(group_messages):
+                    if has_media(msg):
+                        file_path = await working_client.download_media(
+                            msg,
+                            progress=progress_bar,
+                            progress_args=(status, f"Downloading ({idx+1}/{len(group_messages)})", user_id)
+                        )
+                        if file_path:
+                            downloaded_files.append(file_path)
+                            cap = msg.caption.strip() if msg.caption else ""
+                            if is_gif_message(msg):
+                                gif_files.append((file_path, cap))
+                                videos_count += 1
+                            elif msg.video:
+                                media_list.append(InputMediaVideo(file_path, caption=cap))
+                                videos_count += 1
+                            elif msg.photo:
+                                media_list.append(InputMediaPhoto(file_path, caption=cap))
+                                photos_count += 1
 
-            if not file_path or not os.path.exists(file_path):
-                await status.edit_text("❌ Failed to download media.")
-                return
+                sent_msgs = []
+                if media_list:
+                    sent_msgs = await client.send_media_group(chat_id=message.chat.id, media=media_list)
+                for gpath, gcap in gif_files:
+                    gmsg = await client.send_animation(chat_id=message.chat.id, animation=gpath, caption=gcap)
+                    sent_msgs.append(gmsg)
 
-            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                for path in downloaded_files:
+                    if os.path.exists(path):
+                        os.remove(path)
 
-            # ৪৫ MB এর বেশি হলে GoFile-এ যাবে
-            if file_size_mb > 45:
-                await status.edit_text("🚀 Uploading to GoFile Cloud...")
-                gofile_link = await upload_to_gofile(file_path)
-                
-                if gofile_link:
-                    btn = InlineKeyboardMarkup([[InlineKeyboardButton("⚡ Fast Download (GoFile)", url=gofile_link)]])
-                    sent_msg = await client.send_message(
-                        chat_id=message.chat.id,
-                        text=f"📁 **File Ready!**\n\n• **Size:** `{file_size_mb:.1f} MB`\n• **Direct Download:** Click below.",
-                        reply_markup=btn
-                    )
-                else:
-                    await status.edit_text("❌ Failed to upload to GoFile.")
-                    sent_msg = None
+                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", len(downloaded_files), photos_count, videos_count))
+                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", len(downloaded_files), photos_count, videos_count))
+
+                await status.delete()
+                del_ids = [m.id for m in sent_msgs]
+                asyncio.create_task(auto_delete_messages(message.chat.id, del_ids, 300))
+
+            # Handle Single File
             else:
+                is_gif = is_gif_message(target_msg)
+                caption = target_msg.caption.strip() if target_msg.caption else ""
+                media_type = "GIF" if is_gif else ("Video" if target_msg.video else ("Photo" if target_msg.photo else "Document"))
+
+                file_path = await working_client.download_media(
+                    target_msg,
+                    progress=progress_bar,
+                    progress_args=(status, f"Downloading {media_type}", user_id)
+                )
+
+                if not file_path or not os.path.exists(file_path):
+                    await status.edit_text("❌ Failed to download media.")
+                    return
+
                 sent_msg = None
+                photos_count = 1 if target_msg.photo else 0
+                videos_count = 1 if (target_msg.video or is_gif) else 0
+
                 if is_gif:
                     sent_msg = await client.send_animation(chat_id=message.chat.id, animation=file_path, caption=caption)
                 elif target_msg.video:
@@ -625,18 +624,15 @@ async def private_message_handler(client: Client, message: Message):
                 elif target_msg.document:
                     sent_msg = await client.send_document(chat_id=message.chat.id, document=file_path, caption=caption)
 
-            # Local file delete
-            if os.path.exists(file_path):
-                os.remove(file_path)
+                if os.path.exists(file_path):
+                    os.remove(file_path)
 
-            photos_count = 1 if target_msg.photo else 0
-            videos_count = 1 if (target_msg.video or is_gif) else 0
-            asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, photos_count, videos_count))
-            asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, photos_count, videos_count))
+                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, photos_count, videos_count))
+                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, photos_count, videos_count))
 
-            await status.delete()
-            if sent_msg:
-                asyncio.create_task(auto_delete_messages(message.chat.id, [sent_msg.id], 300))
+                await status.delete()
+                if sent_msg:
+                    asyncio.create_task(auto_delete_messages(message.chat.id, [sent_msg.id], 300))
 
         except Exception as e:
             logger.error(f"Telegram Handler Error: {e}")
@@ -656,31 +652,12 @@ async def private_message_handler(client: Client, message: Message):
                 await status.edit_text("❌ Failed to download.")
                 return
 
-            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+            sent_msg = await client.send_video(
+                chat_id=message.chat.id,
+                video=file_path,
+                caption=f"**{title[:60]}**" if title else ""
+            )
 
-            # সোশ্যাল মিডিয়া ফাইলও ৪৫ MB এর বড় হলে সরাসরি GoFile লিংকে পাঠাবে
-            if file_size_mb > 45:
-                await status.edit_text("🚀 Uploading to GoFile Cloud...")
-                gofile_link = await upload_to_gofile(file_path)
-                
-                if gofile_link:
-                    btn = InlineKeyboardMarkup([[InlineKeyboardButton("⚡ Fast Download (GoFile)", url=gofile_link)]])
-                    sent_msg = await client.send_message(
-                        chat_id=message.chat.id,
-                        text=f"🎥 **{title[:60]}**\n\n• **Size:** `{file_size_mb:.1f} MB`",
-                        reply_markup=btn
-                    )
-                else:
-                    await status.edit_text("❌ Failed to upload to GoFile.")
-                    sent_msg = None
-            else:
-                sent_msg = await client.send_video(
-                    chat_id=message.chat.id,
-                    video=file_path,
-                    caption=f"**{title[:60]}**" if title else ""
-                )
-
-            # Local file delete
             if os.path.exists(file_path):
                 os.remove(file_path)
 
