@@ -366,13 +366,15 @@ def extract_youtube_metadata(url: str):
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
+        'skip_download': True,
+        'format': 'all',
         'extractor_args': {
             'youtube': {
-                'player_client': ['ios', 'android', 'mweb']
+                'player_client': ['web', 'mweb', 'android']
             }
         },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
         }
     }
     ydl_opts.update(get_yt_cookies())
@@ -420,7 +422,7 @@ def download_youtube_with_quality(url: str, user_id: int, height: int = None):
     out_template = os.path.join(DOWNLOAD_DIR, f"{prefix}%(id)s.%(ext)s")
 
     if height:
-        format_str = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best"
+        format_str = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/bestvideo+bestaudio/best"
     else:
         format_str = "bestvideo+bestaudio/best"
 
@@ -434,11 +436,11 @@ def download_youtube_with_quality(url: str, user_id: int, height: int = None):
         'concurrent_fragment_downloads': 4,
         'extractor_args': {
             'youtube': {
-                'player_client': ['ios', 'android', 'mweb']
+                'player_client': ['web', 'mweb', 'android']
             }
         },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
         },
         'postprocessor_args': {
             'Merger': ['-movflags', '+faststart']
@@ -514,7 +516,7 @@ def extract_and_download_social_audio(url: str, user_id: int):
         'noplaylist': True,
         'extractor_args': {
             'youtube': {
-                'player_client': ['ios', 'android', 'mweb']
+                'player_client': ['web', 'mweb', 'android']
             }
         },
         'postprocessors': [{
@@ -523,7 +525,7 @@ def extract_and_download_social_audio(url: str, user_id: int):
             'preferredquality': '192',
         }],
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         },
         'max_filesize': 500 * 1024 * 1024,
     }
