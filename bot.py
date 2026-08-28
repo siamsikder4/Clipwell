@@ -348,15 +348,26 @@ async def auto_delete_messages(chat_id: int, message_ids: list, delay_seconds: i
     except Exception:
         pass
 
+def sanitize_youtube_url(url: str) -> str:
+    """Strip tracking query parameters like ?si=..."""
+    match = re.search(r'(?:v=|\/|youtu\.be\/)([0-9A-Za-z_-]{11})', url)
+    if match:
+        return f"https://www.youtube.com/watch?v={match.group(1)}"
+    return url.strip()
+
 def extract_youtube_metadata(url: str):
-    clean_url = url.strip()
+    clean_url = sanitize_youtube_url(url)
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['ios', 'android', 'mweb']
+            }
+        },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9',
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15'
         }
     }
     try:
@@ -392,11 +403,11 @@ def extract_youtube_metadata(url: str):
                 "qualities": available_qualities
             }
     except Exception as e:
-        logger.error(f"YouTube Metadata extraction error: {e}")
+        logger.error(f"YouTube metadata extraction error: {e}")
         return None
 
 def download_youtube_with_quality(url: str, user_id: int, height: int = None):
-    clean_url = url.strip()
+    clean_url = sanitize_youtube_url(url)
     timestamp = int(time.time())
     prefix = f"{user_id}_{timestamp}_yt_"
     out_template = os.path.join(DOWNLOAD_DIR, f"{prefix}%(id)s.%(ext)s")
@@ -414,8 +425,13 @@ def download_youtube_with_quality(url: str, user_id: int, height: int = None):
         'no_warnings': True,
         'noplaylist': True,
         'concurrent_fragment_downloads': 4,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['ios', 'android', 'mweb']
+            }
+        },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15'
         },
         'postprocessor_args': {
             'Merger': ['-movflags', '+faststart']
@@ -434,12 +450,11 @@ def download_youtube_with_quality(url: str, user_id: int, height: int = None):
                 if fname.startswith(prefix):
                     return os.path.join(DOWNLOAD_DIR, fname), title
     except Exception as e:
-        logger.error(f"YouTube Quality download error: {e}")
+        logger.error(f"YouTube quality download error: {e}")
 
     return None, None
 
 def download_direct_social_best(url: str, user_id: int):
-    """Direct high quality download for Facebook, TikTok, Instagram, etc."""
     clean_url = url.strip()
     timestamp = int(time.time())
     prefix = f"{user_id}_{timestamp}_soc_"
@@ -473,12 +488,12 @@ def download_direct_social_best(url: str, user_id: int):
                 if fname.startswith(prefix):
                     return os.path.join(DOWNLOAD_DIR, fname), title
     except Exception as e:
-        logger.error(f"Social Direct Download error: {e}")
+        logger.error(f"Social download error: {e}")
 
     return None, None
 
 def extract_and_download_social_audio(url: str, user_id: int):
-    clean_url = url.strip()
+    clean_url = sanitize_youtube_url(url)
     timestamp = int(time.time())
     prefix = f"{user_id}_{timestamp}_aud_"
     out_template = os.path.join(DOWNLOAD_DIR, f"{prefix}%(id)s.%(ext)s")
@@ -489,13 +504,18 @@ def extract_and_download_social_audio(url: str, user_id: int):
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['ios', 'android', 'mweb']
+            }
+        },
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
             'preferredquality': '192',
         }],
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15'
         },
         'max_filesize': 500 * 1024 * 1024,
     }
@@ -515,7 +535,6 @@ def extract_and_download_social_audio(url: str, user_id: int):
     except Exception as e:
         logger.warning(f"Audio extraction error: {e}")
 
-    # Fallback
     try:
         ydl_opts_fallback = {
             'format': 'bestaudio/best',
@@ -835,7 +854,7 @@ async def private_message_handler(client: Client, message: Message):
         
         is_youtube = ("youtube.com" in url or "youtu.be" in url)
 
-        # 1. YOUTUBE (Shows clean Quality Selector & Thumbnail)
+        # 1. YOUTUBE (Displays 2-column Quality Selector & Thumbnail)
         if is_youtube:
             status = await message.reply_text("⚡ **Analyzing YouTube video...**")
             asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, url, "YouTube"))
@@ -884,7 +903,7 @@ async def private_message_handler(client: Client, message: Message):
                 await message.reply_text(caption_text, reply_markup=InlineKeyboardMarkup(buttons))
             return
 
-        # 2. OTHER SOCIALS (Direct High Quality Download)
+        # 2. OTHER SOCIALS (Direct Best Quality Download)
         platform = "TikTok" if "tiktok" in url else "Instagram" if "instagram" in url else "Facebook" if ("facebook" in url or "fb.watch" in url) else "Social"
         asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, url, platform))
 
