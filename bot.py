@@ -142,7 +142,7 @@ def sync_delete_session(doc_id: str):
     try:
         db.collection("telegram_sessions").document(doc_id).delete()
         return True
-    except Exception:
+    except Exception as e:
         return False
 
 def sync_track_user(user_id: int, username: str, name: str) -> bool:
@@ -320,20 +320,28 @@ async def auto_delete_messages(chat_id: int, message_ids: list, delay_seconds: i
         pass
 
 def extract_and_download_social(url: str, user_id: int):
-    clean_url = url.split("?")[0].strip()
+    clean_url = url.strip()
     timestamp = int(time.time())
     out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_%(id)s.%(ext)s")
 
     ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'format': 'bestvideo+bestaudio/best',
         'outtmpl': out_template,
         'merge_output_format': 'mp4',
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
         'concurrent_fragment_downloads': 4,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios', 'web']
+            }
+        },
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+        },
         'postprocessor_args': {
-            'ffmpeg': ['-movflags', '+faststart']
+            'Merger': ['-movflags', '+faststart']
         },
         'buffersize': 1024 * 1024 * 16,
         'max_filesize': 1950 * 1024 * 1024,
