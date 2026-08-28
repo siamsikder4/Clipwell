@@ -174,7 +174,7 @@ def sync_log_url(user_id: int, user_name: str, url: str, platform: str):
     except Exception:
         pass
 
-def sync_get_active_urls(limit: int = 15):
+def sync_get_active_urls(limit: int = 10):
     if not db:
         return []
     try:
@@ -255,32 +255,33 @@ async def generate_admin_dashboard():
     db_status = "Online 🟢" if db else "Offline 🔴"
 
     text = (
-        "👑 **Admin Management Dashboard**\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
+        "⚙️ **Admin Dashboard**\n"
+        "────────────────────\n"
         f"• **Database:** `{db_status}`\n"
-        f"• **Total Downloads:** `{total_dl:,}`\n"
-        f"• **Active Sessions:** `{len(all_sess)}`\n\n"
-        "📊 **Platform Breakdown:**\n"
-        f"• 📂 Telegram: `{platforms.get('Telegram', 0):,}`\n"
-        f"   └ 🖼️ Photos: `{tg_photos:,}` | 🎥 Videos: `{tg_videos:,}`\n"
-        f"• 🔴 YouTube: `{platforms.get('YouTube', 0):,}`\n"
-        f"• 🎵 TikTok: `{platforms.get('TikTok', 0):,}`\n"
-        f"• 📸 Instagram: `{platforms.get('Instagram', 0):,}`\n"
-        f"• 🔵 Facebook: `{platforms.get('Facebook', 0):,}`\n"
-        "━━━━━━━━━━━━━━━━━━━━"
+        f"• **Active Sessions:** `{len(all_sess)}`\n"
+        f"• **Total Downloads:** `{total_dl:,}`\n\n"
+        "📊 **Platform Insights**\n"
+        f"• **Telegram:** `{platforms.get('Telegram', 0):,}`\n"
+        f"  └ 🖼️ `{tg_photos:,}`  •  🎥 `{tg_videos:,}`\n"
+        f"• **YouTube:** `{platforms.get('YouTube', 0):,}`\n"
+        f"• **TikTok:** `{platforms.get('TikTok', 0):,}`\n"
+        f"• **Instagram:** `{platforms.get('Instagram', 0):,}`\n"
+        f"• **Facebook:** `{platforms.get('Facebook', 0):,}`\n"
+        f"• **Others:** `{platforms.get('Others', 0):,}`\n"
+        "────────────────────"
     )
 
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🔑 Generate Session (OTP)", callback_data="btn_login_account"),
-            InlineKeyboardButton("➕ Paste Session", callback_data="btn_add_session")
+            InlineKeyboardButton("🔑 Add via Phone (OTP)", callback_data="btn_login_account"),
+            InlineKeyboardButton("➕ Paste String", callback_data="btn_add_session")
         ],
         [
             InlineKeyboardButton(f"📁 Sessions ({len(all_sess)})", callback_data="btn_list_sessions"),
-            InlineKeyboardButton("🗑️ Delete Session", callback_data="btn_del_menu")
+            InlineKeyboardButton("🗑️ Remove Session", callback_data="btn_del_menu")
         ],
         [
-            InlineKeyboardButton("🔗 Recent URLs", callback_data="btn_view_urls"),
+            InlineKeyboardButton("🔗 Activity Log", callback_data="btn_view_urls"),
             InlineKeyboardButton("🔄 Refresh", callback_data="btn_refresh_admin")
         ]
     ])
@@ -295,18 +296,22 @@ async def progress_bar(current, total, status_msg, action_name, user_id):
     user_data = progress_status.get(user_id, {})
     last_update = user_data.get("last_time", 0)
 
-    if (now - last_update < 3.5) and current < total:
+    if (now - last_update < 3.0) and current < total:
         return
 
     progress_status[user_id] = {"last_time": now}
     percentage = (current / total) * 100
     filled = int(percentage // 10)
-    bar = "■" * filled + "□" * (10 - filled)
+    bar = "▰" * filled + "▱" * (10 - filled)
 
     curr_mb = current / (1024 * 1024)
     tot_mb = total / (1024 * 1024)
 
-    text = f"**{action_name}**\n`[{bar}]` {percentage:.1f}%\n• `{curr_mb:.1f}/{tot_mb:.1f} MB`"
+    text = (
+        f"⏳ **{action_name}**\n\n"
+        f"`{bar}` **{percentage:.1f}%**\n"
+        f"⚡ **Size:** `{curr_mb:.1f} MB / {tot_mb:.1f} MB`"
+    )
     try:
         await status_msg.edit_text(text)
     except Exception:
@@ -359,7 +364,7 @@ def extract_and_download_social(url: str, user_id: int):
                             file_path = base + ext
                             break
                 if os.path.exists(file_path):
-                    return file_path, str(info.get('title') or "Video")
+                    return file_path, str(info.get('title') or "Media Video")
     except Exception as e:
         logger.error(f"yt-dlp error: {e}")
 
@@ -380,7 +385,7 @@ async def private_message_handler(client: Client, message: Message):
     # Admin Panel
     if text_str.startswith("/admin") or text_str.startswith("/panel"):
         if user_id != OWNER_ID:
-            await message.reply_text("Access denied. Owner only.")
+            await message.reply_text("⛔ **Access restricted.** Admin only.")
             return
         dash_text, dash_markup = await generate_admin_dashboard()
         await message.reply_text(dash_text, reply_markup=dash_markup)
@@ -389,7 +394,7 @@ async def private_message_handler(client: Client, message: Message):
     # Waiting Session String
     if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_SESSION":
         admin_states.pop(user_id, None)
-        status_msg = await message.reply_text("Validating session string...")
+        status_msg = await message.reply_text("🔄 Verifying session string...")
 
         test_client = Client(f"test_{int(time.time())}", api_id=API_ID, api_hash=API_HASH, session_string=text_str, in_memory=True)
         try:
@@ -401,18 +406,18 @@ async def private_message_handler(client: Client, message: Message):
             success, err_msg = await asyncio.to_thread(sync_add_session, text_str, acc_name)
             if success:
                 asyncio.create_task(init_session_pool())
-                await status_msg.edit_text(f"✅ **Session saved!**\n\n• Account: `{acc_name}`")
+                await status_msg.edit_text(f"✅ **Session saved successfully!**\n\n👤 **Account:** `{acc_name}`")
             else:
-                await status_msg.edit_text(f"❌ Error: `{err_msg}`")
+                await status_msg.edit_text(f"⚠️ **Database Error:** `{err_msg}`")
         except Exception as e:
-            await status_msg.edit_text(f"❌ Invalid session: `{str(e)}`")
+            await status_msg.edit_text(f"❌ **Invalid Session String:**\n`{str(e)}`")
         return
 
     # Login Phone
     if user_id == OWNER_ID and admin_states.get(user_id) == "LOGIN_PHONE":
         admin_states.pop(user_id, None)
         phone_number = text_str.replace(" ", "").strip()
-        status_msg = await message.reply_text("⏳ Sending Telegram login OTP code...")
+        status_msg = await message.reply_text("⏳ Requesting Telegram OTP code...")
 
         temp_client = Client(f"login_{int(time.time())}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
         try:
@@ -425,13 +430,14 @@ async def private_message_handler(client: Client, message: Message):
             }
             admin_states[user_id] = "LOGIN_OTP"
             await status_msg.edit_text(
-                "📩 **Send the Telegram OTP code:**\n\n💡 *Tip:* Separate digits with space (e.g. `1 2 3 4 5`).",
+                "📩 **Enter the OTP code received:**\n\n"
+                "💡 *Tip:* Put a space between digits (e.g. `1 2 3 4 5`).",
                 reply_markup=ForceReply(selective=True)
             )
         except Exception as e:
             if temp_client.is_connected:
                 await temp_client.disconnect()
-            await status_msg.edit_text(f"❌ Failed to send OTP: `{str(e)}`")
+            await status_msg.edit_text(f"❌ **Failed to send OTP:**\n`{str(e)}`")
         return
 
     # Login OTP
@@ -441,11 +447,11 @@ async def private_message_handler(client: Client, message: Message):
 
         if not session_data:
             admin_states.pop(user_id, None)
-            await message.reply_text("❌ Session timed out.")
+            await message.reply_text("⚠️ **Session expired.** Please restart login.")
             return
 
         temp_client = session_data["client"]
-        status_msg = await message.reply_text("⏳ Verifying OTP code...")
+        status_msg = await message.reply_text("⏳ Verifying code...")
 
         try:
             await temp_client.sign_in(session_data["phone"], session_data["phone_code_hash"], otp_code)
@@ -458,16 +464,16 @@ async def private_message_handler(client: Client, message: Message):
 
             await asyncio.to_thread(sync_add_session, session_string, acc_name)
             asyncio.create_task(init_session_pool())
-            await status_msg.edit_text(f"✅ **Account Connected & Saved!**\n\n• Name: `{acc_name}`")
+            await status_msg.edit_text(f"✅ **Account Connected!**\n\n👤 **Name:** `{acc_name}`")
         except SessionPasswordNeeded:
             admin_states[user_id] = "LOGIN_2FA"
-            await status_msg.edit_text("🔐 **Send your 2FA password:**", reply_markup=ForceReply(selective=True))
+            await status_msg.edit_text("🔐 **Two-Step Verification Enabled**\n\nPlease reply with your 2FA password:", reply_markup=ForceReply(selective=True))
         except Exception as e:
             if temp_client.is_connected:
                 await temp_client.disconnect()
             login_clients.pop(user_id, None)
             admin_states.pop(user_id, None)
-            await status_msg.edit_text(f"❌ Login error: `{str(e)}`")
+            await status_msg.edit_text(f"❌ **Login Failed:**\n`{str(e)}`")
         return
 
     # Login 2FA
@@ -477,11 +483,11 @@ async def private_message_handler(client: Client, message: Message):
 
         if not session_data:
             admin_states.pop(user_id, None)
-            await message.reply_text("❌ Session timed out.")
+            await message.reply_text("⚠️ **Session expired.** Please restart login.")
             return
 
         temp_client = session_data["client"]
-        status_msg = await message.reply_text("⏳ Verifying 2FA...")
+        status_msg = await message.reply_text("⏳ Checking password...")
 
         try:
             await temp_client.check_password(password)
@@ -494,29 +500,30 @@ async def private_message_handler(client: Client, message: Message):
 
             await asyncio.to_thread(sync_add_session, session_string, acc_name)
             asyncio.create_task(init_session_pool())
-            await status_msg.edit_text(f"✅ **Account Connected & Saved!**\n\n• Name: `{acc_name}`")
+            await status_msg.edit_text(f"✅ **Account Connected!**\n\n👤 **Name:** `{acc_name}`")
         except Exception as e:
             if temp_client.is_connected:
                 await temp_client.disconnect()
             login_clients.pop(user_id, None)
             admin_states.pop(user_id, None)
-            await status_msg.edit_text(f"❌ Verification failed: `{str(e)}`")
+            await status_msg.edit_text(f"❌ **2FA Verification Failed:**\n`{str(e)}`")
         return
 
     # Start Command
     if text_str.startswith("/start"):
         buttons = [[
-            InlineKeyboardButton("Ping", callback_data="btn_ping"),
-            InlineKeyboardButton("Help", callback_data="btn_help")
+            InlineKeyboardButton("⚡ Ping", callback_data="btn_ping"),
+            InlineKeyboardButton("📖 Help", callback_data="btn_help")
         ]]
         if user_id == OWNER_ID:
-            buttons.append([InlineKeyboardButton("Admin Panel", callback_data="btn_admin_shortcut")])
+            buttons.append([InlineKeyboardButton("⚙️ Admin Dashboard", callback_data="btn_admin_shortcut")])
 
         text = (
-            f"**Hello {user.first_name},**\n\n"
-            "Send any supported link to download instantly:\n"
-            "• **Supported:** Telegram, YouTube, TikTok, Instagram, Facebook\n"
-            "• Telegram downloaded media auto-deletes in 2 minutes."
+            f"👋 **Hello {user.first_name}!**\n\n"
+            "Send any supported link to download media directly:\n\n"
+            "• **Telegram:** Public / Restricted post links\n"
+            "• **Socials:** YouTube, TikTok, Instagram, Facebook\n\n"
+            "⏱️ *Telegram media files auto-delete in 2 minutes.*"
         )
         await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
@@ -529,14 +536,14 @@ async def private_message_handler(client: Client, message: Message):
         tg_url = text_str.strip()
         asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, tg_url, "telegram"))
 
-        status = await message.reply_text("⚡ Fetching Telegram message...")
+        status = await message.reply_text("⚡ **Connecting to Telegram...**")
 
         try:
             if not loaded_user_clients:
                 await init_session_pool()
 
             if not loaded_user_clients:
-                await status.edit_text("❌ No user session active. Add one via /admin.")
+                await status.edit_text("❌ **No active sessions found.** Please add one in `/admin`.")
                 return
 
             if private_match:
@@ -560,34 +567,35 @@ async def private_message_handler(client: Client, message: Message):
                     continue
 
             if not target_msg or target_msg.empty:
-                await status.edit_text("❌ Message not found or sessions do not have access to this chat.")
+                await status.edit_text("❌ **Post unavailable.** Ensure the connected account has access to this chat/channel.")
                 return
 
             if not (target_msg.media or target_msg.video or target_msg.photo or target_msg.document or target_msg.audio):
                 if target_msg.text:
                     await status.edit_text(f"📝 **Text Content:**\n\n{target_msg.text}")
                 else:
-                    await status.edit_text("❌ No downloadable media found.")
+                    await status.edit_text("⚠️ **No downloadable media found in this message.**")
                 return
 
-            await status.edit_text("📥 Downloading media...")
+            await status.edit_text("📥 **Fetching media file...**")
             download_path = await working_client.download_media(
                 target_msg,
                 progress=progress_bar,
-                progress_args=(status, "Downloading from Telegram...", user_id)
+                progress_args=(status, "Downloading from Telegram", user_id)
             )
 
             if not download_path or not os.path.exists(download_path):
-                await status.edit_text("❌ Failed to download media.")
+                await status.edit_text("❌ **Failed to download media.**")
                 return
 
-            await status.edit_text("📤 Uploading media...")
+            await status.edit_text("📤 **Uploading to Telegram...**")
 
             delete_markup = InlineKeyboardMarkup([[
                 InlineKeyboardButton("🗑️ Delete Now", callback_data="btn_delete_this")
             ]])
 
-            caption = (target_msg.caption or "") + "\n\n⚠️ *This message will auto-delete in 2 minutes.*"
+            caption_header = f"**{target_msg.caption}**\n\n" if target_msg.caption else ""
+            caption = f"{caption_header}⏱️ *Auto-deletes in 2 minutes.*"
             sent_msg = None
 
             if target_msg.video:
@@ -597,7 +605,7 @@ async def private_message_handler(client: Client, message: Message):
                     supports_streaming=True,
                     reply_markup=delete_markup,
                     progress=progress_bar,
-                    progress_args=(status, "Uploading Video...", user_id)
+                    progress_args=(status, "Uploading Video", user_id)
                 )
                 asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 1))
                 asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 0, 1))
@@ -607,7 +615,7 @@ async def private_message_handler(client: Client, message: Message):
                     caption=caption,
                     reply_markup=delete_markup,
                     progress=progress_bar,
-                    progress_args=(status, "Uploading Photo...", user_id)
+                    progress_args=(status, "Uploading Photo", user_id)
                 )
                 asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 1, 0))
                 asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 1, 0))
@@ -617,7 +625,7 @@ async def private_message_handler(client: Client, message: Message):
                     caption=caption,
                     reply_markup=delete_markup,
                     progress=progress_bar,
-                    progress_args=(status, "Uploading File...", user_id)
+                    progress_args=(status, "Uploading Document", user_id)
                 )
                 asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 0))
 
@@ -631,14 +639,14 @@ async def private_message_handler(client: Client, message: Message):
 
         except Exception as e:
             logger.error(f"Telegram Download Error: {e}")
-            await status.edit_text(f"❌ Error: `{str(e)}`")
+            await status.edit_text(f"❌ **Error:** `{str(e)}`")
         return
 
     # ----------------- SOCIAL MEDIA DOWNLOADER ----------------- #
     url_pattern = re.search(r'(https?://[^\s]+)', text_str)
     if url_pattern:
         url = url_pattern.group(0).strip()
-        status = await message.reply_text("⚡ Processing social media video...")
+        status = await message.reply_text("⚡ **Analyzing video link...**")
 
         platform = "Others"
         if "youtu" in url:
@@ -655,19 +663,19 @@ async def private_message_handler(client: Client, message: Message):
         file_path, title = await asyncio.to_thread(extract_and_download_social, url, user_id)
 
         if not file_path or not os.path.exists(file_path):
-            await status.edit_text("❌ Failed to download video. Link may be private or unsupported.")
+            await status.edit_text("❌ **Download Failed.** Link might be private, geo-blocked, or unsupported.")
             return
 
         try:
-            await status.edit_text("📤 Uploading...")
-            caption = f"🎬 **{title}**\n\n📌 *Platform: {platform}*"
+            await status.edit_text("📤 **Uploading video...**")
+            caption = f"🎬 **{title}**\n\n📌 **Source:** `{platform}`"
             
             await message.reply_video(
                 video=file_path,
                 caption=caption,
                 supports_streaming=True,
                 progress=progress_bar,
-                progress_args=(status, "Uploading Social Video...", user_id)
+                progress_args=(status, f"Uploading ({platform})", user_id)
             )
 
             await status.delete()
@@ -675,7 +683,7 @@ async def private_message_handler(client: Client, message: Message):
             asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, platform, 1))
         except Exception as e:
             logger.error(f"Social Upload Error: {e}")
-            await status.edit_text(f"❌ Upload failed: `{str(e)}`")
+            await status.edit_text(f"❌ **Upload Failed:** `{str(e)}`")
         finally:
             if file_path and os.path.exists(file_path):
                 try:
@@ -694,35 +702,47 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
         try:
             await query.message.delete()
         except Exception:
-            await query.answer("Cannot delete this message.", show_alert=False)
+            await query.answer("Couldn't delete message.", show_alert=False)
         return
 
     if data == "btn_ping":
-        await query.answer("🏓 Pong! Bot is online & running smoothly.", show_alert=True)
+        await query.answer("⚡ Bot is running smoothly!", show_alert=True)
         return
 
     if data == "btn_help":
         help_text = (
-            "📖 **How to Use:**\n\n"
-            "1. **Telegram:** Send any private/public channel post link (`t.me/c/...` or `t.me/...`). (Auto-deletes in 2 minutes)\n"
-            "2. **Social Media:** Send links from YouTube, TikTok, Instagram, Facebook. (Stays permanently)\n"
-            "3. **Admin:** Use /admin to manage userbot sessions."
+            "📖 **User Guide**\n"
+            "────────────────────\n"
+            "• **Telegram:** Send any post link (`t.me/c/...` or `t.me/...`). Files auto-delete in 2 minutes.\n"
+            "• **Social Media:** Send links from YouTube, TikTok, Instagram, or Facebook.\n"
+            "• **Admin:** Manage account sessions with `/admin`."
         )
-        await query.message.edit_text(help_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_start_back")]]))
+        await query.message.edit_text(
+            help_text,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_start_back")]])
+        )
         return
 
     if data == "btn_start_back":
         buttons = [[
-            InlineKeyboardButton("Ping", callback_data="btn_ping"),
-            InlineKeyboardButton("Help", callback_data="btn_help")
+            InlineKeyboardButton("⚡ Ping", callback_data="btn_ping"),
+            InlineKeyboardButton("📖 Help", callback_data="btn_help")
         ]]
         if user_id == OWNER_ID:
-            buttons.append([InlineKeyboardButton("Admin Panel", callback_data="btn_admin_shortcut")])
-        await query.message.edit_text("Send any supported link to download instantly.", reply_markup=InlineKeyboardMarkup(buttons))
+            buttons.append([InlineKeyboardButton("⚙️ Admin Dashboard", callback_data="btn_admin_shortcut")])
+        
+        text = (
+            f"👋 **Hello {query.from_user.first_name}!**\n\n"
+            "Send any supported link to download media directly:\n\n"
+            "• **Telegram:** Public / Restricted post links\n"
+            "• **Socials:** YouTube, TikTok, Instagram, Facebook\n\n"
+            "⏱️ *Telegram media files auto-delete in 2 minutes.*"
+        )
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
 
     if user_id != OWNER_ID:
-        await query.answer("Access Denied.", show_alert=True)
+        await query.answer("⛔ Access Denied.", show_alert=True)
         return
 
     if data in ["btn_admin_shortcut", "btn_refresh_admin"]:
@@ -753,41 +773,41 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
         if not sessions:
             await query.answer("No active sessions found.", show_alert=True)
             return
-        text = "📁 **Active Sessions:**\n\n"
+        text = "📁 **Active Sessions**\n────────────────────\n"
         for idx, s in enumerate(sessions, 1):
-            text += f"{idx}. `{s['account_name']}` (ID: `{s['doc_id'][:6]}...`)\n"
+            text += f"`{idx}.` **{s['account_name']}**\n    ID: `{s['doc_id'][:8]}`\n"
         await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_refresh_admin")]]))
         return
 
     if data == "btn_del_menu":
         sessions = await asyncio.to_thread(sync_get_all_sessions)
         if not sessions:
-            await query.answer("No sessions to delete.", show_alert=True)
+            await query.answer("No sessions available to delete.", show_alert=True)
             return
         buttons = []
         for s in sessions:
             buttons.append([InlineKeyboardButton(f"❌ {s['account_name']}", callback_data=f"del_{s['doc_id']}")])
         buttons.append([InlineKeyboardButton("🔙 Back", callback_data="btn_refresh_admin")])
-        await query.message.edit_text("Select session to remove:", reply_markup=InlineKeyboardMarkup(buttons))
+        await query.message.edit_text("Select an account session to remove:", reply_markup=InlineKeyboardMarkup(buttons))
         return
 
     if data.startswith("del_"):
         doc_id = data.split("_", 1)[1]
         await asyncio.to_thread(sync_delete_session, doc_id)
         asyncio.create_task(init_session_pool())
-        await query.answer("Session deleted!", show_alert=True)
+        await query.answer("Session removed successfully.", show_alert=True)
         text, markup = await generate_admin_dashboard()
         await query.message.edit_text(text, reply_markup=markup)
         return
 
     if data == "btn_view_urls":
-        urls = await asyncio.to_thread(sync_get_active_urls, 10)
+        urls = await asyncio.to_thread(sync_get_active_urls, 8)
         if not urls:
-            await query.answer("No recent URLs found.", show_alert=True)
+            await query.answer("No recent requests logged.", show_alert=True)
             return
-        text = "🔗 **Recent Submitted URLs:**\n\n"
+        text = "🔗 **Recent Activity**\n────────────────────\n"
         for u in urls:
-            text += f"• **{u.get('platform', 'Link')}:** `{u.get('url')}`\n  └ User: `{u.get('user_name')}`\n"
+            text += f"• **{u.get('platform', 'Link')}:** `{u.get('url')[:38]}...`\n  └ User: `{u.get('user_name')}`\n"
         await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_refresh_admin")]]))
         return
 
