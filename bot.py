@@ -4,6 +4,7 @@ import time
 import json
 import asyncio
 import logging
+import hashlib
 from aiohttp import web
 import yt_dlp
 from hydrogram import Client, filters
@@ -71,6 +72,7 @@ admin_states = {}
 login_clients = {}
 progress_status = {}
 loaded_user_clients = []
+url_cache = {}
 
 # ----------------- SESSION POOL MANAGER ----------------- #
 
@@ -184,7 +186,7 @@ def sync_get_active_urls(limit: int = 10):
     except Exception:
         return []
 
-def sync_increment_downloads(platform: str, count: int = 1, photos: int = 0, videos: int = 0):
+def sync_increment_downloads(platform: str, count: int = 1, photos: int = 0, videos: int = 0, audios: int = 0):
     if not db or count <= 0:
         return
     try:
@@ -198,11 +200,13 @@ def sync_increment_downloads(platform: str, count: int = 1, photos: int = 0, vid
                 update_payload["tg_photos"] = firestore.Increment(photos)
             if videos > 0:
                 update_payload["tg_videos"] = firestore.Increment(videos)
+            if audios > 0:
+                update_payload["tg_audios"] = firestore.Increment(audios)
         db.collection("bot_stats").document("global_analytics").set(update_payload, merge=True)
     except Exception:
         pass
 
-def sync_increment_user_downloads(user_id: int, platform: str, count: int = 1, photos: int = 0, videos: int = 0):
+def sync_increment_user_downloads(user_id: int, platform: str, count: int = 1, photos: int = 0, videos: int = 0, audios: int = 0):
     if not db or count <= 0:
         return
     try:
@@ -217,6 +221,8 @@ def sync_increment_user_downloads(user_id: int, platform: str, count: int = 1, p
                 update_data["tg_photos"] = firestore.Increment(photos)
             if videos > 0:
                 update_data["tg_videos"] = firestore.Increment(videos)
+            if audios > 0:
+                update_data["tg_audios"] = firestore.Increment(audios)
         else:
             update_data["social_downloads"] = firestore.Increment(count)
         db.collection("bot_users").document(str(user_id)).set(update_data, merge=True)
@@ -225,11 +231,11 @@ def sync_increment_user_downloads(user_id: int, platform: str, count: int = 1, p
 
 def sync_get_stats():
     if not db:
-        return 0, {}, 0, 0
+        return 0, {}, 0, 0, 0
     try:
         stat_doc = db.collection("bot_stats").document("global_analytics").get()
         total_dl = 0
-        tg_photos, tg_videos = 0, 0
+        tg_photos, tg_videos, tg_audios = 0, 0, 0
         platform_counts = {"Telegram": 0, "YouTube": 0, "TikTok": 0, "Instagram": 0, "Facebook": 0, "Others": 0}
 
         if stat_doc.exists:
@@ -237,6 +243,7 @@ def sync_get_stats():
             total_dl = data.get("total_downloads", 0)
             tg_photos = data.get("tg_photos", 0)
             tg_videos = data.get("tg_videos", 0)
+            tg_audios = data.get("tg_audios", 0)
             platform_counts = {
                 "Telegram": data.get("count_telegram", 0),
                 "YouTube": data.get("count_youtube", 0),
@@ -245,12 +252,12 @@ def sync_get_stats():
                 "Facebook": data.get("count_facebook", 0),
                 "Others": data.get("count_others", 0)
             }
-        return total_dl, platform_counts, tg_photos, tg_videos
+        return total_dl, platform_counts, tg_photos, tg_videos, tg_audios
     except Exception:
-        return 0, {}, 0, 0
+        return 0, {}, 0, 0, 0
 
 async def generate_admin_dashboard():
-    total_dl, platforms, tg_photos, tg_videos = await asyncio.to_thread(sync_get_stats)
+    total_dl, platforms, tg_photos, tg_videos, tg_audios = await asyncio.to_thread(sync_get_stats)
     all_sess = await asyncio.to_thread(sync_get_all_sessions)
     db_status = "Online 🟢" if db else "Offline 🔴"
 
@@ -262,7 +269,7 @@ async def generate_admin_dashboard():
         f"• **Total Downloads:** `{total_dl:,}`\n\n"
         "📊 **Platform Insights**\n"
         f"• **Telegram:** `{platforms.get('Telegram', 0):,}`\n"
-        f"  └ 🖼️ `{tg_photos:,}`  •  🎥 `{tg_videos:,}`\n"
+        f"  └ 🖼️ `{tg_photos:,}` • 🎥 `{tg_videos:,}` • 🎵 `{tg_audios:,}`\n"
         f"• **YouTube:** `{platforms.get('YouTube', 0):,}`\n"
         f"• **TikTok:** `{platforms.get('TikTok', 0):,}`\n"
         f"• **Instagram:** `{platforms.get('Instagram', 0):,}`\n"
@@ -366,7 +373,45 @@ def extract_and_download_social(url: str, user_id: int):
                 if os.path.exists(file_path):
                     return file_path, str(info.get('title') or "Media Video")
     except Exception as e:
-        logger.error(f"yt-dlp error: {e}")
+        logger.error(f"yt-dlp video error: {e}")
+
+    return None, None
+
+def extract_and_download_social_audio(url: str, user_id: int):
+    clean_url = url.strip()
+    timestamp = int(time.time())
+    out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_audio_%(id)s.%(ext)s")
+
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': out_template,
+        'quiet': True,
+        'no_warnings': True,
+        'noplaylist': True,
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+        },
+        'max_filesize': 500 * 1024 * 1024,
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(clean_url, download=True)
+            if info:
+                file_path = ydl.prepare_filename(info)
+                base, _ = os.path.splitext(file_path)
+                mp3_path = base + ".mp3"
+                if os.path.exists(mp3_path):
+                    return mp3_path, str(info.get('title') or "Media Audio")
+                if os.path.exists(file_path):
+                    return file_path, str(info.get('title') or "Media Audio")
+    except Exception as e:
+        logger.error(f"yt-dlp audio error: {e}")
 
     return None, None
 
@@ -520,10 +565,10 @@ async def private_message_handler(client: Client, message: Message):
 
         text = (
             f"👋 **Hello {user.first_name}!**\n\n"
-            "Send any supported link to download media directly:\n\n"
-            "• **Telegram:** Public / Restricted post links\n"
+            "Send any supported link to download video & audio directly:\n\n"
+            "• **Telegram:** Public & Private posts (Photos, Videos, Audios)\n"
             "• **Socials:** YouTube, TikTok, Instagram, Facebook\n\n"
-            "⏱️ *Telegram media files auto-delete in 2 minutes.*"
+            "⏱️ *Telegram downloads auto-delete after 2 minutes.*"
         )
         await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
@@ -567,14 +612,14 @@ async def private_message_handler(client: Client, message: Message):
                     continue
 
             if not target_msg or target_msg.empty:
-                await status.edit_text("❌ **Post unavailable.** Ensure the connected account has access to this chat/channel.")
+                await status.edit_text("❌ **Post unavailable.** Ensure the session account has access to this chat.")
                 return
 
-            if not (target_msg.media or target_msg.video or target_msg.photo or target_msg.document or target_msg.audio):
+            if not (target_msg.media or target_msg.video or target_msg.photo or target_msg.document or target_msg.audio or target_msg.voice):
                 if target_msg.text:
                     await status.edit_text(f"📝 **Text Content:**\n\n{target_msg.text}")
                 else:
-                    await status.edit_text("⚠️ **No downloadable media found in this message.**")
+                    await status.edit_text("⚠️ **No downloadable media found.**")
                 return
 
             await status.edit_text("📥 **Fetching media file...**")
@@ -588,7 +633,7 @@ async def private_message_handler(client: Client, message: Message):
                 await status.edit_text("❌ **Failed to download media.**")
                 return
 
-            await status.edit_text("📤 **Uploading to Telegram...**")
+            await status.edit_text("📤 **Uploading file...**")
 
             delete_markup = InlineKeyboardMarkup([[
                 InlineKeyboardButton("🗑️ Delete Now", callback_data="btn_delete_this")
@@ -607,8 +652,8 @@ async def private_message_handler(client: Client, message: Message):
                     progress=progress_bar,
                     progress_args=(status, "Uploading Video", user_id)
                 )
-                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 1))
-                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 0, 1))
+                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 1, 0))
+                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 0, 1, 0))
             elif target_msg.photo:
                 sent_msg = await message.reply_photo(
                     photo=download_path,
@@ -617,8 +662,28 @@ async def private_message_handler(client: Client, message: Message):
                     progress=progress_bar,
                     progress_args=(status, "Uploading Photo", user_id)
                 )
-                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 1, 0))
-                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 1, 0))
+                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 1, 0, 0))
+                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 1, 0, 0))
+            elif target_msg.audio:
+                sent_msg = await message.reply_audio(
+                    audio=download_path,
+                    caption=caption,
+                    reply_markup=delete_markup,
+                    progress=progress_bar,
+                    progress_args=(status, "Uploading Audio", user_id)
+                )
+                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 0, 1))
+                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 0, 0, 1))
+            elif target_msg.voice:
+                sent_msg = await message.reply_voice(
+                    voice=download_path,
+                    caption=caption,
+                    reply_markup=delete_markup,
+                    progress=progress_bar,
+                    progress_args=(status, "Uploading Voice", user_id)
+                )
+                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 0, 1))
+                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 0, 0, 1))
             else:
                 sent_msg = await message.reply_document(
                     document=download_path,
@@ -627,7 +692,7 @@ async def private_message_handler(client: Client, message: Message):
                     progress=progress_bar,
                     progress_args=(status, "Uploading Document", user_id)
                 )
-                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 0))
+                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 0, 0))
 
             if sent_msg:
                 asyncio.create_task(auto_delete_messages(message.chat.id, [sent_msg.id, status.id, message.id], delay_seconds=120))
@@ -646,7 +711,7 @@ async def private_message_handler(client: Client, message: Message):
     url_pattern = re.search(r'(https?://[^\s]+)', text_str)
     if url_pattern:
         url = url_pattern.group(0).strip()
-        status = await message.reply_text("⚡ **Analyzing video link...**")
+        status = await message.reply_text("⚡ **Analyzing media link...**")
 
         platform = "Others"
         if "youtu" in url:
@@ -663,17 +728,26 @@ async def private_message_handler(client: Client, message: Message):
         file_path, title = await asyncio.to_thread(extract_and_download_social, url, user_id)
 
         if not file_path or not os.path.exists(file_path):
-            await status.edit_text("❌ **Download Failed.** Link might be private, geo-blocked, or unsupported.")
+            await status.edit_text("❌ **Download Failed.** Link might be private or unsupported.")
             return
 
         try:
             await status.edit_text("📤 **Uploading video...**")
             caption = f"🎬 **{title}**\n\n📌 **Source:** `{platform}`"
             
+            # Create a unique key for audio extraction
+            url_hash = hashlib.md5(url.encode()).hexdigest()[:10]
+            url_cache[url_hash] = url
+
+            social_markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton("🎵 Download MP3 Audio", callback_data=f"getaudio_{url_hash}")
+            ]])
+
             await message.reply_video(
                 video=file_path,
                 caption=caption,
                 supports_streaming=True,
+                reply_markup=social_markup,
                 progress=progress_bar,
                 progress_args=(status, f"Uploading ({platform})", user_id)
             )
@@ -705,6 +779,48 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
             await query.answer("Couldn't delete message.", show_alert=False)
         return
 
+    # Extract MP3 Audio Callback
+    if data.startswith("getaudio_"):
+        url_hash = data.split("_", 1)[1]
+        target_url = url_cache.get(url_hash)
+
+        if not target_url:
+            await query.answer("Link expired. Please send the URL again.", show_alert=True)
+            return
+
+        await query.answer("🎵 Extracting MP3 Audio...", show_alert=False)
+        status = await query.message.reply_text("⚡ **Extracting MP3 audio...**")
+
+        audio_path, title = await asyncio.to_thread(extract_and_download_social_audio, target_url, user_id)
+
+        if not audio_path or not os.path.exists(audio_path):
+            await status.edit_text("❌ **Failed to extract audio.**")
+            return
+
+        try:
+            await status.edit_text("📤 **Uploading audio...**")
+            caption = f"🎵 **{title}**\n\n📌 *Audio Format: MP3 (192kbps)*"
+            
+            await query.message.reply_audio(
+                audio=audio_path,
+                caption=caption,
+                title=title,
+                progress=progress_bar,
+                progress_args=(status, "Uploading Audio", user_id)
+            )
+            await status.delete()
+            asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "Others", 1, 0, 0, 1))
+        except Exception as e:
+            logger.error(f"Audio Upload Error: {e}")
+            await status.edit_text(f"❌ **Upload Failed:** `{str(e)}`")
+        finally:
+            if audio_path and os.path.exists(audio_path):
+                try:
+                    os.remove(audio_path)
+                except Exception:
+                    pass
+        return
+
     if data == "btn_ping":
         await query.answer("⚡ Bot is running smoothly!", show_alert=True)
         return
@@ -713,9 +829,10 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
         help_text = (
             "📖 **User Guide**\n"
             "────────────────────\n"
-            "• **Telegram:** Send any post link (`t.me/c/...` or `t.me/...`). Files auto-delete in 2 minutes.\n"
+            "• **Telegram:** Send post links (`t.me/...`) for Videos, Photos, or Audio files.\n"
             "• **Social Media:** Send links from YouTube, TikTok, Instagram, or Facebook.\n"
-            "• **Admin:** Manage account sessions with `/admin`."
+            "• **Audio Extraction:** Click the **'Download MP3 Audio'** button under any social video.\n"
+            "• **Admin:** Manage accounts and statistics with `/admin`."
         )
         await query.message.edit_text(
             help_text,
@@ -733,10 +850,10 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
         
         text = (
             f"👋 **Hello {query.from_user.first_name}!**\n\n"
-            "Send any supported link to download media directly:\n\n"
-            "• **Telegram:** Public / Restricted post links\n"
+            "Send any supported link to download video & audio directly:\n\n"
+            "• **Telegram:** Public & Private posts (Photos, Videos, Audios)\n"
             "• **Socials:** YouTube, TikTok, Instagram, Facebook\n\n"
-            "⏱️ *Telegram media files auto-delete in 2 minutes.*"
+            "⏱️ *Telegram downloads auto-delete after 2 minutes.*"
         )
         await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
