@@ -73,7 +73,7 @@ admin_states = {}
 login_clients = {}
 progress_status = {}
 loaded_user_clients = []
-url_cache = {}
+video_cache = {}
 
 # ----------------- SESSION POOL MANAGER ----------------- #
 
@@ -298,7 +298,7 @@ async def generate_admin_dashboard():
 # ----------------- UTILITY & DOWNLOADER ----------------- #
 
 def get_aria2_opts():
-    """Returns aria2c config if installed in system"""
+    """Returns aria2c options if installed on server"""
     if shutil.which("aria2c"):
         return {
             'external_downloader': {'default': 'aria2c'},
@@ -349,13 +349,71 @@ async def auto_delete_messages(chat_id: int, message_ids: list, delay_seconds: i
     except Exception:
         pass
 
-def extract_and_download_social(url: str, user_id: int):
+def extract_video_metadata(url: str):
+    """Scans and extracts available video qualities and details"""
+    clean_url = url.strip()
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'noplaylist': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios', 'web']
+            }
+        },
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+        }
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(clean_url, download=False)
+            if not info:
+                return None
+
+            title = str(info.get('title') or "Video")
+            duration_sec = info.get('duration', 0)
+            duration_str = time.strftime('%H:%M:%S', time.gmtime(duration_sec)) if duration_sec else "N/A"
+
+            # Parse distinct video heights
+            formats = info.get('formats', [])
+            raw_heights = set()
+            for f in formats:
+                h = f.get('height')
+                vcodec = f.get('vcodec')
+                if h and vcodec and vcodec != 'none' and h >= 144:
+                    raw_heights.add(int(h))
+
+            sorted_heights = sorted(list(raw_heights), reverse=True)
+            
+            # Filter and deduplicate close resolutions (e.g. 1080, 720, 480, 360, 240)
+            distinct_heights = []
+            for h in sorted_heights:
+                if not any(abs(h - dh) < 25 for dh in distinct_heights):
+                    distinct_heights.append(h)
+
+            return {
+                "title": title,
+                "duration": duration_str,
+                "heights": distinct_heights[:6]  # Top available resolutions
+            }
+    except Exception as e:
+        logger.error(f"Metadata extraction error: {e}")
+        return None
+
+def download_video_with_quality(url: str, user_id: int, height: int = None):
     clean_url = url.strip()
     timestamp = int(time.time())
-    out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_vid_%(id)s.%(ext)s")
+    prefix = f"{user_id}_{timestamp}_vid_"
+    out_template = os.path.join(DOWNLOAD_DIR, f"{prefix}%(id)s.%(ext)s")
+
+    if height:
+        format_str = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best"
+    else:
+        format_str = "bestvideo+bestaudio/best"
 
     ydl_opts = {
-        'format': 'bestvideo+bestaudio/best',
+        'format': format_str,
         'outtmpl': out_template,
         'merge_output_format': 'mp4',
         'quiet': True,
@@ -382,13 +440,12 @@ def extract_and_download_social(url: str, user_id: int):
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(clean_url, download=True)
-            if info:
-                prefix = f"{user_id}_{timestamp}_vid_"
-                for fname in os.listdir(DOWNLOAD_DIR):
-                    if fname.startswith(prefix):
-                        return os.path.join(DOWNLOAD_DIR, fname), str(info.get('title') or "Media Video")
+            title = str(info.get('title') or "Media Video") if info else "Media Video"
+            for fname in os.listdir(DOWNLOAD_DIR):
+                if fname.startswith(prefix):
+                    return os.path.join(DOWNLOAD_DIR, fname), title
     except Exception as e:
-        logger.error(f"yt-dlp video error: {e}")
+        logger.error(f"Quality download error: {e}")
 
     return None, None
 
@@ -398,7 +455,6 @@ def extract_and_download_social_audio(url: str, user_id: int):
     prefix = f"{user_id}_{timestamp}_aud_"
     out_template = os.path.join(DOWNLOAD_DIR, f"{prefix}%(id)s.%(ext)s")
 
-    # 1st try: extract as MP3 via FFmpeg
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': out_template,
@@ -426,7 +482,6 @@ def extract_and_download_social_audio(url: str, user_id: int):
             info = ydl.extract_info(clean_url, download=True)
             title = str(info.get('title') or "Media Audio") if info else "Media Audio"
 
-            # Check for generated MP3 or any matched file
             for fname in os.listdir(DOWNLOAD_DIR):
                 if fname.startswith(prefix) and fname.endswith(".mp3"):
                     return os.path.join(DOWNLOAD_DIR, fname), title
@@ -435,9 +490,9 @@ def extract_and_download_social_audio(url: str, user_id: int):
                 if fname.startswith(prefix):
                     return os.path.join(DOWNLOAD_DIR, fname), title
     except Exception as e:
-        logger.warning(f"yt-dlp audio primary extraction error: {e}. Trying fallback...")
+        logger.warning(f"Primary audio extraction error: {e}")
 
-    # 2nd try (Fallback): direct audio download without postprocessor if FFmpeg fails
+    # Fallback without FFmpeg conversion
     try:
         ydl_opts_fallback = {
             'format': 'bestaudio/best',
@@ -457,7 +512,7 @@ def extract_and_download_social_audio(url: str, user_id: int):
                 if fname.startswith(prefix):
                     return os.path.join(DOWNLOAD_DIR, fname), title
     except Exception as e:
-        logger.error(f"yt-dlp audio fallback error: {e}")
+        logger.error(f"Fallback audio download error: {e}")
 
     return None, None
 
@@ -611,10 +666,10 @@ async def private_message_handler(client: Client, message: Message):
 
         text = (
             f"👋 **Hello {user.first_name}!**\n\n"
-            "Send any supported link to download video & audio directly:\n\n"
-            "• **Telegram:** Public & Private posts (Photos, Videos, Audios)\n"
-            "• **Socials:** YouTube, TikTok, Instagram, Facebook\n\n"
-            "⏱️ *Telegram downloads auto-delete after 2 minutes.*"
+            "Send any supported link to download video & audio with custom quality:\n\n"
+            "• **YouTube:** Choose from available qualities (1080p, 720p, 480p, 360p, MP3)\n"
+            "• **Socials:** TikTok, Instagram, Facebook\n"
+            "• **Telegram:** Public & Restricted posts (Auto-deletes in 2 min)"
         )
         await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
@@ -753,11 +808,11 @@ async def private_message_handler(client: Client, message: Message):
             await status.edit_text(f"❌ **Error:** `{str(e)}`")
         return
 
-    # ----------------- SOCIAL MEDIA DOWNLOADER ----------------- #
+    # ----------------- SOCIAL MEDIA DOWNLOADER WITH QUALITY PICKER ----------------- #
     url_pattern = re.search(r'(https?://[^\s]+)', text_str)
     if url_pattern:
         url = url_pattern.group(0).strip()
-        status = await message.reply_text("⚡ **Analyzing media link...**")
+        status = await message.reply_text("⚡ **Analyzing link & available formats...**")
 
         platform = "Others"
         if "youtu" in url:
@@ -771,45 +826,51 @@ async def private_message_handler(client: Client, message: Message):
 
         asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, url, platform))
 
-        file_path, title = await asyncio.to_thread(extract_and_download_social, url, user_id)
-
-        if not file_path or not os.path.exists(file_path):
-            await status.edit_text("❌ **Download Failed.** Link might be private or unsupported.")
+        # Extract available metadata & resolutions
+        meta = await asyncio.to_thread(extract_video_metadata, url)
+        if not meta:
+            await status.edit_text("❌ **Failed to fetch video.** Link may be private or unsupported.")
             return
 
-        try:
-            await status.edit_text("📤 **Uploading video...**")
-            caption = f"🎬 **{title}**\n\n📌 **Source:** `{platform}`"
-            
-            # Map clean token to target URL for audio extraction button
-            url_hash = hashlib.md5(f"{url}_{user_id}_{time.time()}".encode()).hexdigest()[:12]
-            url_cache[url_hash] = url
+        title = meta.get("title", "Video")
+        duration = meta.get("duration", "N/A")
+        heights = meta.get("heights", [])
 
-            social_markup = InlineKeyboardMarkup([[
-                InlineKeyboardButton("🎵 Download MP3 Audio", callback_data=f"getaudio_{url_hash}")
-            ]])
+        # Store cache token
+        url_hash = hashlib.md5(f"{url}_{user_id}_{time.time()}".encode()).hexdigest()[:12]
+        video_cache[url_hash] = {
+            "url": url,
+            "title": title,
+            "platform": platform
+        }
 
-            await message.reply_video(
-                video=file_path,
-                caption=caption,
-                supports_streaming=True,
-                reply_markup=social_markup,
-                progress=progress_bar,
-                progress_args=(status, f"Uploading ({platform})", user_id)
-            )
+        # Build dynamic inline buttons according to available formats
+        buttons = []
+        row = []
+        if heights:
+            for h in heights:
+                row.append(InlineKeyboardButton(f"🎬 {h}p", callback_data=f"dl_res_{url_hash}_{h}"))
+                if len(row) == 2:
+                    buttons.append(row)
+                    row = []
+            if row:
+                buttons.append(row)
+        else:
+            # Fallback if no distinct height list is extracted
+            buttons.append([InlineKeyboardButton("🎬 Best Video Quality", callback_data=f"dl_res_{url_hash}_best")])
 
-            await status.delete()
-            asyncio.create_task(asyncio.to_thread(sync_increment_downloads, platform, 1))
-            asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, platform, 1))
-        except Exception as e:
-            logger.error(f"Social Upload Error: {e}")
-            await status.edit_text(f"❌ **Upload Failed:** `{str(e)}`")
-        finally:
-            if file_path and os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                except Exception:
-                    pass
+        # Audio + Cancel button
+        buttons.append([InlineKeyboardButton("🎵 Download MP3 Audio", callback_data=f"dl_aud_{url_hash}")])
+        buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="btn_delete_this")])
+
+        caption_text = (
+            f"🎬 **{title}**\n\n"
+            f"⏱️ **Duration:** `{duration}`\n"
+            f"📌 **Source:** `{platform}`\n\n"
+            "👇 **Select your desired download quality:**"
+        )
+        await status.edit_text(caption_text, reply_markup=InlineKeyboardMarkup(buttons))
+        return
 
 # ----------------- CALLBACK QUERY HANDLER ----------------- #
 
@@ -825,37 +886,91 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
             await query.answer("Couldn't delete message.", show_alert=False)
         return
 
-    # Extract MP3 Audio Callback
-    if data.startswith("getaudio_"):
-        url_hash = data.split("_", 1)[1]
-        target_url = url_cache.get(url_hash)
+    # Handle Video Quality Selection
+    if data.startswith("dl_res_"):
+        parts = data.split("_")
+        url_hash = parts[2]
+        res_tag = parts[3]
 
-        if not target_url:
-            await query.answer("⚠️ Link reference expired. Please send the link again.", show_alert=True)
+        item = video_cache.get(url_hash)
+        if not item:
+            await query.answer("⚠️ Link expired. Please send the URL again.", show_alert=True)
             return
 
-        await query.answer("🎵 Extracting audio...", show_alert=False)
-        status = await query.message.reply_text("⚡ **Extracting audio stream...**")
+        target_url = item["url"]
+        title = item["title"]
+        platform = item["platform"]
+        height_val = int(res_tag) if res_tag.isdigit() else None
 
-        audio_path, title = await asyncio.to_thread(extract_and_download_social_audio, target_url, user_id)
+        await query.answer(f"⏳ Downloading video in {res_tag}p...", show_alert=False)
+        status = await query.message.reply_text(f"⚡ **Downloading video ({res_tag}p)...**")
+
+        file_path, fetched_title = await asyncio.to_thread(download_video_with_quality, target_url, user_id, height_val)
+
+        if not file_path or not os.path.exists(file_path):
+            await status.edit_text("❌ **Download Failed.** The requested quality stream could not be loaded.")
+            return
+
+        try:
+            await status.edit_text("📤 **Uploading video...**")
+            caption = f"🎬 **{fetched_title or title}**\n\n📌 **Quality:** `{res_tag}p` | **Source:** `{platform}`"
+
+            await query.message.reply_video(
+                video=file_path,
+                caption=caption,
+                supports_streaming=True,
+                progress=progress_bar,
+                progress_args=(status, f"Uploading ({res_tag}p)", user_id)
+            )
+            await status.delete()
+            asyncio.create_task(asyncio.to_thread(sync_increment_downloads, platform, 1, 0, 1, 0))
+            asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, platform, 1, 0, 1, 0))
+        except Exception as e:
+            logger.error(f"Video Quality Upload Error: {e}")
+            await status.edit_text(f"❌ **Upload Failed:** `{str(e)}`")
+        finally:
+            if file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+        return
+
+    # Handle MP3 Audio Selection
+    if data.startswith("dl_aud_"):
+        url_hash = data.split("_", 2)[2]
+        item = video_cache.get(url_hash)
+
+        if not item:
+            await query.answer("⚠️ Link expired. Please send the URL again.", show_alert=True)
+            return
+
+        target_url = item["url"]
+        title = item["title"]
+
+        await query.answer("🎵 Extracting MP3 Audio...", show_alert=False)
+        status = await query.message.reply_text("⚡ **Extracting MP3 audio stream...**")
+
+        audio_path, fetched_title = await asyncio.to_thread(extract_and_download_social_audio, target_url, user_id)
 
         if not audio_path or not os.path.exists(audio_path):
-            await status.edit_text("❌ **Failed to extract audio.** The media stream may be DRM-protected.")
+            await status.edit_text("❌ **Failed to extract audio.**")
             return
 
         try:
             await status.edit_text("📤 **Uploading audio file...**")
-            caption = f"🎵 **{title}**\n\n📌 *Audio Quality: High*"
-            
+            caption = f"🎵 **{fetched_title or title}**\n\n📌 **Format:** `MP3 (192kbps)`"
+
             await query.message.reply_audio(
                 audio=audio_path,
                 caption=caption,
-                title=title,
+                title=fetched_title or title,
                 progress=progress_bar,
                 progress_args=(status, "Uploading Audio", user_id)
             )
             await status.delete()
             asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "Others", 1, 0, 0, 1))
+            asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "Others", 1, 0, 0, 1))
         except Exception as e:
             logger.error(f"Audio Upload Error: {e}")
             await status.edit_text(f"❌ **Upload Failed:** `{str(e)}`")
@@ -875,10 +990,9 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
         help_text = (
             "📖 **User Guide**\n"
             "────────────────────\n"
+            "• **YouTube & Social Links:** Send any video link to see available resolution buttons (1080p, 720p, 480p, etc.) or extract MP3.\n"
             "• **Telegram:** Send post links (`t.me/...`) for Videos, Photos, or Audio files.\n"
-            "• **Social Media:** Send links from YouTube, TikTok, Instagram, or Facebook.\n"
-            "• **Audio Extraction:** Click the **'Download MP3 Audio'** button under any social video.\n"
-            "• **Admin:** Manage accounts and statistics with `/admin`."
+            "• **Admin:** Manage account sessions and analytics with `/admin`."
         )
         await query.message.edit_text(
             help_text,
@@ -896,10 +1010,10 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
         
         text = (
             f"👋 **Hello {query.from_user.first_name}!**\n\n"
-            "Send any supported link to download video & audio directly:\n\n"
-            "• **Telegram:** Public & Private posts (Photos, Videos, Audios)\n"
-            "• **Socials:** YouTube, TikTok, Instagram, Facebook\n\n"
-            "⏱️ *Telegram downloads auto-delete after 2 minutes.*"
+            "Send any supported link to download video & audio with custom quality:\n\n"
+            "• **YouTube:** Choose from available qualities (1080p, 720p, 480p, 360p, MP3)\n"
+            "• **Socials:** TikTok, Instagram, Facebook\n"
+            "• **Telegram:** Public & Restricted posts (Auto-deletes in 2 min)"
         )
         await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
