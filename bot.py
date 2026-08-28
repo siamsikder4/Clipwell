@@ -313,6 +313,12 @@ def get_aria2_opts():
         }
     return {}
 
+def get_yt_cookies():
+    cookie_path = "cookies.txt"
+    if os.path.exists(cookie_path):
+        return {'cookiefile': cookie_path}
+    return {}
+
 async def progress_bar(current, total, status_msg, action_name, user_id):
     if not total or total <= 0:
         return
@@ -349,7 +355,6 @@ async def auto_delete_messages(chat_id: int, message_ids: list, delay_seconds: i
         pass
 
 def sanitize_youtube_url(url: str) -> str:
-    """Strip tracking query parameters like ?si=..."""
     match = re.search(r'(?:v=|\/|youtu\.be\/)([0-9A-Za-z_-]{11})', url)
     if match:
         return f"https://www.youtube.com/watch?v={match.group(1)}"
@@ -370,6 +375,8 @@ def extract_youtube_metadata(url: str):
             'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15'
         }
     }
+    ydl_opts.update(get_yt_cookies())
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(clean_url, download=False)
@@ -440,6 +447,7 @@ def download_youtube_with_quality(url: str, user_id: int, height: int = None):
         'max_filesize': 1950 * 1024 * 1024,
     }
     
+    ydl_opts.update(get_yt_cookies())
     ydl_opts.update(get_aria2_opts())
 
     try:
@@ -519,6 +527,7 @@ def extract_and_download_social_audio(url: str, user_id: int):
         },
         'max_filesize': 500 * 1024 * 1024,
     }
+    ydl_opts.update(get_yt_cookies())
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -543,6 +552,7 @@ def extract_and_download_social_audio(url: str, user_id: int):
             'no_warnings': True,
             'noplaylist': True,
         }
+        ydl_opts_fallback.update(get_yt_cookies())
         with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
             info = ydl.extract_info(clean_url, download=True)
             title = str(info.get('title') or "Audio") if info else "Audio"
@@ -706,7 +716,7 @@ async def private_message_handler(client: Client, message: Message):
         text = (
             f"👋 **Hello {user.first_name}!**\n\n"
             "Send any supported link to download video & audio directly:\n\n"
-            "• **YouTube:** Choose from available qualities (1080p, 720p, 480p, 360p & Audio)\n"
+            "• **YouTube:** Choose quality (1080p, 720p, 480p, 360p & Audio)\n"
             "• **Socials:** TikTok, Instagram, Facebook (Direct High Quality)\n"
             "• **Telegram:** Public & Restricted posts (Auto-deletes in 2 min)"
         )
