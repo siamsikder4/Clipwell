@@ -71,7 +71,7 @@ login_clients = {}
 progress_status = {}
 loaded_user_clients = []
 
-# ----------------- SESSION POOL MANAGER (SUPER FAST) ----------------- #
+# ----------------- SESSION POOL MANAGER ----------------- #
 
 async def init_session_pool():
     global loaded_user_clients
@@ -305,18 +305,13 @@ async def progress_bar(current, total, status_msg, action_name, user_id):
     except Exception:
         pass
 
-async def auto_delete_messages(chat_id: int, message_ids: list, delay_seconds: int = 300):
+async def auto_delete_messages(chat_id: int, message_ids: list, delay_seconds: int = 120):
+    """Auto deletes telegram downloaded messages after 2 minutes (120s)"""
     await asyncio.sleep(delay_seconds)
     try:
         await bot.delete_messages(chat_id=chat_id, message_ids=message_ids)
     except Exception:
         pass
-
-def is_gif_message(msg):
-    return bool(msg and (msg.animation or (msg.document and msg.document.mime_type and "gif" in msg.document.mime_type.lower())))
-
-def has_media(msg):
-    return bool(msg and (msg.video or msg.photo or msg.document or msg.audio or msg.voice or msg.animation or msg.media_group_id))
 
 def extract_and_download_social(url: str, user_id: int):
     clean_url = url.split("?")[0].strip()
@@ -331,8 +326,11 @@ def extract_and_download_social(url: str, user_id: int):
         'no_warnings': True,
         'noplaylist': True,
         'concurrent_fragment_downloads': 4,
+        'postprocessor_args': {
+            'ffmpeg': ['-movflags', '+faststart']  # Fixes "Can't import this element" / stream headers
+        },
         'buffersize': 1024 * 1024 * 16,
-        'max_filesize': 1900 * 1024 * 1024,
+        'max_filesize': 1950 * 1024 * 1024,
     }
 
     try:
@@ -375,7 +373,7 @@ async def private_message_handler(client: Client, message: Message):
         await message.reply_text(dash_text, reply_markup=dash_markup)
         return
 
-    # Admin Login States (OTP / Session Input)
+    # Admin Login States
     if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_SESSION":
         admin_states.pop(user_id, None)
         status_msg = await message.reply_text("Validating session string...")
@@ -504,12 +502,12 @@ async def private_message_handler(client: Client, message: Message):
             f"**Hello {user.first_name},**\n\n"
             "Send any supported link to download instantly:\n"
             "• **Supported:** Telegram, YouTube, TikTok, Instagram, Facebook\n"
-            "• Sent media auto-deletes in 5 minutes."
+            "• Telegram downloaded media auto-deletes in 2 minutes."
         )
         await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
 
-    # ----------------- TELEGRAM POST DOWNLOADER (INSTANT POOL) ----------------- #
+    # ----------------- TELEGRAM POST DOWNLOADER (POOL BASED) ----------------- #
     private_match = re.search(r"t\.me/c/(\d+)/(\d+)", text_str)
     public_match = re.search(r"t\.me/([a-zA-Z0-9_]+)/(\d+)", text_str)
 
@@ -517,7 +515,7 @@ async def private_message_handler(client: Client, message: Message):
         tg_url = text_str.strip()
         asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, tg_url, "telegram"))
 
-        status = await message.reply_text("⚡ Fetching...")
+        status = await message.reply_text("⚡ Fetching Telegram message...")
 
         try:
             if not loaded_user_clients:
@@ -539,268 +537,7 @@ async def private_message_handler(client: Client, message: Message):
 
             for _, _, u_client in loaded_user_clients:
                 try:
-                    msg = await asyncio.wait_for(u_client.get_messages(chat_id, msg_id), timeout=3)
-                    if has_media(msg):
+                    msg = await asyncio.wait_for(u_client.get_messages(chat_id, msg_id), timeout=6)
+                    if msg and not msg.empty:
                         target_msg = msg
-                        working_client = u_client
-                        break
-                except Exception:
-                    continue
-
-            if not target_msg or not working_client:
-                await status.edit_text("❌ Media not found or account hasn't joined this channel.")
-                return
-
-            # Handle Album
-            if target_msg.media_group_id:
-                group_messages = await asyncio.wait_for(working_client.get_media_group(target_msg.chat.id, target_msg.id), timeout=5)
-                downloaded_files, media_list, gif_files = [], [], []
-                photos_count, videos_count = 0, 0
-
-                for idx, msg in enumerate(group_messages):
-                    if has_media(msg):
-                        file_path = await working_client.download_media(
-                            msg,
-                            progress=progress_bar,
-                            progress_args=(status, f"Downloading ({idx+1}/{len(group_messages)})", user_id)
-                        )
-                        if file_path:
-                            downloaded_files.append(file_path)
-                            cap = msg.caption.strip() if msg.caption else ""
-                            if is_gif_message(msg):
-                                gif_files.append((file_path, cap))
-                                videos_count += 1
-                            elif msg.video:
-                                media_list.append(InputMediaVideo(file_path, caption=cap))
-                                videos_count += 1
-                            elif msg.photo:
-                                media_list.append(InputMediaPhoto(file_path, caption=cap))
-                                photos_count += 1
-
-                sent_msgs = []
-                if media_list:
-                    sent_msgs = await client.send_media_group(chat_id=message.chat.id, media=media_list)
-                for gpath, gcap in gif_files:
-                    gmsg = await client.send_animation(chat_id=message.chat.id, animation=gpath, caption=gcap)
-                    sent_msgs.append(gmsg)
-
-                for path in downloaded_files:
-                    if os.path.exists(path):
-                        os.remove(path)
-
-                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", len(downloaded_files), photos_count, videos_count))
-                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", len(downloaded_files), photos_count, videos_count))
-
-                await status.delete()
-                del_ids = [m.id for m in sent_msgs]
-                asyncio.create_task(auto_delete_messages(message.chat.id, del_ids, 300))
-
-            # Handle Single File
-            else:
-                is_gif = is_gif_message(target_msg)
-                caption = target_msg.caption.strip() if target_msg.caption else ""
-                media_type = "GIF" if is_gif else ("Video" if target_msg.video else ("Photo" if target_msg.photo else "Document"))
-
-                file_path = await working_client.download_media(
-                    target_msg,
-                    progress=progress_bar,
-                    progress_args=(status, f"Downloading {media_type}", user_id)
-                )
-
-                if not file_path or not os.path.exists(file_path):
-                    await status.edit_text("❌ Failed to download media.")
-                    return
-
-                sent_msg = None
-                photos_count = 1 if target_msg.photo else 0
-                videos_count = 1 if (target_msg.video or is_gif) else 0
-
-                if is_gif:
-                    sent_msg = await client.send_animation(chat_id=message.chat.id, animation=file_path, caption=caption)
-                elif target_msg.video:
-                    sent_msg = await client.send_video(chat_id=message.chat.id, video=file_path, caption=caption)
-                elif target_msg.photo:
-                    sent_msg = await client.send_photo(chat_id=message.chat.id, photo=file_path, caption=caption)
-                elif target_msg.document:
-                    sent_msg = await client.send_document(chat_id=message.chat.id, document=file_path, caption=caption)
-
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-
-                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, photos_count, videos_count))
-                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, photos_count, videos_count))
-
-                await status.delete()
-                if sent_msg:
-                    asyncio.create_task(auto_delete_messages(message.chat.id, [sent_msg.id], 300))
-
-        except Exception as e:
-            logger.error(f"Telegram Handler Error: {e}")
-            await status.edit_text(f"❌ Error: `{str(e)}`")
-        return
-
-    # ----------------- SOCIAL MEDIA HANDLER ----------------- #
-    social_pattern = r"(https?://(?:[a-zA-Z0-9-_]+\.)*(?:youtube\.com|youtu\.be|instagram\.com|instagr\.am|tiktok\.com|facebook\.com|fb\.watch)/[^\s]+)"
-    social_match = re.search(social_pattern, text_str)
-
-    if social_match:
-        target_url = social_match.group(0)
-        status = await message.reply_text("⚡ Processing...")
-        try:
-            file_path, title = await asyncio.to_thread(extract_and_download_social, target_url, user_id)
-            if not file_path or not os.path.exists(file_path):
-                await status.edit_text("❌ Failed to download.")
-                return
-
-            sent_msg = await client.send_video(
-                chat_id=message.chat.id,
-                video=file_path,
-                caption=f"**{title[:60]}**" if title else ""
-            )
-
-            if os.path.exists(file_path):
-                os.remove(file_path)
-
-            await status.delete()
-            if sent_msg:
-                asyncio.create_task(auto_delete_messages(message.chat.id, [sent_msg.id], 300))
-        except Exception as e:
-            await status.edit_text(f"❌ Error: `{str(e)}`")
-        return
-
-    await message.reply_text("Send a valid Telegram or Social Media link.")
-
-# ----------------- CALLBACK QUERY HANDLER ----------------- #
-
-@bot.on_callback_query()
-async def callback_handler(client: Client, callback_query: CallbackQuery):
-    data = callback_query.data
-    user_id = callback_query.from_user.id
-
-    if data == "btn_ping":
-        start_ping = time.time()
-        msg = await callback_query.message.edit_text("Checking...")
-        latency = (time.time() - start_ping) * 1000
-        await msg.edit_text(
-            f"**Latency:** `{latency:.1f} ms`",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_home")]])
-        )
-        await callback_query.answer()
-        return
-
-    elif data == "btn_help":
-        await callback_query.message.edit_text(
-            "**How to use:**\n\nSend any supported link to download media directly.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="btn_back_home")]])
-        )
-        await callback_query.answer()
-        return
-
-    elif data == "btn_back_home":
-        buttons = [[
-            InlineKeyboardButton("Ping", callback_data="btn_ping"),
-            InlineKeyboardButton("Help", callback_data="btn_help")
-        ]]
-        if user_id == OWNER_ID:
-            buttons.append([InlineKeyboardButton("Admin Panel", callback_data="btn_admin_shortcut")])
-
-        await callback_query.message.edit_text("Send any supported link to download media.", reply_markup=InlineKeyboardMarkup(buttons))
-        await callback_query.answer()
-        return
-
-    if user_id != OWNER_ID:
-        await callback_query.answer("Unauthorized.", show_alert=True)
-        return
-
-    if data in ["btn_admin_shortcut", "btn_back_admin", "btn_refresh_admin"]:
-        dash_text, dash_markup = await generate_admin_dashboard()
-        await callback_query.message.edit_text(dash_text, reply_markup=dash_markup)
-        await callback_query.answer("Refreshed")
-
-    elif data == "btn_login_account":
-        admin_states[user_id] = "LOGIN_PHONE"
-        await callback_query.message.reply(
-            "📱 **Send phone number with country code:**\n\n**Example:** `+8801700000000`",
-            reply_markup=ForceReply(selective=True)
-        )
-        await callback_query.answer()
-
-    elif data == "btn_add_session":
-        admin_states[user_id] = "WAITING_SESSION"
-        await callback_query.message.reply(
-            "Send the Pyrogram `SESSION_STRING` in reply to this message.",
-            reply_markup=ForceReply(selective=True)
-        )
-        await callback_query.answer()
-
-    elif data == "btn_list_sessions":
-        all_sess = await asyncio.to_thread(sync_get_all_sessions)
-        if not all_sess:
-            await callback_query.message.edit_text(
-                "No active sessions found.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_back_admin")]])
-            )
-        else:
-            lines = ["**Active Sessions:**\n"]
-            for idx, s in enumerate(all_sess, 1):
-                lines.append(f"{idx}. `{s['account_name']}`")
-            await callback_query.message.edit_text(
-                "\n".join(lines),
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_back_admin")]])
-            )
-        await callback_query.answer()
-
-    elif data == "btn_del_menu":
-        all_sess = await asyncio.to_thread(sync_get_all_sessions)
-        if not all_sess:
-            await callback_query.answer("No sessions found.", show_alert=True)
-            return
-
-        buttons = [[InlineKeyboardButton(s['account_name'], callback_data=f"del_{s['doc_id']}")] for s in all_sess]
-        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="btn_back_admin")])
-        await callback_query.message.edit_text("Select session to remove:", reply_markup=InlineKeyboardMarkup(buttons))
-        await callback_query.answer()
-
-    elif data.startswith("del_"):
-        doc_id = data.split("del_")[1]
-        await asyncio.to_thread(sync_delete_session, doc_id)
-        asyncio.create_task(init_session_pool())
-        await callback_query.message.edit_text(
-            "✅ Session deleted.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_back_admin")]])
-        )
-        await callback_query.answer()
-
-    elif data == "btn_view_urls":
-        urls = await asyncio.to_thread(sync_get_active_urls, 15)
-        if not urls:
-            await callback_query.message.edit_text(
-                "📭 No recent URLs submitted.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_back_admin")]])
-            )
-        else:
-            lines = ["🔗 **Recent Submitted URLs:**\n"]
-            for idx, item in enumerate(urls, 1):
-                lines.append(f"{idx}. **{item.get('user_name')}:** {item.get('url')}")
-            await callback_query.message.edit_text(
-                "\n".join(lines),
-                disable_web_page_preview=True,
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_back_admin")]])
-            )
-        await callback_query.answer()
-
-# Background Web Server
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", lambda r: web.Response(text="Bot is running."))
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-
-if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.create_task(start_web_server())
-    loop.create_task(init_session_pool())
-    logger.info("Starting bot using native runner...")
-    bot.run()
+  
