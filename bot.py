@@ -8,14 +8,13 @@ from aiohttp import web
 import yt_dlp
 from hydrogram import Client, filters
 from hydrogram.types import (
-    Message, InputMediaVideo, InputMediaPhoto,
-    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ForceReply
+    Message,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
+    ForceReply
 )
-from hydrogram.errors import (
-    SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired, PasswordHashInvalid
-)
-import firebase_admin
-from firebase_admin import credentials, firestore
+from hydrogram.errors import SessionPasswordNeeded
 
 # Auto Setup FFmpeg
 try:
@@ -47,6 +46,8 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 db = None
 if FIREBASE_KEY_RAW:
     try:
+        import firebase_admin
+        from firebase_admin import credentials, firestore
         cred_dict = json.loads(FIREBASE_KEY_RAW)
         cred = credentials.Certificate(cred_dict)
         firebase_admin.initialize_app(cred)
@@ -65,7 +66,7 @@ bot = Client(
     workers=16
 )
 
-# Global States & Pre-warmed Session Cache
+# Global States
 admin_states = {}
 login_clients = {}
 progress_status = {}
@@ -93,7 +94,6 @@ async def init_session_pool():
         except Exception as e:
             logger.warning(f"Failed to start pool client {s['doc_id']}: {e}")
     
-    # Close old clients safely
     for _, _, old_cl in loaded_user_clients:
         try:
             if old_cl.is_connected:
@@ -142,7 +142,7 @@ def sync_delete_session(doc_id: str):
     try:
         db.collection("telegram_sessions").document(doc_id).delete()
         return True
-    except Exception as e:
+    except Exception:
         return False
 
 def sync_track_user(user_id: int, username: str, name: str) -> bool:
@@ -178,6 +178,7 @@ def sync_get_active_urls(limit: int = 15):
     if not db:
         return []
     try:
+        from firebase_admin import firestore
         docs = db.collection("submitted_urls").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(limit).stream()
         return [doc.to_dict() for doc in docs]
     except Exception:
@@ -187,13 +188,16 @@ def sync_increment_downloads(platform: str, count: int = 1, photos: int = 0, vid
     if not db or count <= 0:
         return
     try:
+        from firebase_admin import firestore
         update_payload = {
             "total_downloads": firestore.Increment(count),
             f"count_{platform.lower()}": firestore.Increment(count)
         }
         if platform.lower() == "telegram":
-            if photos > 0: update_payload["tg_photos"] = firestore.Increment(photos)
-            if videos > 0: update_payload["tg_videos"] = firestore.Increment(videos)
+            if photos > 0:
+                update_payload["tg_photos"] = firestore.Increment(photos)
+            if videos > 0:
+                update_payload["tg_videos"] = firestore.Increment(videos)
         db.collection("bot_stats").document("global_analytics").set(update_payload, merge=True)
     except Exception:
         pass
@@ -202,14 +206,17 @@ def sync_increment_user_downloads(user_id: int, platform: str, count: int = 1, p
     if not db or count <= 0:
         return
     try:
+        from firebase_admin import firestore
         update_data = {
             "total_downloads": firestore.Increment(count),
             "last_active": time.time()
         }
         if platform.lower() == "telegram":
             update_data["telegram_downloads"] = firestore.Increment(count)
-            if photos > 0: update_data["tg_photos"] = firestore.Increment(photos)
-            if videos > 0: update_data["tg_videos"] = firestore.Increment(videos)
+            if photos > 0:
+                update_data["tg_photos"] = firestore.Increment(photos)
+            if videos > 0:
+                update_data["tg_videos"] = firestore.Increment(videos)
         else:
             update_data["social_downloads"] = firestore.Increment(count)
         db.collection("bot_users").document(str(user_id)).set(update_data, merge=True)
@@ -279,7 +286,7 @@ async def generate_admin_dashboard():
     ])
     return text, keyboard
 
-# ----------------- UTILITY & ULTRA-FAST DOWNLOADER ----------------- #
+# ----------------- UTILITY & DOWNLOADER ----------------- #
 
 async def progress_bar(current, total, status_msg, action_name, user_id):
     if not total or total <= 0:
@@ -306,7 +313,6 @@ async def progress_bar(current, total, status_msg, action_name, user_id):
         pass
 
 async def auto_delete_messages(chat_id: int, message_ids: list, delay_seconds: int = 120):
-    """Auto deletes telegram downloaded messages after 2 minutes (120s)"""
     await asyncio.sleep(delay_seconds)
     try:
         await bot.delete_messages(chat_id=chat_id, message_ids=message_ids)
@@ -327,7 +333,7 @@ def extract_and_download_social(url: str, user_id: int):
         'noplaylist': True,
         'concurrent_fragment_downloads': 4,
         'postprocessor_args': {
-            'ffmpeg': ['-movflags', '+faststart']  # Fixes "Can't import this element" / stream headers
+            'ffmpeg': ['-movflags', '+faststart']
         },
         'buffersize': 1024 * 1024 * 16,
         'max_filesize': 1950 * 1024 * 1024,
@@ -363,17 +369,16 @@ async def private_message_handler(client: Client, message: Message):
 
     asyncio.create_task(asyncio.to_thread(sync_track_user, user_id, user.username, user.first_name))
 
-    # /admin Dashboard
+    # Admin Panel
     if text_str.startswith("/admin") or text_str.startswith("/panel"):
         if user_id != OWNER_ID:
             await message.reply_text("Access denied. Owner only.")
             return
-
         dash_text, dash_markup = await generate_admin_dashboard()
         await message.reply_text(dash_text, reply_markup=dash_markup)
         return
 
-    # Admin Login States
+    # Waiting Session String
     if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_SESSION":
         admin_states.pop(user_id, None)
         status_msg = await message.reply_text("Validating session string...")
@@ -395,6 +400,7 @@ async def private_message_handler(client: Client, message: Message):
             await status_msg.edit_text(f"❌ Invalid session: `{str(e)}`")
         return
 
+    # Login Phone
     if user_id == OWNER_ID and admin_states.get(user_id) == "LOGIN_PHONE":
         admin_states.pop(user_id, None)
         phone_number = text_str.replace(" ", "").strip()
@@ -420,6 +426,7 @@ async def private_message_handler(client: Client, message: Message):
             await status_msg.edit_text(f"❌ Failed to send OTP: `{str(e)}`")
         return
 
+    # Login OTP
     if user_id == OWNER_ID and admin_states.get(user_id) == "LOGIN_OTP":
         otp_code = text_str.replace(" ", "").replace("-", "").strip()
         session_data = login_clients.get(user_id)
@@ -444,7 +451,6 @@ async def private_message_handler(client: Client, message: Message):
             await asyncio.to_thread(sync_add_session, session_string, acc_name)
             asyncio.create_task(init_session_pool())
             await status_msg.edit_text(f"✅ **Account Connected & Saved!**\n\n• Name: `{acc_name}`")
-
         except SessionPasswordNeeded:
             admin_states[user_id] = "LOGIN_2FA"
             await status_msg.edit_text("🔐 **Send your 2FA password:**", reply_markup=ForceReply(selective=True))
@@ -456,6 +462,7 @@ async def private_message_handler(client: Client, message: Message):
             await status_msg.edit_text(f"❌ Login error: `{str(e)}`")
         return
 
+    # Login 2FA
     if user_id == OWNER_ID and admin_states.get(user_id) == "LOGIN_2FA":
         password = text_str.strip()
         session_data = login_clients.get(user_id)
@@ -480,7 +487,6 @@ async def private_message_handler(client: Client, message: Message):
             await asyncio.to_thread(sync_add_session, session_string, acc_name)
             asyncio.create_task(init_session_pool())
             await status_msg.edit_text(f"✅ **Account Connected & Saved!**\n\n• Name: `{acc_name}`")
-
         except Exception as e:
             if temp_client.is_connected:
                 await temp_client.disconnect()
@@ -489,7 +495,7 @@ async def private_message_handler(client: Client, message: Message):
             await status_msg.edit_text(f"❌ Verification failed: `{str(e)}`")
         return
 
-    # /start
+    # Start Command
     if text_str.startswith("/start"):
         buttons = [[
             InlineKeyboardButton("Ping", callback_data="btn_ping"),
@@ -507,7 +513,7 @@ async def private_message_handler(client: Client, message: Message):
         await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         return
 
-    # ----------------- TELEGRAM POST DOWNLOADER (POOL BASED) ----------------- #
+    # ----------------- TELEGRAM POST DOWNLOADER ----------------- #
     private_match = re.search(r"t\.me/c/(\d+)/(\d+)", text_str)
     public_match = re.search(r"t\.me/([a-zA-Z0-9_]+)/(\d+)", text_str)
 
@@ -540,4 +546,4 @@ async def private_message_handler(client: Client, message: Message):
                     msg = await asyncio.wait_for(u_client.get_messages(chat_id, msg_id), timeout=6)
                     if msg and not msg.empty:
                         target_msg = msg
-  
+                        working_clien
