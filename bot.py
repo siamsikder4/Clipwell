@@ -5,6 +5,7 @@ import json
 import asyncio
 import logging
 import hashlib
+import shutil
 from aiohttp import web
 import yt_dlp
 from hydrogram import Client, filters
@@ -296,6 +297,23 @@ async def generate_admin_dashboard():
 
 # ----------------- UTILITY & DOWNLOADER ----------------- #
 
+def get_aria2_opts():
+    """Returns aria2c config if installed in system"""
+    if shutil.which("aria2c"):
+        return {
+            'external_downloader': {'default': 'aria2c'},
+            'external_downloader_args': {
+                'aria2c': [
+                    '--min-split-size=1M',
+                    '--max-connection-per-server=16',
+                    '--split=16',
+                    '--summary-interval=0',
+                    '--allow-overwrite=true'
+                ]
+            }
+        }
+    return {}
+
 async def progress_bar(current, total, status_msg, action_name, user_id):
     if not total or total <= 0:
         return
@@ -334,7 +352,7 @@ async def auto_delete_messages(chat_id: int, message_ids: list, delay_seconds: i
 def extract_and_download_social(url: str, user_id: int):
     clean_url = url.strip()
     timestamp = int(time.time())
-    out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_%(id)s.%(ext)s")
+    out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_vid_%(id)s.%(ext)s")
 
     ydl_opts = {
         'format': 'bestvideo+bestaudio/best',
@@ -358,20 +376,17 @@ def extract_and_download_social(url: str, user_id: int):
         'buffersize': 1024 * 1024 * 16,
         'max_filesize': 1950 * 1024 * 1024,
     }
+    
+    ydl_opts.update(get_aria2_opts())
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(clean_url, download=True)
             if info:
-                file_path = ydl.prepare_filename(info)
-                if not os.path.exists(file_path):
-                    base, _ = os.path.splitext(file_path)
-                    for ext in [".mp4", ".mkv", ".webm", ".mov"]:
-                        if os.path.exists(base + ext):
-                            file_path = base + ext
-                            break
-                if os.path.exists(file_path):
-                    return file_path, str(info.get('title') or "Media Video")
+                prefix = f"{user_id}_{timestamp}_vid_"
+                for fname in os.listdir(DOWNLOAD_DIR):
+                    if fname.startswith(prefix):
+                        return os.path.join(DOWNLOAD_DIR, fname), str(info.get('title') or "Media Video")
     except Exception as e:
         logger.error(f"yt-dlp video error: {e}")
 
@@ -380,14 +395,21 @@ def extract_and_download_social(url: str, user_id: int):
 def extract_and_download_social_audio(url: str, user_id: int):
     clean_url = url.strip()
     timestamp = int(time.time())
-    out_template = os.path.join(DOWNLOAD_DIR, f"{user_id}_{timestamp}_audio_%(id)s.%(ext)s")
+    prefix = f"{user_id}_{timestamp}_aud_"
+    out_template = os.path.join(DOWNLOAD_DIR, f"{prefix}%(id)s.%(ext)s")
 
+    # 1st try: extract as MP3 via FFmpeg
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': out_template,
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios', 'web']
+            }
+        },
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -402,16 +424,40 @@ def extract_and_download_social_audio(url: str, user_id: int):
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(clean_url, download=True)
-            if info:
-                file_path = ydl.prepare_filename(info)
-                base, _ = os.path.splitext(file_path)
-                mp3_path = base + ".mp3"
-                if os.path.exists(mp3_path):
-                    return mp3_path, str(info.get('title') or "Media Audio")
-                if os.path.exists(file_path):
-                    return file_path, str(info.get('title') or "Media Audio")
+            title = str(info.get('title') or "Media Audio") if info else "Media Audio"
+
+            # Check for generated MP3 or any matched file
+            for fname in os.listdir(DOWNLOAD_DIR):
+                if fname.startswith(prefix) and fname.endswith(".mp3"):
+                    return os.path.join(DOWNLOAD_DIR, fname), title
+
+            for fname in os.listdir(DOWNLOAD_DIR):
+                if fname.startswith(prefix):
+                    return os.path.join(DOWNLOAD_DIR, fname), title
     except Exception as e:
-        logger.error(f"yt-dlp audio error: {e}")
+        logger.warning(f"yt-dlp audio primary extraction error: {e}. Trying fallback...")
+
+    # 2nd try (Fallback): direct audio download without postprocessor if FFmpeg fails
+    try:
+        ydl_opts_fallback = {
+            'format': 'bestaudio/best',
+            'outtmpl': out_template,
+            'quiet': True,
+            'no_warnings': True,
+            'noplaylist': True,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+        }
+        with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
+            info = ydl.extract_info(clean_url, download=True)
+            title = str(info.get('title') or "Media Audio") if info else "Media Audio"
+
+            for fname in os.listdir(DOWNLOAD_DIR):
+                if fname.startswith(prefix):
+                    return os.path.join(DOWNLOAD_DIR, fname), title
+    except Exception as e:
+        logger.error(f"yt-dlp audio fallback error: {e}")
 
     return None, None
 
@@ -735,8 +781,8 @@ async def private_message_handler(client: Client, message: Message):
             await status.edit_text("📤 **Uploading video...**")
             caption = f"🎬 **{title}**\n\n📌 **Source:** `{platform}`"
             
-            # Create a unique key for audio extraction
-            url_hash = hashlib.md5(url.encode()).hexdigest()[:10]
+            # Map clean token to target URL for audio extraction button
+            url_hash = hashlib.md5(f"{url}_{user_id}_{time.time()}".encode()).hexdigest()[:12]
             url_cache[url_hash] = url
 
             social_markup = InlineKeyboardMarkup([[
@@ -785,21 +831,21 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
         target_url = url_cache.get(url_hash)
 
         if not target_url:
-            await query.answer("Link expired. Please send the URL again.", show_alert=True)
+            await query.answer("⚠️ Link reference expired. Please send the link again.", show_alert=True)
             return
 
-        await query.answer("🎵 Extracting MP3 Audio...", show_alert=False)
-        status = await query.message.reply_text("⚡ **Extracting MP3 audio...**")
+        await query.answer("🎵 Extracting audio...", show_alert=False)
+        status = await query.message.reply_text("⚡ **Extracting audio stream...**")
 
         audio_path, title = await asyncio.to_thread(extract_and_download_social_audio, target_url, user_id)
 
         if not audio_path or not os.path.exists(audio_path):
-            await status.edit_text("❌ **Failed to extract audio.**")
+            await status.edit_text("❌ **Failed to extract audio.** The media stream may be DRM-protected.")
             return
 
         try:
-            await status.edit_text("📤 **Uploading audio...**")
-            caption = f"🎵 **{title}**\n\n📌 *Audio Format: MP3 (192kbps)*"
+            await status.edit_text("📤 **Uploading audio file...**")
+            caption = f"🎵 **{title}**\n\n📌 *Audio Quality: High*"
             
             await query.message.reply_audio(
                 audio=audio_path,
