@@ -546,4 +546,267 @@ async def private_message_handler(client: Client, message: Message):
                     msg = await asyncio.wait_for(u_client.get_messages(chat_id, msg_id), timeout=6)
                     if msg and not msg.empty:
                         target_msg = msg
-                        working_clien
+                        working_client = u_client
+                        break
+                except Exception:
+                    continue
+
+            if not target_msg or target_msg.empty:
+                await status.edit_text("❌ Message not found or sessions do not have access to this chat.")
+                return
+
+            if not (target_msg.media or target_msg.video or target_msg.photo or target_msg.document or target_msg.audio):
+                if target_msg.text:
+                    await status.edit_text(f"📝 **Text Content:**\n\n{target_msg.text}")
+                else:
+                    await status.edit_text("❌ No downloadable media found.")
+                return
+
+            await status.edit_text("📥 Downloading media...")
+            download_path = await working_client.download_media(
+                target_msg,
+                progress=progress_bar,
+                progress_args=(status, "Downloading from Telegram...", user_id)
+            )
+
+            if not download_path or not os.path.exists(download_path):
+                await status.edit_text("❌ Failed to download media.")
+                return
+
+            await status.edit_text("📤 Uploading media...")
+
+            delete_markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton("🗑️ Delete Now", callback_data="btn_delete_this")
+            ]])
+
+            caption = (target_msg.caption or "") + "\n\n⚠️ *This message will auto-delete in 2 minutes.*"
+            sent_msg = None
+
+            if target_msg.video:
+                sent_msg = await message.reply_video(
+                    video=download_path,
+                    caption=caption,
+                    supports_streaming=True,
+                    reply_markup=delete_markup,
+                    progress=progress_bar,
+                    progress_args=(status, "Uploading Video...", user_id)
+                )
+                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 1))
+                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 0, 1))
+            elif target_msg.photo:
+                sent_msg = await message.reply_photo(
+                    photo=download_path,
+                    caption=caption,
+                    reply_markup=delete_markup,
+                    progress=progress_bar,
+                    progress_args=(status, "Uploading Photo...", user_id)
+                )
+                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 1, 0))
+                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 1, 0))
+            else:
+                sent_msg = await message.reply_document(
+                    document=download_path,
+                    caption=caption,
+                    reply_markup=delete_markup,
+                    progress=progress_bar,
+                    progress_args=(status, "Uploading File...", user_id)
+                )
+                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 0))
+
+            if sent_msg:
+                asyncio.create_task(auto_delete_messages(message.chat.id, [sent_msg.id, status.id, message.id], delay_seconds=120))
+            else:
+                await status.delete()
+
+            if os.path.exists(download_path):
+                os.remove(download_path)
+
+        except Exception as e:
+            logger.error(f"Telegram Download Error: {e}")
+            await status.edit_text(f"❌ Error: `{str(e)}`")
+        return
+
+    # ----------------- SOCIAL MEDIA DOWNLOADER ----------------- #
+    url_pattern = re.search(r'(https?://[^\s]+)', text_str)
+    if url_pattern:
+        url = url_pattern.group(0).strip()
+        status = await message.reply_text("⚡ Processing social media video...")
+
+        platform = "Others"
+        if "youtu" in url:
+            platform = "YouTube"
+        elif "tiktok" in url:
+            platform = "TikTok"
+        elif "instagram" in url:
+            platform = "Instagram"
+        elif "facebook" in url or "fb.watch" in url:
+            platform = "Facebook"
+
+        asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, url, platform))
+
+        file_path, title = await asyncio.to_thread(extract_and_download_social, url, user_id)
+
+        if not file_path or not os.path.exists(file_path):
+            await status.edit_text("❌ Failed to download video. Link may be private or unsupported.")
+            return
+
+        try:
+            await status.edit_text("📤 Uploading...")
+            caption = f"🎬 **{title}**\n\n📌 *Platform: {platform}*"
+            
+            await message.reply_video(
+                video=file_path,
+                caption=caption,
+                supports_streaming=True,
+                progress=progress_bar,
+                progress_args=(status, "Uploading Social Video...", user_id)
+            )
+
+            await status.delete()
+            asyncio.create_task(asyncio.to_thread(sync_increment_downloads, platform, 1))
+            asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, platform, 1))
+        except Exception as e:
+            logger.error(f"Social Upload Error: {e}")
+            await status.edit_text(f"❌ Upload failed: `{str(e)}`")
+        finally:
+            if file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+
+# ----------------- CALLBACK QUERY HANDLER ----------------- #
+
+@bot.on_callback_query()
+async def callback_query_handler(client: Client, query: CallbackQuery):
+    data = query.data
+    user_id = query.from_user.id
+
+    if data == "btn_delete_this":
+        try:
+            await query.message.delete()
+        except Exception:
+            await query.answer("Cannot delete this message.", show_alert=False)
+        return
+
+    if data == "btn_ping":
+        await query.answer("🏓 Pong! Bot is online & running smoothly.", show_alert=True)
+        return
+
+    if data == "btn_help":
+        help_text = (
+            "📖 **How to Use:**\n\n"
+            "1. **Telegram:** Send any private/public channel post link (`t.me/c/...` or `t.me/...`). (Auto-deletes in 2 minutes)\n"
+            "2. **Social Media:** Send links from YouTube, TikTok, Instagram, Facebook. (Stays permanently)\n"
+            "3. **Admin:** Use /admin to manage userbot sessions."
+        )
+        await query.message.edit_text(help_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_start_back")]]))
+        return
+
+    if data == "btn_start_back":
+        buttons = [[
+            InlineKeyboardButton("Ping", callback_data="btn_ping"),
+            InlineKeyboardButton("Help", callback_data="btn_help")
+        ]]
+        if user_id == OWNER_ID:
+            buttons.append([InlineKeyboardButton("Admin Panel", callback_data="btn_admin_shortcut")])
+        await query.message.edit_text("Send any supported link to download instantly.", reply_markup=InlineKeyboardMarkup(buttons))
+        return
+
+    if user_id != OWNER_ID:
+        await query.answer("Access Denied.", show_alert=True)
+        return
+
+    if data in ["btn_admin_shortcut", "btn_refresh_admin"]:
+        text, markup = await generate_admin_dashboard()
+        await query.message.edit_text(text, reply_markup=markup)
+        return
+
+    if data == "btn_add_session":
+        admin_states[user_id] = "WAITING_SESSION"
+        await query.message.reply_text(
+            "📝 **Send your Pyrogram/Hydrogram Session String:**",
+            reply_markup=ForceReply(selective=True)
+        )
+        await query.answer()
+        return
+
+    if data == "btn_login_account":
+        admin_states[user_id] = "LOGIN_PHONE"
+        await query.message.reply_text(
+            "📱 **Send phone number with country code** (e.g. `+8801XXXXXXXXX`):",
+            reply_markup=ForceReply(selective=True)
+        )
+        await query.answer()
+        return
+
+    if data == "btn_list_sessions":
+        sessions = await asyncio.to_thread(sync_get_all_sessions)
+        if not sessions:
+            await query.answer("No active sessions found.", show_alert=True)
+            return
+        text = "📁 **Active Sessions:**\n\n"
+        for idx, s in enumerate(sessions, 1):
+            text += f"{idx}. `{s['account_name']}` (ID: `{s['doc_id'][:6]}...`)\n"
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_refresh_admin")]]))
+        return
+
+    if data == "btn_del_menu":
+        sessions = await asyncio.to_thread(sync_get_all_sessions)
+        if not sessions:
+            await query.answer("No sessions to delete.", show_alert=True)
+            return
+        buttons = []
+        for s in sessions:
+            buttons.append([InlineKeyboardButton(f"❌ {s['account_name']}", callback_data=f"del_{s['doc_id']}")])
+        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="btn_refresh_admin")])
+        await query.message.edit_text("Select session to remove:", reply_markup=InlineKeyboardMarkup(buttons))
+        return
+
+    if data.startswith("del_"):
+        doc_id = data.split("_", 1)[1]
+        await asyncio.to_thread(sync_delete_session, doc_id)
+        asyncio.create_task(init_session_pool())
+        await query.answer("Session deleted!", show_alert=True)
+        text, markup = await generate_admin_dashboard()
+        await query.message.edit_text(text, reply_markup=markup)
+        return
+
+    if data == "btn_view_urls":
+        urls = await asyncio.to_thread(sync_get_active_urls, 10)
+        if not urls:
+            await query.answer("No recent URLs found.", show_alert=True)
+            return
+        text = "🔗 **Recent Submitted URLs:**\n\n"
+        for u in urls:
+            text += f"• **{u.get('platform', 'Link')}:** `{u.get('url')}`\n  └ User: `{u.get('user_name')}`\n"
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_refresh_admin")]]))
+        return
+
+# ----------------- AIOHTTP DUMMY WEB SERVER ----------------- #
+
+async def web_server():
+    async def handle_ping(request):
+        return web.Response(text="Bot is running!")
+
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    app.router.add_get("/health", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logger.info(f"Aiohttp web server running on port {PORT}")
+
+# ----------------- BOT STARTUP ----------------- #
+
+async def main():
+    await bot.start()
+    logger.info("Bot started successfully!")
+    await init_session_pool()
+    await web_server()
+    await asyncio.Event().wait()
+
+if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
