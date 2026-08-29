@@ -78,7 +78,7 @@ video_cache = {}
 search_cache = {}
 top_tracks_cache = {}
 
-# ----------------- FALLBACK POPULAR TRACKS ----------------- #
+# Fallback popular songs list
 DEFAULT_TOP_SONGS = [
     {"title": "Dolly Parton - Jolene", "url": "https://www.youtube.com/watch?v=Ixrje2rXLMA", "file_id": ""},
     {"title": "Post Malone - I Had Some Help", "url": "https://www.youtube.com/watch?v=4QIZ7654x40", "file_id": ""},
@@ -523,7 +523,7 @@ def download_youtube_with_quality(url: str, user_id: int, height: int = None):
             }
         },
         'postprocessor_args': {
-            'Merger': ['-movflags', '+faststart']
+            'Merger': ['-movflags', '+faststart', '-c:v', 'copy', '-c:a', 'aac']
         },
         'buffersize': 1024 * 1024 * 16,
         'max_filesize': 1950 * 1024 * 1024,
@@ -559,6 +559,7 @@ def download_youtube_with_quality(url: str, user_id: int, height: int = None):
 
     return None, None
 
+# Fix for Facebook GIF/Audio Issue: forces audio merging + AAC encoding
 def download_direct_social_best(url: str, user_id: int):
     clean_url = url.strip()
     timestamp = int(time.time())
@@ -566,7 +567,7 @@ def download_direct_social_best(url: str, user_id: int):
     out_template = os.path.join(DOWNLOAD_DIR, f"{prefix}%(id)s.%(ext)s")
 
     ydl_opts = {
-        'format': 'bestvideo+bestaudio/best',
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
         'outtmpl': out_template,
         'merge_output_format': 'mp4',
         'quiet': True,
@@ -577,11 +578,12 @@ def download_direct_social_best(url: str, user_id: int):
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
         },
         'postprocessor_args': {
-            'Merger': ['-movflags', '+faststart']
+            'Merger': ['-movflags', '+faststart', '-c:v', 'copy', '-c:a', 'aac']
         },
         'buffersize': 1024 * 1024 * 16,
         'max_filesize': 1950 * 1024 * 1024,
     }
+    
     ydl_opts.update(get_aria2_opts())
 
     try:
@@ -666,7 +668,6 @@ async def generate_dynamic_top_markup():
         t_key = hashlib.md5(title.encode()).hexdigest()[:10]
         top_tracks_cache[t_key] = track
         
-        # Display audio icon if file is already saved & cached
         icon = "🎵" if track.get("file_id") else "🎧"
         btn_label = f"{icon} {title[:35]}"
         buttons.append([InlineKeyboardButton(btn_label, callback_data=f"play_top_{t_key}")])
@@ -821,7 +822,7 @@ async def private_message_handler(client: Client, message: Message):
             "**Hello! 🐥**\n"
             f"I'm @{bot_username} – a bot for **downloading photos/videos** and searching for music.\n\n"
             "__Send me:__\n"
-            "– Link from **TikTok / Instagram / YouTube / Pinterest / Likee / Threads / VK and others**\n"
+            "– Link from **TikTok / Instagram / YouTube / Pinterest / Likee / Threads / VK / Facebook**\n"
             "– Telegram post links (**Public & Restricted**)\n"
             "– Song title or artist name\n"
             "– Voice message, video, circle\n"
@@ -851,7 +852,7 @@ async def private_message_handler(client: Client, message: Message):
         except Exception:
             pass
         markup = await generate_dynamic_top_markup()
-        await message.reply_text("🎧 **TOP Popular Songs (Audio Vault)**\n\n_Tap any song to play/download directly:_ ", reply_markup=markup)
+        await message.reply_text("🎧 **TOP Popular Songs (Audio Vault)**\n\n_Tap any track to play/download audio directly:_ ", reply_markup=markup)
         return
 
     # Menu: Your Playlist (/my)
@@ -1117,11 +1118,11 @@ async def private_message_handler(client: Client, message: Message):
                 await message.reply_text(caption_text, reply_markup=InlineKeyboardMarkup(buttons))
             return
 
-        # Direct Social Media (TikTok, IG, FB)
-        platform = "TikTok" if "tiktok" in url else "Instagram" if "instagram" in url else "Facebook" if ("facebook" in url or "fb.watch" in url) else "Social"
+        # Direct Social Media (Facebook, TikTok, Instagram)
+        platform = "Facebook" if ("facebook" in url or "fb.watch" in url) else "TikTok" if "tiktok" in url else "Instagram" if "instagram" in url else "Social"
         asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, url, platform))
 
-        status = await message.reply_text(f"⚡ **Downloading {platform} video in best quality...**")
+        status = await message.reply_text(f"⚡ **Downloading {platform} video with audio...**")
 
         file_path, title = await asyncio.to_thread(download_direct_social_best, url, user_id)
 
@@ -1185,10 +1186,7 @@ async def private_message_handler(client: Client, message: Message):
             search_cache[s_hash] = item['url']
             num_row.append(InlineKeyboardButton(str(idx), callback_data=f"pick_{s_hash}"))
 
-        markup = InlineKeyboardMarkup([
-            num_row
-        ])
-
+        markup = InlineKeyboardMarkup([num_row])
         await search_msg.edit_text("\n".join(text_lines), reply_markup=markup)
         return
 
@@ -1242,7 +1240,7 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
             asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "Others", 1, 0, 0, 1))
             return
 
-        # Fallback: Extract fresh audio and save to cache
+        # Fallback: Extract audio and save to cache
         await query.answer(f"⏳ Extracting {title}...", show_alert=False)
         status = await query.message.reply_text(f"⚡ **Downloading popular track:** `{title}`...")
 
@@ -1273,7 +1271,6 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
             await status.delete()
 
             if sent_msg and sent_msg.audio:
-                # Save File ID to database for next users to get it instantly
                 asyncio.create_task(asyncio.to_thread(sync_record_song_download, fetched_title or title, target_url, sent_msg.audio.file_id))
 
             asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "Others", 1, 0, 0, 1))
@@ -1394,7 +1391,7 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
                     pass
         return
 
-    # Handle Audio Selection (Records Audio File ID to Popular Vault)
+    # Handle Audio Selection
     if data.startswith("dl_aud_"):
         url_hash = data.split("_", 2)[2]
         item = video_cache.get(url_hash)
@@ -1429,7 +1426,6 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
             )
             await status.delete()
 
-            # Record song and its file_id so it appears as popular audio
             if sent_msg and sent_msg.audio:
                 asyncio.create_task(asyncio.to_thread(sync_record_song_download, fetched_title or title, target_url, sent_msg.audio.file_id))
 
