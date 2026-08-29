@@ -76,82 +76,19 @@ progress_status = {}
 loaded_user_clients = []
 video_cache = {}
 search_cache = {}
+top_tracks_cache = {}
 
-# ----------------- TOP SONGS DATA ----------------- #
-TOP_SONGS = {
-    "gb": [
-        "Dolly Parton - Jolene",
-        "Ella Langley - Choosin' Texas",
-        "Dolly Parton - 9 to 5",
-        "Drake - Slime You Out",
-        "Dolly Parton - Islands In the Stream",
-        "Morgan Wallen - Last Night",
-        "KAROL G - Si Antes Te Hubiera Conocido",
-        "Dolly Parton - I Will Always Love You",
-        "Lil Baby - California Breeze",
-        "Ella Langley - That's Why We Fight"
-    ],
-    "us": [
-        "Post Malone - I Had Some Help",
-        "Shaboozey - A Bar Song (Tipsy)",
-        "Kendrick Lamar - Not Like Us",
-        "Sabrina Carpenter - Espresso",
-        "Tommy Richman - MILLION DOLLAR BABY",
-        "Billie Eilish - BIRDS OF A FEATHER",
-        "Chappell Roan - Good Luck, Babe!",
-        "Teddy Swims - Lose Control",
-        "Hozier - Too Sweet",
-        "Benson Boone - Beautiful Things"
-    ],
-    "uz": [
-        "Yulduz Usmonova - Muhabbat",
-        "Shohruhxon - Aldamadim",
-        "Jaloliddin Ahmadaliyev - Janonim",
-        "Doston Ergashev - Qora ko'z",
-        "Hamdam Sobirov - Yig'lama qiz",
-        "Ozoda Nursaidova - Alam",
-        "Rayhon - Yurak",
-        "Munisa Rizayeva - Yovvoyi",
-        "Janob Rasul - Tamanno",
-        "Sardor Tairov - Malikam"
-    ],
-    "ru": [
-        "Miyagi & Andy Panda - Minor",
-        "Anna Asti - Царица",
-        "MACAN - Спой",
-        "Jakone, A-Sen - По весне",
-        "Xcho - Ты и Я",
-        "GAYAZOV$ BROTHER$ - Малиновая лада",
-        "HammAli & Navai - Прятки",
-        "JONY - Комета",
-        "Люся Чеботина - Солнце Монако",
-        "Rauf & Faik - Детство"
-    ],
-    "kz": [
-        "Jah Khalib - Медина",
-        "Raim - Самая вышка",
-        "De Lacure - Келші жаным",
-        "Kalifarniya - Puertorika",
-        "Sadraddin - Ant",
-        "Mirani - Ainalaiyn",
-        "Qanay - Boztorgai",
-        "Alashuly - Tulpar",
-        "Kairat Nurtas - Sen meni tusinbedin",
-        "Erke Esmahan - Kaida"
-    ],
-    "tr": [
-        "Semicenk - Canın Sağ Olsun",
-        "Mert Demir - Ateşe Düştüm",
-        "Dedublüman - Belki",
-        "Mabel Matiz - Antidepresan",
-        "KÖFN - Bir Tek Sana Müptelayım",
-        "Reynmen - Renklensin",
-        "Uzi - Arasan Da",
-        "Lvbel C5 - Dacia",
-        "BLOK3 - AFFETMEM",
-        "Simge - Aşkın Olayım"
-    ]
-}
+# ----------------- FALLBACK POPULAR TRACKS ----------------- #
+DEFAULT_TOP_SONGS = [
+    {"title": "Dolly Parton - Jolene", "url": "https://www.youtube.com/watch?v=Ixrje2rXLMA", "file_id": ""},
+    {"title": "Post Malone - I Had Some Help", "url": "https://www.youtube.com/watch?v=4QIZ7654x40", "file_id": ""},
+    {"title": "Kendrick Lamar - Not Like Us", "url": "https://www.youtube.com/watch?v=H58vbez_m4E", "file_id": ""},
+    {"title": "Sabrina Carpenter - Espresso", "url": "https://www.youtube.com/watch?v=eVli-tstM5E", "file_id": ""},
+    {"title": "Billie Eilish - BIRDS OF A FEATHER", "url": "https://www.youtube.com/watch?v=V9PVRfjEBTI", "file_id": ""},
+    {"title": "Teddy Swims - Lose Control", "url": "https://www.youtube.com/watch?v=GZ3zL7DeNg0", "file_id": ""},
+    {"title": "Hozier - Too Sweet", "url": "https://www.youtube.com/watch?v=aezstCBb9g0", "file_id": ""},
+    {"title": "Benson Boone - Beautiful Things", "url": "https://www.youtube.com/watch?v=Oa_RSwwpPaA", "file_id": ""}
+]
 
 # ----------------- SESSION POOL MANAGER ----------------- #
 
@@ -185,6 +122,39 @@ async def init_session_pool():
     logger.info(f"Session Pool Ready: {len(loaded_user_clients)} active userbots.")
 
 # ----------------- DATABASE HELPERS ----------------- #
+
+def sync_record_song_download(title: str, url: str, file_id: str):
+    if not db or not title:
+        return
+    try:
+        from firebase_admin import firestore
+        track_id = hashlib.md5((url or title).encode()).hexdigest()[:16]
+        doc_ref = db.collection("popular_tracks").document(track_id)
+        doc_ref.set({
+            "title": title,
+            "url": url or "",
+            "file_id": file_id or "",
+            "download_count": firestore.Increment(1),
+            "last_downloaded": time.time()
+        }, merge=True)
+    except Exception as e:
+        logger.error(f"Record Popular Song Error: {e}")
+
+def sync_get_top_tracks(limit: int = 10):
+    if not db:
+        return DEFAULT_TOP_SONGS
+    try:
+        from firebase_admin import firestore
+        docs = db.collection("popular_tracks").order_by("download_count", direction=firestore.Query.DESCENDING).limit(limit).stream()
+        tracks = []
+        for d in docs:
+            data = d.to_dict()
+            data["doc_id"] = d.id
+            tracks.append(data)
+        return tracks if tracks else DEFAULT_TOP_SONGS
+    except Exception as e:
+        logger.error(f"Get Top Tracks Error: {e}")
+        return DEFAULT_TOP_SONGS
 
 def sync_add_session(session_str: str, name: str):
     if not db:
@@ -468,7 +438,6 @@ def search_youtube_videos(query: str, limit: int = 5):
 
 def extract_youtube_metadata(url: str):
     clean_url = sanitize_youtube_url(url)
-    
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -613,7 +582,6 @@ def download_direct_social_best(url: str, user_id: int):
         'buffersize': 1024 * 1024 * 16,
         'max_filesize': 1950 * 1024 * 1024,
     }
-    
     ydl_opts.update(get_aria2_opts())
 
     try:
@@ -689,27 +657,20 @@ def extract_and_download_social_audio(url: str, user_id: int):
 
     return None, None
 
-def generate_top_markup(country_code="gb"):
-    flags = [
-        ("🇺🇿", "uz"),
-        ("🇷🇺", "ru"),
-        ("🇬🇧", "gb"),
-        ("🇺🇸", "us"),
-        ("🇰🇿", "kz"),
-        ("🇹🇷", "tr")
-    ]
-    flag_row = []
-    for flag, code in flags:
-        label = f"{flag} ✅" if code == country_code else flag
-        flag_row.append(InlineKeyboardButton(label, callback_data=f"top_country_{code}"))
+async def generate_dynamic_top_markup():
+    top_tracks = await asyncio.to_thread(sync_get_top_tracks, 10)
+    buttons = []
+    
+    for idx, track in enumerate(top_tracks, 1):
+        title = track.get("title", f"Track {idx}")
+        t_key = hashlib.md5(title.encode()).hexdigest()[:10]
+        top_tracks_cache[t_key] = track
+        
+        # Display audio icon if file is already saved & cached
+        icon = "🎵" if track.get("file_id") else "🎧"
+        btn_label = f"{icon} {title[:35]}"
+        buttons.append([InlineKeyboardButton(btn_label, callback_data=f"play_top_{t_key}")])
 
-    songs = TOP_SONGS.get(country_code, TOP_SONGS["gb"])
-    buttons = [flag_row]
-    for s in songs:
-        buttons.append([InlineKeyboardButton(s, callback_data=f"top_search_{hashlib.md5(s.encode()).hexdigest()[:8]}")])
-        search_cache[hashlib.md5(s.encode()).hexdigest()[:8]] = s
-
-    buttons.append([InlineKeyboardButton("➡️", callback_data="top_next")])
     return InlineKeyboardMarkup(buttons)
 
 # ----------------- MESSAGE HANDLER ----------------- #
@@ -889,8 +850,8 @@ async def private_message_handler(client: Client, message: Message):
             await message.react("🫡")
         except Exception:
             pass
-        markup = generate_top_markup("gb")
-        await message.reply_text("🎧 **TOP Popular Songs**", reply_markup=markup)
+        markup = await generate_dynamic_top_markup()
+        await message.reply_text("🎧 **TOP Popular Songs (Audio Vault)**\n\n_Tap any song to play/download directly:_ ", reply_markup=markup)
         return
 
     # Menu: Your Playlist (/my)
@@ -1059,6 +1020,8 @@ async def private_message_handler(client: Client, message: Message):
                 )
                 asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 0, 1))
                 asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 0, 0, 1))
+                if sent_msg and sent_msg.audio:
+                    asyncio.create_task(asyncio.to_thread(sync_record_song_download, sent_msg.audio.title or "Telegram Audio", tg_url, sent_msg.audio.file_id))
             elif target_msg.voice:
                 sent_msg = await message.reply_voice(
                     voice=download_path,
@@ -1254,38 +1217,76 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
             pass
         return
 
-    # Country Selector in /top
-    if data.startswith("top_country_"):
-        country = data.split("_")[2]
-        markup = generate_top_markup(country)
-        await query.message.edit_reply_markup(reply_markup=markup)
-        await query.answer()
-        return
-
-    # Top search query clicked
-    if data.startswith("top_search_"):
-        q_hash = data.split("_")[2]
-        song_title = search_cache.get(q_hash)
-        if not song_title:
-            await query.answer("Query expired.", show_alert=True)
+    # Direct Play / Download from /top
+    if data.startswith("play_top_"):
+        t_key = data.split("_")[2]
+        track = top_tracks_cache.get(t_key)
+        if not track:
+            await query.answer("Track expired. Send /top again.", show_alert=True)
             return
 
-        await query.answer(f"Searching: {song_title}...", show_alert=False)
-        results = await asyncio.to_thread(search_youtube_videos, song_title, 5)
-        if not results:
-            await query.message.reply_text("❌ No track found for this item.")
+        title = track.get("title", "Popular Track")
+        file_id = track.get("file_id")
+        target_url = track.get("url")
+
+        # Instant Audio Send if Telegram File ID is Cached
+        if file_id:
+            await query.answer("🚀 Sending instant audio...", show_alert=False)
+            caption = f"🔊 **{title}**\n🔥 **#PopularSong #Audio**"
+            sent_audio = await query.message.reply_audio(
+                audio=file_id,
+                caption=caption,
+                title=title
+            )
+            asyncio.create_task(asyncio.to_thread(sync_record_song_download, title, target_url, file_id))
+            asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "Others", 1, 0, 0, 1))
             return
 
-        text_lines = [f"🎧 **Results for:** `{song_title}`\n"]
-        num_row = []
-        for idx, item in enumerate(results, 1):
-            dur_display = f" `{item['duration']}`" if item['duration'] else ""
-            text_lines.append(f"**{idx}.** {item['title']}{dur_display}")
-            s_hash = hashlib.md5(item['url'].encode()).hexdigest()[:8]
-            search_cache[s_hash] = item['url']
-            num_row.append(InlineKeyboardButton(str(idx), callback_data=f"pick_{s_hash}"))
+        # Fallback: Extract fresh audio and save to cache
+        await query.answer(f"⏳ Extracting {title}...", show_alert=False)
+        status = await query.message.reply_text(f"⚡ **Downloading popular track:** `{title}`...")
 
-        await query.message.reply_text("\n".join(text_lines), reply_markup=InlineKeyboardMarkup([num_row]))
+        if not target_url:
+            s_res = await asyncio.to_thread(search_youtube_videos, title, 1)
+            target_url = s_res[0]["url"] if s_res else None
+
+        if not target_url:
+            await status.edit_text("❌ Failed to fetch audio stream for this track.")
+            return
+
+        audio_path, fetched_title = await asyncio.to_thread(extract_and_download_social_audio, target_url, user_id)
+        if not audio_path or not os.path.exists(audio_path):
+            await status.edit_text("❌ Failed to download audio stream.")
+            return
+
+        try:
+            await status.edit_text("📤 **Uploading audio file...**")
+            caption = f"🔊 **{fetched_title or title}**\n🔥 **#PopularSong #Audio**"
+
+            sent_msg = await query.message.reply_audio(
+                audio=audio_path,
+                caption=caption,
+                title=fetched_title or title,
+                progress=progress_bar,
+                progress_args=(status, "Uploading Audio", user_id)
+            )
+            await status.delete()
+
+            if sent_msg and sent_msg.audio:
+                # Save File ID to database for next users to get it instantly
+                asyncio.create_task(asyncio.to_thread(sync_record_song_download, fetched_title or title, target_url, sent_msg.audio.file_id))
+
+            asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "Others", 1, 0, 0, 1))
+            asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "Others", 1, 0, 0, 1))
+        except Exception as e:
+            logger.error(f"Top Song Upload Error: {e}")
+            await status.edit_text(f"❌ **Upload Failed:** `{str(e)}`")
+        finally:
+            if audio_path and os.path.exists(audio_path):
+                try:
+                    os.remove(audio_path)
+                except Exception:
+                    pass
         return
 
     # Pick item from search list
@@ -1393,7 +1394,7 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
                     pass
         return
 
-    # Handle Audio Selection
+    # Handle Audio Selection (Records Audio File ID to Popular Vault)
     if data.startswith("dl_aud_"):
         url_hash = data.split("_", 2)[2]
         item = video_cache.get(url_hash)
@@ -1419,7 +1420,7 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
             await status.edit_text("📤 **Uploading audio file...**")
             caption = f"🔊 **{fetched_title or title}** ➔\n👤 **#{platform}** ➔"
 
-            await query.message.reply_audio(
+            sent_msg = await query.message.reply_audio(
                 audio=audio_path,
                 caption=caption,
                 title=fetched_title or title,
@@ -1427,6 +1428,11 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
                 progress_args=(status, "Uploading Audio", user_id)
             )
             await status.delete()
+
+            # Record song and its file_id so it appears as popular audio
+            if sent_msg and sent_msg.audio:
+                asyncio.create_task(asyncio.to_thread(sync_record_song_download, fetched_title or title, target_url, sent_msg.audio.file_id))
+
             asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "Others", 1, 0, 0, 1))
             asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "Others", 1, 0, 0, 1))
         except Exception as e:
@@ -1531,7 +1537,7 @@ async def web_server():
 async def main():
     await bot.start()
     
-    # Set the Telegram Command Menu Buttons (Shown in screenshot)
+    # Set the Telegram Command Menu Buttons
     try:
         await bot.set_bot_commands([
             BotCommand("my", "your playlist"),
