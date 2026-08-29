@@ -367,12 +367,6 @@ def extract_youtube_metadata(url: str):
         'no_warnings': True,
         'noplaylist': True,
         'skip_download': True,
-        'format': 'all',
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'web']
-            }
-        },
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
         }
@@ -421,45 +415,43 @@ def download_youtube_with_quality(url: str, user_id: int, height: int = None):
     prefix = f"{user_id}_{timestamp}_yt_"
     out_template = os.path.join(DOWNLOAD_DIR, f"{prefix}%(id)s.%(ext)s")
 
-    ydl_opts = {
-        'outtmpl': out_template,
-        'merge_output_format': 'mp4',
-        'quiet': True,
-        'no_warnings': True,
-        'noplaylist': True,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'web']
-            }
-        },
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
-        },
-        'postprocessor_args': {
-            'Merger': ['-movflags', '+faststart']
-        },
-        'buffersize': 1024 * 1024 * 16,
-        'max_filesize': 1950 * 1024 * 1024,
-    }
-
+    # Multi-Tier Fallback Format List
+    format_candidates = []
     if height:
-        ydl_opts['format'] = f'bv*[height<={height}]+ba/b[height<={height}]/bv*+ba/b/best'
-        ydl_opts['format_sort'] = [f'res:{height}', 'ext:mp4:m4a']
-    else:
-        ydl_opts['format'] = 'bv*+ba/b/best'
-        ydl_opts['format_sort'] = ['ext:mp4:m4a']
-    
-    ydl_opts.update(get_yt_cookies())
+        format_candidates.append(f"bestvideo[height<={height}]+bestaudio/best[height<={height}]")
+        format_candidates.append(f"bestvideo[height<={height+140}]+bestaudio/best[height<={height+140}]")
+    format_candidates.append("bestvideo+bestaudio/best")
+    format_candidates.append("best")
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(clean_url, download=True)
-            title = str(info.get('title') or "Video") if info else "Video"
-            for fname in os.listdir(DOWNLOAD_DIR):
-                if fname.startswith(prefix):
-                    return os.path.join(DOWNLOAD_DIR, fname), title
-    except Exception as e:
-        logger.error(f"YouTube quality download error: {e}")
+    for fmt in format_candidates:
+        ydl_opts = {
+            'format': fmt,
+            'outtmpl': out_template,
+            'merge_output_format': 'mp4',
+            'quiet': True,
+            'no_warnings': True,
+            'noplaylist': True,
+            'buffersize': 1024 * 1024 * 16,
+            'max_filesize': 1950 * 1024 * 1024,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+            },
+            'postprocessor_args': {
+                'Merger': ['-movflags', '+faststart']
+            }
+        }
+        ydl_opts.update(get_yt_cookies())
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(clean_url, download=True)
+                title = str(info.get('title') or "Video") if info else "Video"
+                for fname in os.listdir(DOWNLOAD_DIR):
+                    if fname.startswith(prefix):
+                        return os.path.join(DOWNLOAD_DIR, fname), title
+        except Exception as e:
+            logger.warning(f"Format candidate '{fmt}' failed: {e}. Trying fallback...")
+            continue
 
     return None, None
 
@@ -513,11 +505,6 @@ def extract_and_download_social_audio(url: str, user_id: int):
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'web']
-            }
-        },
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
