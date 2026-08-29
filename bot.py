@@ -438,7 +438,6 @@ def sanitize_youtube_url(url: str) -> str:
         return f"https://www.youtube.com/watch?v={match.group(1)}"
     return url.strip()
 
-# Fast Search Function for plain song titles
 def search_youtube_videos(query: str, limit: int = 5):
     ydl_opts = {
         'quiet': True,
@@ -470,7 +469,6 @@ def search_youtube_videos(query: str, limit: int = 5):
 def extract_youtube_metadata(url: str):
     clean_url = sanitize_youtube_url(url)
     
-    # iOS / Android extraction avoids bot detection & fetches full 1080p stream formats
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -615,6 +613,7 @@ def download_direct_social_best(url: str, user_id: int):
         'buffersize': 1024 * 1024 * 16,
         'max_filesize': 1950 * 1024 * 1024,
     }
+    
     ydl_opts.update(get_aria2_opts())
 
     try:
@@ -708,7 +707,6 @@ def generate_top_markup(country_code="gb"):
     buttons = [flag_row]
     for s in songs:
         buttons.append([InlineKeyboardButton(s, callback_data=f"top_search_{hashlib.md5(s.encode()).hexdigest()[:8]}")])
-        # Save cache for the song query
         search_cache[hashlib.md5(s.encode()).hexdigest()[:8]] = s
 
     buttons.append([InlineKeyboardButton("➡️", callback_data="top_next")])
@@ -853,7 +851,7 @@ async def private_message_handler(client: Client, message: Message):
             await status_msg.edit_text(f"❌ **2FA Verification Failed:**\n`{str(e)}`")
         return
 
-    # Start Command
+    # Start Command (/start)
     if text_str.startswith("/start"):
         bot_info = await client.get_me()
         bot_username = bot_info.username or "bot"
@@ -863,13 +861,15 @@ async def private_message_handler(client: Client, message: Message):
             f"I'm @{bot_username} – a bot for **downloading photos/videos** and searching for music.\n\n"
             "__Send me:__\n"
             "– Link from **TikTok / Instagram / YouTube / Pinterest / Likee / Threads / VK and others**\n"
+            "– Telegram post links (**Public & Restricted**)\n"
             "– Song title or artist name\n"
             "– Voice message, video, circle\n"
             "– Lyrics from the song\n\n"
             "__And I will download for you: photo, video, sound, song or lyrics.__\n\n"
             "/help – help\n"
+            "/lang – change language\n"
             "/top – top music\n"
-            "/ping – ping status\n\n"
+            "/my – your playlist\n\n"
             "**Add me to the group**, send me a link to the video – and I'll upload it directly to the chat. 🚀"
         )
 
@@ -877,14 +877,13 @@ async def private_message_handler(client: Client, message: Message):
             [InlineKeyboardButton("➕ Add to chat", url=f"https://t.me/{bot_username}?startgroup=true")]
         ]
 
-        # Admin Button ONLY visible to Admin/Owner
         if user_id == OWNER_ID:
             buttons.append([InlineKeyboardButton("⚙️ Admin Dashboard", callback_data="btn_admin_shortcut")])
 
         await message.reply_text(start_text, reply_markup=InlineKeyboardMarkup(buttons))
         return
 
-    # TOP Songs Command (/top)
+    # Menu: Popular Songs (/top)
     if text_str.startswith("/top"):
         try:
             await message.react("🫡")
@@ -894,14 +893,53 @@ async def private_message_handler(client: Client, message: Message):
         await message.reply_text("🎧 **TOP Popular Songs**", reply_markup=markup)
         return
 
-    # Help Command (/help)
+    # Menu: Your Playlist (/my)
+    if text_str.startswith("/my"):
+        try:
+            await message.react("🫡")
+        except Exception:
+            pass
+        my_text = (
+            "🎵 **Your Playlist & Recent Downloads**\n"
+            "────────────────────\n"
+            "• You don't have any saved tracks yet.\n\n"
+            "💡 *Tip:* Send any song name or music link to search and build your playlist!"
+        )
+        await message.reply_text(my_text)
+        return
+
+    # Menu: Change Language (/lang)
+    if text_str.startswith("/lang"):
+        try:
+            await message.react("🫡")
+        except Exception:
+            pass
+        lang_text = "🌐 **Select your preferred language:**"
+        lang_buttons = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🇺🇸 English", callback_data="set_lang_en"),
+                InlineKeyboardButton("🇧🇩 বাংলা", callback_data="set_lang_bn")
+            ],
+            [
+                InlineKeyboardButton("🇷🇺 Русский", callback_data="set_lang_ru"),
+                InlineKeyboardButton("🇺🇿 O'zbek", callback_data="set_lang_uz")
+            ]
+        ])
+        await message.reply_text(lang_text, reply_markup=lang_buttons)
+        return
+
+    # Menu: How to use (/help)
     if text_str.startswith("/help"):
+        try:
+            await message.react("🫡")
+        except Exception:
+            pass
         help_text = (
-            "📖 **How to download photos/videos:**\n"
-            "1. Log in to the TikTok / YouTube / Instagram / Facebook app.\n"
+            "📖 **How to download photos/videos:**\n\n"
+            "1. Log in to the **TikTok / YouTube / Instagram / Facebook** app.\n"
             "2. Select the video or music you need.\n"
             "3. Click on the 🔄 **Share** button and click **Copy link**.\n"
-            "4. Send the link to this bot – it will process & download it instantly!\n\n"
+            "4. Send the link to this bot – it will process & download it directly!\n\n"
             "🔍 **Music Search:** Type any artist name or song title directly."
         )
         await message.reply_text(help_text)
@@ -1159,7 +1197,7 @@ async def private_message_handler(client: Client, message: Message):
                     pass
         return
 
-    # 2. Text Search Handler (For music/songs by name)
+    # 2. Text Search Handler (Music/songs by name)
     if text_str and not text_str.startswith("/"):
         try:
             await message.react("🫡")
@@ -1203,6 +1241,17 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
             await query.message.delete()
         except Exception:
             await query.answer("Couldn't delete message.", show_alert=False)
+        return
+
+    # Language Selector Callback
+    if data.startswith("set_lang_"):
+        lang_code = data.split("_")[2]
+        lang_names = {"en": "English", "bn": "বাংলা", "ru": "Русский", "uz": "O'zbek"}
+        await query.answer(f"Language set to {lang_names.get(lang_code, 'English')}", show_alert=True)
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
         return
 
     # Country Selector in /top
@@ -1482,14 +1531,15 @@ async def web_server():
 async def main():
     await bot.start()
     
-    # Setup standard bot menu commands
+    # Set the Telegram Command Menu Buttons (Shown in screenshot)
     try:
         await bot.set_bot_commands([
-            BotCommand("start", "Start the bot"),
-            BotCommand("top", "Popular songs"),
-            BotCommand("help", "How to use"),
-            BotCommand("ping", "Check bot latency")
+            BotCommand("my", "your playlist"),
+            BotCommand("top", "popular songs"),
+            BotCommand("lang", "change language"),
+            BotCommand("help", "how to use")
         ])
+        logger.info("Bot Menu Commands registered successfully!")
     except Exception as e:
         logger.warning(f"Failed to set bot commands: {e}")
 
