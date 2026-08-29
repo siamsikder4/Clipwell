@@ -363,7 +363,6 @@ def sanitize_youtube_url(url: str) -> str:
 def extract_youtube_metadata(url: str):
     clean_url = sanitize_youtube_url(url)
     
-    # Fully fetch adaptive formats (1080p, 720p, etc.) without skipping web configs
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -403,7 +402,7 @@ def extract_youtube_metadata(url: str):
     thumbnail = info.get('thumbnail')
     formats = info.get('formats', [])
 
-    # Collect available video resolutions
+    # Collect actual existing video heights
     available_heights = set()
     for f in formats:
         h = f.get('height')
@@ -411,18 +410,15 @@ def extract_youtube_metadata(url: str):
         if h and vcodec and vcodec != 'none':
             available_heights.add(int(h))
 
-    standard_resolutions = [1080, 720, 480, 360]
-    available_qualities = []
-    
-    max_h = max(available_heights) if available_heights else 0
+    # Standard quality priorities
+    standard_resolutions = [1080, 720, 480, 360, 240, 144]
+    available_qualities = [res for res in standard_resolutions if res in available_heights]
 
-    for res in standard_resolutions:
-        # Show resolution if it exists in stream or max height is equal/greater
-        if any(h >= res for h in available_heights) or max_h >= res:
-            available_qualities.append(res)
+    if not available_qualities and available_heights:
+        available_qualities = sorted(list(available_heights), reverse=True)[:4]
 
     if not available_qualities:
-        available_qualities = [1080, 720, 480, 360]
+        available_qualities = [720, 360]
 
     return {
         "title": title,
@@ -436,7 +432,6 @@ def download_youtube_with_quality(url: str, user_id: int, height: int = None):
     prefix = f"{user_id}_{timestamp}_yt_"
     out_template = os.path.join(DOWNLOAD_DIR, f"{prefix}%(id)s.%(ext)s")
 
-    # Select exact bestvideo stream up to selected height + best audio
     if height:
         fmt = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best"
     else:
@@ -602,7 +597,7 @@ async def private_message_handler(client: Client, message: Message):
 
     asyncio.create_task(asyncio.to_thread(sync_track_user, user_id, user.username, user.first_name))
 
-    # Admin Panel
+    # Admin Panel Command
     if text_str.startswith("/admin") or text_str.startswith("/panel"):
         if user_id != OWNER_ID:
             await message.reply_text("⛔ **Access restricted.** Admin only.")
@@ -729,23 +724,53 @@ async def private_message_handler(client: Client, message: Message):
             await status_msg.edit_text(f"❌ **2FA Verification Failed:**\n`{str(e)}`")
         return
 
-    # Start Command
+    # Start Command - Matching Simple UI
     if text_str.startswith("/start"):
-        buttons = [[
-            InlineKeyboardButton("⚡ Ping", callback_data="btn_ping"),
-            InlineKeyboardButton("📖 Help", callback_data="btn_help")
-        ]]
+        bot_info = await client.get_me()
+        bot_username = bot_info.username or "bot"
+
+        start_text = (
+            "**Hello! 🐥**\n"
+            f"I'm @{bot_username} – a bot for **downloading photos/videos** and searching for music.\n\n"
+            "__Send me:__\n"
+            "– Link from **TikTok / Instagram / YouTube / Pinterest / Facebook** and others\n"
+            "– Telegram post links (**Public & Restricted**)\n"
+            "– Song title or artist name\n\n"
+            "__And I will download for you: photo, video, sound, song or files.__\n\n"
+            "/help – help\n"
+            "/ping – check ping\n\n"
+            "**Add me to the group**, send me a link to the video – and I'll upload it directly to the chat. 🚀"
+        )
+
+        buttons = [
+            [InlineKeyboardButton("➕ Add to chat", url=f"https://t.me/{bot_username}?startgroup=true")]
+        ]
+
+        # Admin Button ONLY visible to Admin/Owner
         if user_id == OWNER_ID:
             buttons.append([InlineKeyboardButton("⚙️ Admin Dashboard", callback_data="btn_admin_shortcut")])
 
-        text = (
-            f"👋 **Hello {user.first_name}!**\n\n"
-            "Send any supported link to download video & audio directly:\n\n"
-            "• **YouTube:** Choose quality (1080p, 720p, 480p, 360p & Audio)\n"
-            "• **Socials:** TikTok, Instagram, Facebook (Direct High Quality)\n"
-            "• **Telegram:** Public & Restricted posts (Auto-deletes in 2 min)"
+        await message.reply_text(start_text, reply_markup=InlineKeyboardMarkup(buttons))
+        return
+
+    # Help Command
+    if text_str.startswith("/help"):
+        help_text = (
+            "📖 **Quick Help Guide**\n"
+            "────────────────────\n"
+            "• **YouTube:** Send video link to pick available qualities or MP3.\n"
+            "• **Social Media:** Send TikTok, Instagram, Facebook links to download in highest quality.\n"
+            "• **Telegram Posts:** Send `t.me/...` links to download Restricted/Public media."
         )
-        await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+        await message.reply_text(help_text)
+        return
+
+    # Ping Command
+    if text_str.startswith("/ping"):
+        start_t = time.time()
+        p_msg = await message.reply_text("⚡ Ping...")
+        end_t = time.time()
+        await p_msg.edit_text(f"⚡ **Pong!** `{(end_t - start_t) * 1000:.1f}ms`")
         return
 
     # ----------------- TELEGRAM POST DOWNLOADER ----------------- #
@@ -901,7 +926,7 @@ async def private_message_handler(client: Client, message: Message):
 
             title = meta.get("title", "Video")
             thumbnail = meta.get("thumbnail")
-            qualities = meta.get("qualities", [1080, 720, 480, 360])
+            qualities = meta.get("qualities", [720, 360])
 
             url_hash = hashlib.md5(f"{url}_{user_id}_{time.time()}".encode()).hexdigest()[:12]
             video_cache[url_hash] = {
@@ -1091,43 +1116,7 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
                     pass
         return
 
-    if data == "btn_ping":
-        await query.answer("⚡ Bot is running smoothly!", show_alert=True)
-        return
-
-    if data == "btn_help":
-        help_text = (
-            "📖 **User Guide**\n"
-            "────────────────────\n"
-            "• **YouTube:** Send video link to pick resolution (1080p, 720p, 480p, 360p, MP3).\n"
-            "• **Social Media:** Send TikTok, Instagram, Facebook links to download in highest quality directly.\n"
-            "• **Telegram:** Send post links (`t.me/...`) for Videos, Photos, or Audio files.\n"
-            "• **Admin:** Manage account sessions with `/admin`."
-        )
-        await query.message.edit_text(
-            help_text,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_start_back")]])
-        )
-        return
-
-    if data == "btn_start_back":
-        buttons = [[
-            InlineKeyboardButton("⚡ Ping", callback_data="btn_ping"),
-            InlineKeyboardButton("📖 Help", callback_data="btn_help")
-        ]]
-        if user_id == OWNER_ID:
-            buttons.append([InlineKeyboardButton("⚙️ Admin Dashboard", callback_data="btn_admin_shortcut")])
-        
-        text = (
-            f"👋 **Hello {query.from_user.first_name}!**\n\n"
-            "Send any supported link to download video & audio directly:\n\n"
-            "• **YouTube:** 1080p, 720p, 480p, 360p & Audio\n"
-            "• **Socials:** TikTok, Instagram, Facebook (Direct Best Quality)\n"
-            "• **Telegram:** Public & Restricted posts (Auto-deletes in 2 min)"
-        )
-        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
-        return
-
+    # Admin Panel Protected Callbacks
     if user_id != OWNER_ID:
         await query.answer("⛔ Access Denied.", show_alert=True)
         return
