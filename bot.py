@@ -402,7 +402,6 @@ def extract_youtube_metadata(url: str):
     thumbnail = info.get('thumbnail')
     formats = info.get('formats', [])
 
-    # Collect actual existing video heights
     available_heights = set()
     for f in formats:
         h = f.get('height')
@@ -410,7 +409,6 @@ def extract_youtube_metadata(url: str):
         if h and vcodec and vcodec != 'none':
             available_heights.add(int(h))
 
-    # Standard quality priorities
     standard_resolutions = [1080, 720, 480, 360, 240, 144]
     available_qualities = [res for res in standard_resolutions if res in available_heights]
 
@@ -724,7 +722,7 @@ async def private_message_handler(client: Client, message: Message):
             await status_msg.edit_text(f"❌ **2FA Verification Failed:**\n`{str(e)}`")
         return
 
-    # Start Command - Matching Simple UI
+    # Start Command
     if text_str.startswith("/start"):
         bot_info = await client.get_me()
         bot_username = bot_info.username or "bot"
@@ -746,7 +744,6 @@ async def private_message_handler(client: Client, message: Message):
             [InlineKeyboardButton("➕ Add to chat", url=f"https://t.me/{bot_username}?startgroup=true")]
         ]
 
-        # Admin Button ONLY visible to Admin/Owner
         if user_id == OWNER_ID:
             buttons.append([InlineKeyboardButton("⚙️ Admin Dashboard", callback_data="btn_admin_shortcut")])
 
@@ -778,6 +775,12 @@ async def private_message_handler(client: Client, message: Message):
     public_match = re.search(r"t\.me/([a-zA-Z0-9_]+)/(\d+)", text_str)
 
     if private_match or public_match:
+        # Auto React to message
+        try:
+            await message.react("🫡")
+        except Exception:
+            pass
+
         tg_url = text_str.strip()
         asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, tg_url, "telegram"))
 
@@ -910,8 +913,13 @@ async def private_message_handler(client: Client, message: Message):
     # ----------------- SOCIAL & YOUTUBE DOWNLOADER ----------------- #
     url_pattern = re.search(r'(https?://[^\s]+)', text_str)
     if url_pattern:
+        # Auto React to message
+        try:
+            await message.react("🫡")
+        except Exception:
+            pass
+
         url = url_pattern.group(0).strip()
-        
         is_youtube = ("youtube.com" in url or "youtu.be" in url)
 
         # 1. YOUTUBE
@@ -1116,7 +1124,7 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
                     pass
         return
 
-    # Admin Panel Protected Callbacks
+    # Admin Panel Callbacks (Owner Only)
     if user_id != OWNER_ID:
         await query.answer("⛔ Access Denied.", show_alert=True)
         return
