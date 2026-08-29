@@ -14,7 +14,8 @@ from hydrogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     CallbackQuery,
-    ForceReply
+    ForceReply,
+    BotCommand
 )
 from hydrogram.errors import SessionPasswordNeeded
 
@@ -74,6 +75,83 @@ login_clients = {}
 progress_status = {}
 loaded_user_clients = []
 video_cache = {}
+search_cache = {}
+
+# ----------------- TOP SONGS DATA ----------------- #
+TOP_SONGS = {
+    "gb": [
+        "Dolly Parton - Jolene",
+        "Ella Langley - Choosin' Texas",
+        "Dolly Parton - 9 to 5",
+        "Drake - Slime You Out",
+        "Dolly Parton - Islands In the Stream",
+        "Morgan Wallen - Last Night",
+        "KAROL G - Si Antes Te Hubiera Conocido",
+        "Dolly Parton - I Will Always Love You",
+        "Lil Baby - California Breeze",
+        "Ella Langley - That's Why We Fight"
+    ],
+    "us": [
+        "Post Malone - I Had Some Help",
+        "Shaboozey - A Bar Song (Tipsy)",
+        "Kendrick Lamar - Not Like Us",
+        "Sabrina Carpenter - Espresso",
+        "Tommy Richman - MILLION DOLLAR BABY",
+        "Billie Eilish - BIRDS OF A FEATHER",
+        "Chappell Roan - Good Luck, Babe!",
+        "Teddy Swims - Lose Control",
+        "Hozier - Too Sweet",
+        "Benson Boone - Beautiful Things"
+    ],
+    "uz": [
+        "Yulduz Usmonova - Muhabbat",
+        "Shohruhxon - Aldamadim",
+        "Jaloliddin Ahmadaliyev - Janonim",
+        "Doston Ergashev - Qora ko'z",
+        "Hamdam Sobirov - Yig'lama qiz",
+        "Ozoda Nursaidova - Alam",
+        "Rayhon - Yurak",
+        "Munisa Rizayeva - Yovvoyi",
+        "Janob Rasul - Tamanno",
+        "Sardor Tairov - Malikam"
+    ],
+    "ru": [
+        "Miyagi & Andy Panda - Minor",
+        "Anna Asti - Царица",
+        "MACAN - Спой",
+        "Jakone, A-Sen - По весне",
+        "Xcho - Ты и Я",
+        "GAYAZOV$ BROTHER$ - Малиновая лада",
+        "HammAli & Navai - Прятки",
+        "JONY - Комета",
+        "Люся Чеботина - Солнце Монако",
+        "Rauf & Faik - Детство"
+    ],
+    "kz": [
+        "Jah Khalib - Медина",
+        "Raim - Самая вышка",
+        "De Lacure - Келші жаным",
+        "Kalifarniya - Puertorika",
+        "Sadraddin - Ant",
+        "Mirani - Ainalaiyn",
+        "Qanay - Boztorgai",
+        "Alashuly - Tulpar",
+        "Kairat Nurtas - Sen meni tusinbedin",
+        "Erke Esmahan - Kaida"
+    ],
+    "tr": [
+        "Semicenk - Canın Sağ Olsun",
+        "Mert Demir - Ateşe Düştüm",
+        "Dedublüman - Belki",
+        "Mabel Matiz - Antidepresan",
+        "KÖFN - Bir Tek Sana Müptelayım",
+        "Reynmen - Renklensin",
+        "Uzi - Arasan Da",
+        "Lvbel C5 - Dacia",
+        "BLOK3 - AFFETMEM",
+        "Simge - Aşkın Olayım"
+    ]
+}
 
 # ----------------- SESSION POOL MANAGER ----------------- #
 
@@ -360,9 +438,39 @@ def sanitize_youtube_url(url: str) -> str:
         return f"https://www.youtube.com/watch?v={match.group(1)}"
     return url.strip()
 
+# Fast Search Function for plain song titles
+def search_youtube_videos(query: str, limit: int = 5):
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': True,
+        'skip_download': True
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            res = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
+            entries = res.get('entries', [])
+            results = []
+            for e in entries:
+                if not e:
+                    continue
+                dur = e.get('duration') or 0
+                dur_str = f"{int(dur // 60)}:{int(dur % 60):02d}" if dur else ""
+                results.append({
+                    "id": e.get('id'),
+                    "title": e.get('title'),
+                    "url": f"https://www.youtube.com/watch?v={e.get('id')}",
+                    "duration": dur_str
+                })
+            return results
+    except Exception as e:
+        logger.error(f"Search YouTube Error: {e}")
+        return []
+
 def extract_youtube_metadata(url: str):
     clean_url = sanitize_youtube_url(url)
     
+    # iOS / Android extraction avoids bot detection & fetches full 1080p stream formats
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -370,7 +478,7 @@ def extract_youtube_metadata(url: str):
         'skip_download': True,
         'extractor_args': {
             'youtube': {
-                'player_client': ['web', 'android', 'ios']
+                'player_client': ['ios', 'android', 'web']
             }
         }
     }
@@ -381,7 +489,7 @@ def extract_youtube_metadata(url: str):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(clean_url, download=False)
     except Exception as e:
-        logger.warning(f"Metadata extract with primary settings failed: {e}. Trying fallback...")
+        logger.warning(f"Metadata extract failed: {e}. Retrying fallback...")
         try:
             ydl_opts_fallback = {
                 'quiet': True,
@@ -392,7 +500,7 @@ def extract_youtube_metadata(url: str):
             with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
                 info = ydl.extract_info(clean_url, download=False)
         except Exception as e2:
-            logger.error(f"Metadata extraction fallback failed: {e2}")
+            logger.error(f"Metadata fallback failed: {e2}")
             return None
 
     if not info:
@@ -444,7 +552,7 @@ def download_youtube_with_quality(url: str, user_id: int, height: int = None):
         'noplaylist': True,
         'extractor_args': {
             'youtube': {
-                'player_client': ['web', 'android', 'ios']
+                'player_client': ['ios', 'android', 'web']
             }
         },
         'postprocessor_args': {
@@ -463,7 +571,7 @@ def download_youtube_with_quality(url: str, user_id: int, height: int = None):
                 if fname.startswith(prefix):
                     return os.path.join(DOWNLOAD_DIR, fname), title
     except Exception as e:
-        logger.warning(f"Primary YouTube download failed: {e}. Trying fallback...")
+        logger.warning(f"Download failed: {e}. Retrying fallback...")
         try:
             ydl_opts_fallback = {
                 'format': fmt,
@@ -480,7 +588,7 @@ def download_youtube_with_quality(url: str, user_id: int, height: int = None):
                     if fname.startswith(prefix):
                         return os.path.join(DOWNLOAD_DIR, fname), title
         except Exception as e2:
-            logger.error(f"Fallback YouTube download failed: {e2}")
+            logger.error(f"Fallback download failed: {e2}")
 
     return None, None
 
@@ -507,7 +615,6 @@ def download_direct_social_best(url: str, user_id: int):
         'buffersize': 1024 * 1024 * 16,
         'max_filesize': 1950 * 1024 * 1024,
     }
-    
     ydl_opts.update(get_aria2_opts())
 
     try:
@@ -536,7 +643,7 @@ def extract_and_download_social_audio(url: str, user_id: int):
         'noplaylist': True,
         'extractor_args': {
             'youtube': {
-                'player_client': ['web', 'android', 'ios']
+                'player_client': ['ios', 'android', 'web']
             }
         },
         'postprocessors': [{
@@ -582,6 +689,30 @@ def extract_and_download_social_audio(url: str, user_id: int):
         logger.error(f"Fallback audio error: {e}")
 
     return None, None
+
+def generate_top_markup(country_code="gb"):
+    flags = [
+        ("🇺🇿", "uz"),
+        ("🇷🇺", "ru"),
+        ("🇬🇧", "gb"),
+        ("🇺🇸", "us"),
+        ("🇰🇿", "kz"),
+        ("🇹🇷", "tr")
+    ]
+    flag_row = []
+    for flag, code in flags:
+        label = f"{flag} ✅" if code == country_code else flag
+        flag_row.append(InlineKeyboardButton(label, callback_data=f"top_country_{code}"))
+
+    songs = TOP_SONGS.get(country_code, TOP_SONGS["gb"])
+    buttons = [flag_row]
+    for s in songs:
+        buttons.append([InlineKeyboardButton(s, callback_data=f"top_search_{hashlib.md5(s.encode()).hexdigest()[:8]}")])
+        # Save cache for the song query
+        search_cache[hashlib.md5(s.encode()).hexdigest()[:8]] = s
+
+    buttons.append([InlineKeyboardButton("➡️", callback_data="top_next")])
+    return InlineKeyboardMarkup(buttons)
 
 # ----------------- MESSAGE HANDLER ----------------- #
 
@@ -731,12 +862,14 @@ async def private_message_handler(client: Client, message: Message):
             "**Hello! 🐥**\n"
             f"I'm @{bot_username} – a bot for **downloading photos/videos** and searching for music.\n\n"
             "__Send me:__\n"
-            "– Link from **TikTok / Instagram / YouTube / Pinterest / Facebook** and others\n"
-            "– Telegram post links (**Public & Restricted**)\n"
-            "– Song title or artist name\n\n"
-            "__And I will download for you: photo, video, sound, song or files.__\n\n"
+            "– Link from **TikTok / Instagram / YouTube / Pinterest / Likee / Threads / VK and others**\n"
+            "– Song title or artist name\n"
+            "– Voice message, video, circle\n"
+            "– Lyrics from the song\n\n"
+            "__And I will download for you: photo, video, sound, song or lyrics.__\n\n"
             "/help – help\n"
-            "/ping – check ping\n\n"
+            "/top – top music\n"
+            "/ping – ping status\n\n"
             "**Add me to the group**, send me a link to the video – and I'll upload it directly to the chat. 🚀"
         )
 
@@ -744,25 +877,37 @@ async def private_message_handler(client: Client, message: Message):
             [InlineKeyboardButton("➕ Add to chat", url=f"https://t.me/{bot_username}?startgroup=true")]
         ]
 
+        # Admin Button ONLY visible to Admin/Owner
         if user_id == OWNER_ID:
             buttons.append([InlineKeyboardButton("⚙️ Admin Dashboard", callback_data="btn_admin_shortcut")])
 
         await message.reply_text(start_text, reply_markup=InlineKeyboardMarkup(buttons))
         return
 
-    # Help Command
+    # TOP Songs Command (/top)
+    if text_str.startswith("/top"):
+        try:
+            await message.react("🫡")
+        except Exception:
+            pass
+        markup = generate_top_markup("gb")
+        await message.reply_text("🎧 **TOP Popular Songs**", reply_markup=markup)
+        return
+
+    # Help Command (/help)
     if text_str.startswith("/help"):
         help_text = (
-            "📖 **Quick Help Guide**\n"
-            "────────────────────\n"
-            "• **YouTube:** Send video link to pick available qualities or MP3.\n"
-            "• **Social Media:** Send TikTok, Instagram, Facebook links to download in highest quality.\n"
-            "• **Telegram Posts:** Send `t.me/...` links to download Restricted/Public media."
+            "📖 **How to download photos/videos:**\n"
+            "1. Log in to the TikTok / YouTube / Instagram / Facebook app.\n"
+            "2. Select the video or music you need.\n"
+            "3. Click on the 🔄 **Share** button and click **Copy link**.\n"
+            "4. Send the link to this bot – it will process & download it instantly!\n\n"
+            "🔍 **Music Search:** Type any artist name or song title directly."
         )
         await message.reply_text(help_text)
         return
 
-    # Ping Command
+    # Ping Command (/ping)
     if text_str.startswith("/ping"):
         start_t = time.time()
         p_msg = await message.reply_text("⚡ Ping...")
@@ -775,7 +920,6 @@ async def private_message_handler(client: Client, message: Message):
     public_match = re.search(r"t\.me/([a-zA-Z0-9_]+)/(\d+)", text_str)
 
     if private_match or public_match:
-        # Auto React to message
         try:
             await message.react("🫡")
         except Exception:
@@ -910,10 +1054,11 @@ async def private_message_handler(client: Client, message: Message):
             await status.edit_text(f"❌ **Error:** `{str(e)}`")
         return
 
-    # ----------------- SOCIAL & YOUTUBE DOWNLOADER ----------------- #
+    # ----------------- SOCIAL & YOUTUBE / SEARCH HANDLER ----------------- #
     url_pattern = re.search(r'(https?://[^\s]+)', text_str)
+
+    # 1. URL Handler
     if url_pattern:
-        # Auto React to message
         try:
             await message.react("🫡")
         except Exception:
@@ -922,14 +1067,14 @@ async def private_message_handler(client: Client, message: Message):
         url = url_pattern.group(0).strip()
         is_youtube = ("youtube.com" in url or "youtu.be" in url)
 
-        # 1. YOUTUBE
+        # YouTube URL
         if is_youtube:
             status = await message.reply_text("⚡ **Analyzing YouTube video...**")
             asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, url, "YouTube"))
 
             meta = await asyncio.to_thread(extract_youtube_metadata, url)
             if not meta:
-                await status.edit_text("❌ **Failed to fetch video.** Link may be private, age-restricted, or unsupported.")
+                await status.edit_text("❌ **Failed to fetch video.** Link may be private, restricted, or unavailable.")
                 return
 
             title = meta.get("title", "Video")
@@ -971,7 +1116,7 @@ async def private_message_handler(client: Client, message: Message):
                 await message.reply_text(caption_text, reply_markup=InlineKeyboardMarkup(buttons))
             return
 
-        # 2. OTHER SOCIALS
+        # Direct Social Media (TikTok, IG, FB)
         platform = "TikTok" if "tiktok" in url else "Instagram" if "instagram" in url else "Facebook" if ("facebook" in url or "fb.watch" in url) else "Social"
         asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, url, platform))
 
@@ -1012,6 +1157,39 @@ async def private_message_handler(client: Client, message: Message):
                     os.remove(file_path)
                 except Exception:
                     pass
+        return
+
+    # 2. Text Search Handler (For music/songs by name)
+    if text_str and not text_str.startswith("/"):
+        try:
+            await message.react("🫡")
+        except Exception:
+            pass
+
+        search_msg = await message.reply_text(f"🔎 **Searching for:** `{text_str}`...")
+        results = await asyncio.to_thread(search_youtube_videos, text_str, 5)
+
+        if not results:
+            await search_msg.edit_text("❌ **No results found.** Please try with another keyword.")
+            return
+
+        text_lines = [f"🔍 **Search results for:** `{text_str}`\n"]
+        num_row = []
+
+        for idx, item in enumerate(results, 1):
+            dur_display = f" `{item['duration']}`" if item['duration'] else ""
+            text_lines.append(f"**{idx}.** {item['title']}{dur_display}")
+            
+            s_hash = hashlib.md5(item['url'].encode()).hexdigest()[:8]
+            search_cache[s_hash] = item['url']
+            num_row.append(InlineKeyboardButton(str(idx), callback_data=f"pick_{s_hash}"))
+
+        markup = InlineKeyboardMarkup([
+            num_row
+        ])
+
+        await search_msg.edit_text("\n".join(text_lines), reply_markup=markup)
+        return
 
 # ----------------- CALLBACK QUERY HANDLER ----------------- #
 
@@ -1025,6 +1203,95 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
             await query.message.delete()
         except Exception:
             await query.answer("Couldn't delete message.", show_alert=False)
+        return
+
+    # Country Selector in /top
+    if data.startswith("top_country_"):
+        country = data.split("_")[2]
+        markup = generate_top_markup(country)
+        await query.message.edit_reply_markup(reply_markup=markup)
+        await query.answer()
+        return
+
+    # Top search query clicked
+    if data.startswith("top_search_"):
+        q_hash = data.split("_")[2]
+        song_title = search_cache.get(q_hash)
+        if not song_title:
+            await query.answer("Query expired.", show_alert=True)
+            return
+
+        await query.answer(f"Searching: {song_title}...", show_alert=False)
+        results = await asyncio.to_thread(search_youtube_videos, song_title, 5)
+        if not results:
+            await query.message.reply_text("❌ No track found for this item.")
+            return
+
+        text_lines = [f"🎧 **Results for:** `{song_title}`\n"]
+        num_row = []
+        for idx, item in enumerate(results, 1):
+            dur_display = f" `{item['duration']}`" if item['duration'] else ""
+            text_lines.append(f"**{idx}.** {item['title']}{dur_display}")
+            s_hash = hashlib.md5(item['url'].encode()).hexdigest()[:8]
+            search_cache[s_hash] = item['url']
+            num_row.append(InlineKeyboardButton(str(idx), callback_data=f"pick_{s_hash}"))
+
+        await query.message.reply_text("\n".join(text_lines), reply_markup=InlineKeyboardMarkup([num_row]))
+        return
+
+    # Pick item from search list
+    if data.startswith("pick_"):
+        s_hash = data.split("_")[1]
+        target_url = search_cache.get(s_hash)
+        if not target_url:
+            await query.answer("Item expired. Search again.", show_alert=True)
+            return
+
+        await query.answer("Fetching formats...", show_alert=False)
+        status = await query.message.reply_text("⚡ **Analyzing selected track...**")
+
+        meta = await asyncio.to_thread(extract_youtube_metadata, target_url)
+        if not meta:
+            await status.edit_text("❌ Failed to fetch track stream.")
+            return
+
+        title = meta.get("title", "Track")
+        thumbnail = meta.get("thumbnail")
+        qualities = meta.get("qualities", [720, 360])
+
+        url_hash = hashlib.md5(f"{target_url}_{user_id}_{time.time()}".encode()).hexdigest()[:12]
+        video_cache[url_hash] = {
+            "url": target_url,
+            "title": title,
+            "platform": "YouTube"
+        }
+
+        buttons = []
+        row = []
+        for q in qualities:
+            row.append(InlineKeyboardButton(f"📹 {q}p", callback_data=f"dl_res_{url_hash}_{q}"))
+            if len(row) == 2:
+                buttons.append(row)
+                row = []
+        if row:
+            buttons.append(row)
+
+        buttons.append([InlineKeyboardButton("🔊 Audio", callback_data=f"dl_aud_{url_hash}")])
+
+        caption_text = (
+            f"📹 **{title}** ➔\n"
+            f"👤 **#YouTube** ➔\n\n"
+            "**Formats to download ↓**"
+        )
+
+        try:
+            await status.delete()
+            if thumbnail:
+                await query.message.reply_photo(photo=thumbnail, caption=caption_text, reply_markup=InlineKeyboardMarkup(buttons))
+            else:
+                await query.message.reply_text(caption_text, reply_markup=InlineKeyboardMarkup(buttons))
+        except Exception:
+            await query.message.reply_text(caption_text, reply_markup=InlineKeyboardMarkup(buttons))
         return
 
     # Handle YouTube Video Quality Selection
@@ -1214,6 +1481,18 @@ async def web_server():
 
 async def main():
     await bot.start()
+    
+    # Setup standard bot menu commands
+    try:
+        await bot.set_bot_commands([
+            BotCommand("start", "Start the bot"),
+            BotCommand("top", "Popular songs"),
+            BotCommand("help", "How to use"),
+            BotCommand("ping", "Check bot latency")
+        ])
+    except Exception as e:
+        logger.warning(f"Failed to set bot commands: {e}")
+
     logger.info("Bot started successfully!")
     await init_session_pool()
     await web_server()
