@@ -362,52 +362,75 @@ def sanitize_youtube_url(url: str) -> str:
 
 def extract_youtube_metadata(url: str):
     clean_url = sanitize_youtube_url(url)
+    
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
         'skip_download': True,
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android_creator', 'android', 'ios'],
+                'player_skip': ['webpage', 'configs']
+            }
         }
     }
     ydl_opts.update(get_yt_cookies())
 
+    info = None
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(clean_url, download=False)
-            if not info:
-                return None
-
-            title = str(info.get('title') or "YouTube Video")
-            thumbnail = info.get('thumbnail')
-            formats = info.get('formats', [])
-
-            max_h = 0
-            for f in formats:
-                h = f.get('height') or 0
-                vcodec = f.get('vcodec', 'none')
-                if vcodec != 'none' and h > max_h:
-                    max_h = h
-
-            standard_resolutions = [1080, 720, 480, 360]
-            available_qualities = []
-
-            for res in standard_resolutions:
-                if max_h >= (res * 0.70):
-                    available_qualities.append(res)
-
-            if not available_qualities:
-                available_qualities = [720, 360]
-
-            return {
-                "title": title,
-                "thumbnail": thumbnail,
-                "qualities": available_qualities
-            }
     except Exception as e:
-        logger.error(f"YouTube metadata extraction error: {e}")
+        logger.warning(f"Metadata extract with primary settings failed: {e}. Trying fallback without cookies...")
+        try:
+            ydl_opts_fallback = {
+                'quiet': True,
+                'no_warnings': True,
+                'noplaylist': True,
+                'skip_download': True,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['android_creator', 'android', 'ios'],
+                        'player_skip': ['webpage', 'configs']
+                    }
+                }
+            }
+            with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
+                info = ydl.extract_info(clean_url, download=False)
+        except Exception as e2:
+            logger.error(f"Metadata extraction fallback failed: {e2}")
+            return None
+
+    if not info:
         return None
+
+    title = str(info.get('title') or "YouTube Video")
+    thumbnail = info.get('thumbnail')
+    formats = info.get('formats', [])
+
+    max_h = 0
+    for f in formats:
+        h = f.get('height') or 0
+        vcodec = f.get('vcodec', 'none')
+        if vcodec != 'none' and h > max_h:
+            max_h = h
+
+    standard_resolutions = [1080, 720, 480, 360]
+    available_qualities = []
+
+    for res in standard_resolutions:
+        if max_h >= (res * 0.70):
+            available_qualities.append(res)
+
+    if not available_qualities:
+        available_qualities = [720, 360]
+
+    return {
+        "title": title,
+        "thumbnail": thumbnail,
+        "qualities": available_qualities
+    }
 
 def download_youtube_with_quality(url: str, user_id: int, height: int = None):
     clean_url = sanitize_youtube_url(url)
@@ -415,43 +438,64 @@ def download_youtube_with_quality(url: str, user_id: int, height: int = None):
     prefix = f"{user_id}_{timestamp}_yt_"
     out_template = os.path.join(DOWNLOAD_DIR, f"{prefix}%(id)s.%(ext)s")
 
-    # Multi-Tier Fallback Format List
-    format_candidates = []
     if height:
-        format_candidates.append(f"bestvideo[height<={height}]+bestaudio/best[height<={height}]")
-        format_candidates.append(f"bestvideo[height<={height+140}]+bestaudio/best[height<={height+140}]")
-    format_candidates.append("bestvideo+bestaudio/best")
-    format_candidates.append("best")
+        fmt = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/bestvideo+bestaudio/best"
+    else:
+        fmt = "bestvideo+bestaudio/best"
 
-    for fmt in format_candidates:
-        ydl_opts = {
-            'format': fmt,
-            'outtmpl': out_template,
-            'merge_output_format': 'mp4',
-            'quiet': True,
-            'no_warnings': True,
-            'noplaylist': True,
-            'buffersize': 1024 * 1024 * 16,
-            'max_filesize': 1950 * 1024 * 1024,
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
-            },
-            'postprocessor_args': {
-                'Merger': ['-movflags', '+faststart']
+    ydl_opts = {
+        'format': fmt,
+        'outtmpl': out_template,
+        'merge_output_format': 'mp4',
+        'quiet': True,
+        'no_warnings': True,
+        'noplaylist': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android_creator', 'android', 'ios'],
+                'player_skip': ['webpage', 'configs']
             }
-        }
-        ydl_opts.update(get_yt_cookies())
+        },
+        'postprocessor_args': {
+            'Merger': ['-movflags', '+faststart']
+        },
+        'buffersize': 1024 * 1024 * 16,
+        'max_filesize': 1950 * 1024 * 1024,
+    }
+    ydl_opts.update(get_yt_cookies())
 
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(clean_url, download=True)
+            title = str(info.get('title') or "Video") if info else "Video"
+            for fname in os.listdir(DOWNLOAD_DIR):
+                if fname.startswith(prefix):
+                    return os.path.join(DOWNLOAD_DIR, fname), title
+    except Exception as e:
+        logger.warning(f"Primary YouTube download failed: {e}. Trying fallback without cookies...")
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl_opts_fallback = {
+                'format': 'bestvideo+bestaudio/best',
+                'outtmpl': out_template,
+                'merge_output_format': 'mp4',
+                'quiet': True,
+                'no_warnings': True,
+                'noplaylist': True,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['android_creator', 'android', 'ios'],
+                        'player_skip': ['webpage', 'configs']
+                    }
+                }
+            }
+            with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
                 info = ydl.extract_info(clean_url, download=True)
                 title = str(info.get('title') or "Video") if info else "Video"
                 for fname in os.listdir(DOWNLOAD_DIR):
                     if fname.startswith(prefix):
                         return os.path.join(DOWNLOAD_DIR, fname), title
-        except Exception as e:
-            logger.warning(f"Format candidate '{fmt}' failed: {e}. Trying fallback...")
-            continue
+        except Exception as e2:
+            logger.error(f"Fallback YouTube download failed: {e2}")
 
     return None, None
 
@@ -505,14 +549,17 @@ def extract_and_download_social_audio(url: str, user_id: int):
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android_creator', 'android', 'ios'],
+                'player_skip': ['webpage', 'configs']
+            }
+        },
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
             'preferredquality': '192',
         }],
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        },
         'max_filesize': 500 * 1024 * 1024,
     }
     ydl_opts.update(get_yt_cookies())
@@ -539,8 +586,13 @@ def extract_and_download_social_audio(url: str, user_id: int):
             'quiet': True,
             'no_warnings': True,
             'noplaylist': True,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android_creator', 'android', 'ios'],
+                    'player_skip': ['webpage', 'configs']
+                }
+            }
         }
-        ydl_opts_fallback.update(get_yt_cookies())
         with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
             info = ydl.extract_info(clean_url, download=True)
             title = str(info.get('title') or "Audio") if info else "Audio"
