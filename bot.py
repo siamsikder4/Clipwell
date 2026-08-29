@@ -370,7 +370,7 @@ def extract_youtube_metadata(url: str):
         'format': 'all',
         'extractor_args': {
             'youtube': {
-                'player_client': ['web', 'mweb', 'android']
+                'player_client': ['android', 'web']
             }
         },
         'http_headers': {
@@ -421,22 +421,15 @@ def download_youtube_with_quality(url: str, user_id: int, height: int = None):
     prefix = f"{user_id}_{timestamp}_yt_"
     out_template = os.path.join(DOWNLOAD_DIR, f"{prefix}%(id)s.%(ext)s")
 
-    if height:
-        format_str = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/bestvideo+bestaudio/best"
-    else:
-        format_str = "bestvideo+bestaudio/best"
-
     ydl_opts = {
-        'format': format_str,
         'outtmpl': out_template,
         'merge_output_format': 'mp4',
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
-        'concurrent_fragment_downloads': 4,
         'extractor_args': {
             'youtube': {
-                'player_client': ['web', 'mweb', 'android']
+                'player_client': ['android', 'web']
             }
         },
         'http_headers': {
@@ -448,9 +441,15 @@ def download_youtube_with_quality(url: str, user_id: int, height: int = None):
         'buffersize': 1024 * 1024 * 16,
         'max_filesize': 1950 * 1024 * 1024,
     }
+
+    if height:
+        ydl_opts['format'] = f'bv*[height<={height}]+ba/b[height<={height}]/bv*+ba/b/best'
+        ydl_opts['format_sort'] = [f'res:{height}', 'ext:mp4:m4a']
+    else:
+        ydl_opts['format'] = 'bv*+ba/b/best'
+        ydl_opts['format_sort'] = ['ext:mp4:m4a']
     
     ydl_opts.update(get_yt_cookies())
-    ydl_opts.update(get_aria2_opts())
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -479,7 +478,7 @@ def download_direct_social_best(url: str, user_id: int):
         'noplaylist': True,
         'concurrent_fragment_downloads': 4,
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
         },
         'postprocessor_args': {
             'Merger': ['-movflags', '+faststart']
@@ -516,7 +515,7 @@ def extract_and_download_social_audio(url: str, user_id: int):
         'noplaylist': True,
         'extractor_args': {
             'youtube': {
-                'player_client': ['web', 'mweb', 'android']
+                'player_client': ['android', 'web']
             }
         },
         'postprocessors': [{
@@ -866,7 +865,7 @@ async def private_message_handler(client: Client, message: Message):
         
         is_youtube = ("youtube.com" in url or "youtu.be" in url)
 
-        # 1. YOUTUBE (Displays 2-column Quality Selector & Thumbnail)
+        # 1. YOUTUBE
         if is_youtube:
             status = await message.reply_text("⚡ **Analyzing YouTube video...**")
             asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, url, "YouTube"))
@@ -915,7 +914,7 @@ async def private_message_handler(client: Client, message: Message):
                 await message.reply_text(caption_text, reply_markup=InlineKeyboardMarkup(buttons))
             return
 
-        # 2. OTHER SOCIALS (Direct Best Quality Download)
+        # 2. OTHER SOCIALS
         platform = "TikTok" if "tiktok" in url else "Instagram" if "instagram" in url else "Facebook" if ("facebook" in url or "fb.watch" in url) else "Social"
         asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, url, platform))
 
