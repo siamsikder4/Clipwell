@@ -15,7 +15,11 @@ from hydrogram.types import (
     InlineKeyboardButton,
     CallbackQuery,
     ForceReply,
-    BotCommand
+    BotCommand,
+    InputMediaPhoto,
+    InputMediaVideo,
+    InputMediaAudio,
+    InputMediaDocument
 )
 from hydrogram.errors import SessionPasswordNeeded
 
@@ -914,7 +918,7 @@ async def private_message_handler(client: Client, message: Message):
         await p_msg.edit_text(f"⚡ **Pong!** `{(end_t - start_t) * 1000:.1f}ms`")
         return
 
-    # ----------------- TELEGRAM POST DOWNLOADER ----------------- #
+    # ----------------- TELEGRAM POST DOWNLOADER (ALBUM SUPPORTED) ----------------- #
     private_match = re.search(r"t\.me/c/(\d+)/(\d+)", text_str)
     public_match = re.search(r"t\.me/([a-zA-Z0-9_]+)/(\d+)", text_str)
 
@@ -946,6 +950,7 @@ async def private_message_handler(client: Client, message: Message):
 
             target_msg = None
             working_client = None
+            media_group = []
 
             for _, _, u_client in loaded_user_clients:
                 try:
@@ -953,6 +958,15 @@ async def private_message_handler(client: Client, message: Message):
                     if msg and not msg.empty:
                         target_msg = msg
                         working_client = u_client
+
+                        # Check if message is part of an album / media group
+                        if msg.media_group_id:
+                            try:
+                                media_group = await u_client.get_media_group(chat_id, msg_id)
+                            except Exception:
+                                media_group = [msg]
+                        else:
+                            media_group = [msg]
                         break
                 except Exception:
                     continue
@@ -961,6 +975,53 @@ async def private_message_handler(client: Client, message: Message):
                 await status.edit_text("❌ **Post unavailable.** Ensure the session account has access to this chat.")
                 return
 
+            # --- Handle Media Group (Album) ---
+            if len(media_group) > 1:
+                await status.edit_text(f"📥 **Downloading album ({len(media_group)} files)...**")
+                downloaded_files = []
+                input_media_list = []
+                p_count, v_count, a_count = 0, 0, 0
+
+                for idx, m in enumerate(media_group):
+                    file_path = await working_client.download_media(m)
+                    if file_path and os.path.exists(file_path):
+                        downloaded_files.append(file_path)
+                        # Attach caption exclusively to the first item
+                        cap = m.caption if (m.caption and idx == 0) else (target_msg.caption if idx == 0 else "")
+
+                        if m.photo:
+                            input_media_list.append(InputMediaPhoto(media=file_path, caption=cap))
+                            p_count += 1
+                        elif m.video:
+                            input_media_list.append(InputMediaVideo(media=file_path, caption=cap, supports_streaming=True))
+                            v_count += 1
+                        elif m.audio:
+                            input_media_list.append(InputMediaAudio(media=file_path, caption=cap))
+                            a_count += 1
+                        elif m.document:
+                            input_media_list.append(InputMediaDocument(media=file_path, caption=cap))
+
+                if input_media_list:
+                    await status.edit_text("📤 **Uploading album...**")
+                    sent_msgs = await message.reply_media_group(media=input_media_list)
+                    
+                    asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", len(input_media_list), p_count, v_count, a_count))
+                    asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", len(input_media_list), p_count, v_count, a_count))
+
+                    msg_ids_to_del = [m.id for m in sent_msgs] + [status.id, message.id]
+                    asyncio.create_task(auto_delete_messages(message.chat.id, msg_ids_to_del, delay_seconds=120))
+                else:
+                    await status.edit_text("❌ **Failed to process album media.**")
+
+                for f in downloaded_files:
+                    if os.path.exists(f):
+                        try:
+                            os.remove(f)
+                        except Exception:
+                            pass
+                return
+
+            # --- Handle Single File ---
             if not (target_msg.media or target_msg.video or target_msg.photo or target_msg.document or target_msg.audio or target_msg.voice):
                 if target_msg.text:
                     await status.edit_text(f"📝 **Text Content:**\n\n{target_msg.text}")
@@ -985,7 +1046,6 @@ async def private_message_handler(client: Client, message: Message):
                 InlineKeyboardButton("🗑️ Delete Now", callback_data="btn_delete_this")
             ]])
 
-            # শুধুমাত্র মূল ক্যাপশন/টাইটেল সেট করা হয়েছে (ওয়ার্নিং মেসেজ বাদ দেওয়া হয়েছে)
             caption = target_msg.caption or ""
             sent_msg = None
 
