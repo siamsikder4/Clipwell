@@ -570,7 +570,7 @@ def download_direct_social_best(url: str, user_id: int):
     out_template = os.path.join(DOWNLOAD_DIR, f"{prefix}%(id)s.%(ext)s")
 
     ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
+        'format': 'bestvideo[vcodec^=avc][ext=mp4]+bestaudio[ext=m4a]/bestvideo[vcodec^=avc]+bestaudio/best[vcodec^=avc]/bestvideo+bestaudio/best',
         'outtmpl': out_template,
         'merge_output_format': 'mp4',
         'quiet': True,
@@ -581,7 +581,7 @@ def download_direct_social_best(url: str, user_id: int):
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
         },
         'postprocessor_args': {
-            'Merger': ['-movflags', '+faststart', '-c:v', 'copy', '-c:a', 'aac']
+            'Merger': ['-movflags', '+faststart', '-c:a', 'aac']
         },
         'buffersize': 1024 * 1024 * 16,
         'max_filesize': 1950 * 1024 * 1024,
@@ -986,7 +986,6 @@ async def private_message_handler(client: Client, message: Message):
                     file_path = await working_client.download_media(m)
                     if file_path and os.path.exists(file_path):
                         downloaded_files.append(file_path)
-                        # Attach caption exclusively to the first item
                         cap = m.caption if (m.caption and idx == 0) else (target_msg.caption if idx == 0 else "")
 
                         if m.photo:
