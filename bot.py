@@ -559,7 +559,6 @@ def download_youtube_with_quality(url: str, user_id: int, height: int = None):
 
     return None, None
 
-# Fix for Facebook GIF/Audio Issue: forces audio merging + AAC encoding
 def download_direct_social_best(url: str, user_id: int):
     clean_url = url.strip()
     timestamp = int(time.time())
@@ -986,8 +985,8 @@ async def private_message_handler(client: Client, message: Message):
                 InlineKeyboardButton("🗑️ Delete Now", callback_data="btn_delete_this")
             ]])
 
-            caption_header = f"**{target_msg.caption}**\n\n" if target_msg.caption else ""
-            caption = f"{caption_header}⏱️ *Auto-deletes in 2 minutes.*"
+            # শুধুমাত্র মূল ক্যাপশন/টাইটেল সেট করা হয়েছে (ওয়ার্নিং মেসেজ বাদ দেওয়া হয়েছে)
+            caption = target_msg.caption or ""
             sent_msg = None
 
             if target_msg.video:
