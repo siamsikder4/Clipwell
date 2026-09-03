@@ -45,6 +45,7 @@ FIREBASE_KEY_RAW = os.environ.get("FIREBASE_KEY", "").strip()
 
 OWNER_ID = 6142774415
 PORT = int(os.environ.get("PORT", "8080"))
+AUTO_DELETE_TIME = int(os.environ.get("AUTO_DELETE_TIME", "120"))  # Seconds
 
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -315,20 +316,20 @@ async def generate_admin_dashboard():
     db_status = "Online 🟢" if db else "Offline 🔴"
 
     text = (
-        "⚙️ **Admin Dashboard**\n"
-        "────────────────────\n"
-        f"• **Database:** `{db_status}`\n"
-        f"• **Active Sessions:** `{len(all_sess)}`\n"
-        f"• **Total Downloads:** `{total_dl:,}`\n\n"
-        "📊 **Platform Insights**\n"
-        f"• **Telegram:** `{platforms.get('Telegram', 0):,}`\n"
-        f"  └ 🖼️ `{tg_photos:,}` • 🎥 `{tg_videos:,}` • 🎵 `{tg_audios:,}`\n"
-        f"• **YouTube:** `{platforms.get('YouTube', 0):,}`\n"
-        f"• **TikTok:** `{platforms.get('TikTok', 0):,}`\n"
-        f"• **Instagram:** `{platforms.get('Instagram', 0):,}`\n"
-        f"• **Facebook:** `{platforms.get('Facebook', 0):,}`\n"
-        f"• **Others:** `{platforms.get('Others', 0):,}`\n"
-        "────────────────────"
+        "🎛️ **Control & Analytics Dashboard**\n"
+        "──────────────────────────────\n"
+        f"• **Database Engine:** `{db_status}`\n"
+        f"• **Connected Userbots:** `{len(all_sess)} Active`\n"
+        f"• **All-Time Downloads:** `{total_dl:,}`\n\n"
+        "📊 **Platform Metrics**\n"
+        f"• ✈️ **Telegram:** `{platforms.get('Telegram', 0):,}`\n"
+        f"   └ 🖼️ `{tg_photos:,}` • 🎥 `{tg_videos:,}` • 🎵 `{tg_audios:,}`\n"
+        f"• 🎬 **YouTube:** `{platforms.get('YouTube', 0):,}`\n"
+        f"• 🎵 **TikTok:** `{platforms.get('TikTok', 0):,}`\n"
+        f"• 📸 **Instagram:** `{platforms.get('Instagram', 0):,}`\n"
+        f"• 📘 **Facebook:** `{platforms.get('Facebook', 0):,}`\n"
+        f"• 🌐 **Other Sources:** `{platforms.get('Others', 0):,}`\n"
+        "──────────────────────────────"
     )
 
     keyboard = InlineKeyboardMarkup([
@@ -337,17 +338,17 @@ async def generate_admin_dashboard():
             InlineKeyboardButton("➕ Paste String", callback_data="btn_add_session")
         ],
         [
-            InlineKeyboardButton(f"📁 Sessions ({len(all_sess)})", callback_data="btn_list_sessions"),
+            InlineKeyboardButton(f"📁 Manage Sessions ({len(all_sess)})", callback_data="btn_list_sessions"),
             InlineKeyboardButton("🗑️ Remove Session", callback_data="btn_del_menu")
         ],
         [
-            InlineKeyboardButton("🔗 Activity Log", callback_data="btn_view_urls"),
-            InlineKeyboardButton("🔄 Refresh", callback_data="btn_refresh_admin")
+            InlineKeyboardButton("🔗 Live Activity Feed", callback_data="btn_view_urls"),
+            InlineKeyboardButton("🔄 Refresh Stats", callback_data="btn_refresh_admin")
         ]
     ])
     return text, keyboard
 
-# ----------------- UTILITY & DOWNLOADER ----------------- #
+# ----------------- UTILITY, PROGRESS & COUNTDOWN ----------------- #
 
 def get_aria2_opts():
     if shutil.which("aria2c"):
@@ -378,29 +379,76 @@ async def progress_bar(current, total, status_msg, action_name, user_id):
     user_data = progress_status.get(user_id, {})
     last_update = user_data.get("last_time", 0)
 
-    if (now - last_update < 3.0) and current < total:
+    if (now - last_update < 2.5) and current < total:
         return
 
     progress_status[user_id] = {"last_time": now}
     percentage = (current / total) * 100
     filled = int(percentage // 10)
-    bar = "▰" * filled + "▱" * (10 - filled)
+    bar = "█" * filled + "░" * (10 - filled)
 
     curr_mb = current / (1024 * 1024)
     tot_mb = total / (1024 * 1024)
 
     text = (
-        f"⏳ **{action_name}**\n\n"
-        f"`{bar}` **{percentage:.1f}%**\n"
-        f"⚡ **Size:** `{curr_mb:.1f} MB / {tot_mb:.1f} MB`"
+        f"⚡ **{action_name}**\n\n"
+        f"┌ `[{bar}]` **{percentage:.1f}%**\n"
+        f"└ 📦 **Transferred:** `{curr_mb:.2f} MB` / `{tot_mb:.2f} MB`\n"
     )
     try:
         await status_msg.edit_text(text)
     except Exception:
         pass
 
-async def auto_delete_messages(chat_id: int, message_ids: list, delay_seconds: int = 120):
-    await asyncio.sleep(delay_seconds)
+# ⏱️ LIVE COUNTDOWN & AUTO-DELETE SYSTEM
+async def start_countdown_and_delete(chat_id: int, message_ids: list, total_seconds: int = AUTO_DELETE_TIME):
+    """
+    Shows a live countdown alert and deletes target messages after the timer expires.
+    Updates in intervals to avoid Telegram flood limits.
+    """
+    mins, secs = divmod(total_seconds, 60)
+    timer_str = f"{mins:02d}:{secs:02d}"
+    
+    notice_text = (
+        "⏳ **Auto-Delete Timer Active**\n"
+        "────────────────────────\n"
+        f"⏱️ **Disappearing in:** `{timer_str}`\n\n"
+        "💡 *Forward or save this file to your 'Saved Messages' before it self-destructs!*"
+    )
+    
+    delete_markup = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🗑️ Delete Right Now", callback_data="btn_delete_this")
+    ]])
+    
+    countdown_msg = None
+    try:
+        countdown_msg = await bot.send_message(chat_id, notice_text, reply_markup=delete_markup)
+        message_ids.append(countdown_msg.id)
+    except Exception:
+        pass
+
+    remaining = total_seconds
+    step = 10 if total_seconds > 20 else 5
+
+    while remaining > 0:
+        await asyncio.sleep(step)
+        remaining -= step
+        if remaining <= 0:
+            break
+
+        if countdown_msg:
+            m, s = divmod(max(0, remaining), 60)
+            update_text = (
+                "⏳ **Auto-Delete Timer Active**\n"
+                "────────────────────────\n"
+                f"⏱️ **Disappearing in:** `{m:02d}:{s:02d}`\n\n"
+                "💡 *Forward or save this file to your 'Saved Messages' before it self-destructs!*"
+            )
+            try:
+                await countdown_msg.edit_text(update_text, reply_markup=delete_markup)
+            except Exception:
+                pass
+
     try:
         await bot.delete_messages(chat_id=chat_id, message_ids=message_ids)
     except Exception:
@@ -672,7 +720,7 @@ async def generate_dynamic_top_markup():
         top_tracks_cache[t_key] = track
         
         icon = "🎵" if track.get("file_id") else "🎧"
-        btn_label = f"{icon} {title[:35]}"
+        btn_label = f"{icon} {title[:32]}"
         buttons.append([InlineKeyboardButton(btn_label, callback_data=f"play_top_{t_key}")])
 
     return InlineKeyboardMarkup(buttons)
@@ -689,10 +737,10 @@ async def private_message_handler(client: Client, message: Message):
 
     asyncio.create_task(asyncio.to_thread(sync_track_user, user_id, user.username, user.first_name))
 
-    # Admin Panel Command
+    # Admin Command
     if text_str.startswith("/admin") or text_str.startswith("/panel"):
         if user_id != OWNER_ID:
-            await message.reply_text("⛔ **Access restricted.** Admin only.")
+            await message.reply_text("⛔ **Access denied.** Admin area only.")
             return
         dash_text, dash_markup = await generate_admin_dashboard()
         await message.reply_text(dash_text, reply_markup=dash_markup)
@@ -701,7 +749,7 @@ async def private_message_handler(client: Client, message: Message):
     # Waiting Session String
     if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_SESSION":
         admin_states.pop(user_id, None)
-        status_msg = await message.reply_text("🔄 Verifying session string...")
+        status_msg = await message.reply_text("🔄 **Verifying session string...**")
 
         test_client = Client(f"test_{int(time.time())}", api_id=API_ID, api_hash=API_HASH, session_string=text_str, in_memory=True)
         try:
@@ -713,7 +761,7 @@ async def private_message_handler(client: Client, message: Message):
             success, err_msg = await asyncio.to_thread(sync_add_session, text_str, acc_name)
             if success:
                 asyncio.create_task(init_session_pool())
-                await status_msg.edit_text(f"✅ **Session saved successfully!**\n\n👤 **Account:** `{acc_name}`")
+                await status_msg.edit_text(f"✅ **Session Saved Successfully!**\n\n👤 **Account:** `{acc_name}`")
             else:
                 await status_msg.edit_text(f"⚠️ **Database Error:** `{err_msg}`")
         except Exception as e:
@@ -724,7 +772,7 @@ async def private_message_handler(client: Client, message: Message):
     if user_id == OWNER_ID and admin_states.get(user_id) == "LOGIN_PHONE":
         admin_states.pop(user_id, None)
         phone_number = text_str.replace(" ", "").strip()
-        status_msg = await message.reply_text("⏳ Requesting Telegram OTP code...")
+        status_msg = await message.reply_text("⏳ **Requesting OTP from Telegram...**")
 
         temp_client = Client(f"login_{int(time.time())}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
         try:
@@ -758,7 +806,7 @@ async def private_message_handler(client: Client, message: Message):
             return
 
         temp_client = session_data["client"]
-        status_msg = await message.reply_text("⏳ Verifying code...")
+        status_msg = await message.reply_text("⏳ **Verifying code...**")
 
         try:
             await temp_client.sign_in(session_data["phone"], session_data["phone_code_hash"], otp_code)
@@ -794,7 +842,7 @@ async def private_message_handler(client: Client, message: Message):
             return
 
         temp_client = session_data["client"]
-        status_msg = await message.reply_text("⏳ Checking password...")
+        status_msg = await message.reply_text("⏳ **Checking password...**")
 
         try:
             await temp_client.check_password(password)
@@ -822,24 +870,26 @@ async def private_message_handler(client: Client, message: Message):
         bot_username = bot_info.username or "bot"
 
         start_text = (
-            "**Hello! 🐥**\n"
-            f"I'm @{bot_username} – a bot for **downloading photos/videos** and searching for music.\n\n"
-            "__Send me:__\n"
-            "– Link from **TikTok / Instagram / YouTube / Pinterest / Likee / Threads / VK / Facebook**\n"
-            "– Telegram post links (**Public & Restricted**)\n"
-            "– Song title or artist name\n"
-            "– Voice message, video, circle\n"
-            "– Lyrics from the song\n\n"
-            "__And I will download for you: photo, video, sound, song or lyrics.__\n\n"
-            "/help – help\n"
-            "/lang – change language\n"
-            "/top – top music\n"
-            "/my – your playlist\n\n"
-            "**Add me to the group**, send me a link to the video – and I'll upload it directly to the chat. 🚀"
+            f"👋 **Welcome to Media Vault Bot, {user.first_name}!**\n"
+            "──────────────────────────────\n"
+            "⚡ *The all-in-one lightning fast downloader bot.*\n\n"
+            "📥 **What I Can Download:**\n"
+            "• **Social Media:** TikTok, Instagram, YouTube, Facebook, Pinterest\n"
+            "• **Telegram Posts:** Public & Restricted Channel/Group media\n"
+            "• **Music Search:** Instant MP3s by song name or artist\n\n"
+            "⏱️ *Features smart auto-delete countdown for clean chat storage.*\n"
+            "──────────────────────────────"
         )
 
         buttons = [
-            [InlineKeyboardButton("➕ Add to chat", url=f"https://t.me/{bot_username}?startgroup=true")]
+            [
+                InlineKeyboardButton("➕ Add Me to Group", url=f"https://t.me/{bot_username}?startgroup=true"),
+                InlineKeyboardButton("🔥 Top Music", callback_data="btn_open_top")
+            ],
+            [
+                InlineKeyboardButton("📖 Help Guide", callback_data="btn_open_help"),
+                InlineKeyboardButton("🌐 Language", callback_data="btn_open_lang")
+            ]
         ]
 
         if user_id == OWNER_ID:
@@ -855,7 +905,7 @@ async def private_message_handler(client: Client, message: Message):
         except Exception:
             pass
         markup = await generate_dynamic_top_markup()
-        await message.reply_text("🎧 **TOP Popular Songs (Audio Vault)**\n\n_Tap any track to play/download audio directly:_ ", reply_markup=markup)
+        await message.reply_text("🎧 **TOP Popular Songs (Instant Audio Vault)**\n\n_Tap any track below to stream or download:_ ", reply_markup=markup)
         return
 
     # Menu: Your Playlist (/my)
@@ -866,9 +916,9 @@ async def private_message_handler(client: Client, message: Message):
             pass
         my_text = (
             "🎵 **Your Playlist & Recent Downloads**\n"
-            "────────────────────\n"
-            "• You don't have any saved tracks yet.\n\n"
-            "💡 *Tip:* Send any song name or music link to search and build your playlist!"
+            "────────────────────────\n"
+            "• You have no saved offline tracks currently.\n\n"
+            "💡 *Tip:* Send any artist or song name to instantly stream and build your vault!"
         )
         await message.reply_text(my_text)
         return
@@ -900,12 +950,12 @@ async def private_message_handler(client: Client, message: Message):
         except Exception:
             pass
         help_text = (
-            "📖 **How to download photos/videos:**\n\n"
-            "1. Log in to the **TikTok / YouTube / Instagram / Facebook** app.\n"
-            "2. Select the video or music you need.\n"
-            "3. Click on the 🔄 **Share** button and click **Copy link**.\n"
-            "4. Send the link to this bot – it will process & download it directly!\n\n"
-            "🔍 **Music Search:** Type any artist name or song title directly."
+            "📖 **How to Use this Downloader:**\n"
+            "────────────────────────\n"
+            "1️⃣ **Social Videos:** Copy link from TikTok, Instagram, YouTube, or Facebook and paste it here.\n"
+            "2️⃣ **Telegram Posts:** Send any public or restricted `t.me/...` message link.\n"
+            "3️⃣ **Music Search:** Simply type the song title or artist name directly.\n"
+            "4️⃣ **Auto-Delete:** Files are securely removed after the countdown expires to prevent storage and copyright issues."
         )
         await message.reply_text(help_text)
         return
@@ -931,7 +981,7 @@ async def private_message_handler(client: Client, message: Message):
         tg_url = text_str.strip()
         asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, tg_url, "telegram"))
 
-        status = await message.reply_text("⚡ **Connecting to Telegram...**")
+        status = await message.reply_text("⚡ **Connecting to Telegram Cloud...**")
 
         try:
             if not loaded_user_clients:
@@ -959,7 +1009,6 @@ async def private_message_handler(client: Client, message: Message):
                         target_msg = msg
                         working_client = u_client
 
-                        # Check if message is part of an album / media group
                         if msg.media_group_id:
                             try:
                                 media_group = await u_client.get_media_group(chat_id, msg_id)
@@ -977,7 +1026,7 @@ async def private_message_handler(client: Client, message: Message):
 
             # --- Handle Media Group (Album) ---
             if len(media_group) > 1:
-                await status.edit_text(f"📥 **Downloading album ({len(media_group)} files)...**")
+                await status.edit_text(f"📥 **Downloading album ({len(media_group)} items)...**")
                 downloaded_files = []
                 input_media_list = []
                 p_count, v_count, a_count = 0, 0, 0
@@ -1007,8 +1056,9 @@ async def private_message_handler(client: Client, message: Message):
                     asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", len(input_media_list), p_count, v_count, a_count))
                     asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", len(input_media_list), p_count, v_count, a_count))
 
+                    # ⏱️ Trigger Live Countdown Delete
                     msg_ids_to_del = [m.id for m in sent_msgs] + [status.id, message.id]
-                    asyncio.create_task(auto_delete_messages(message.chat.id, msg_ids_to_del, delay_seconds=120))
+                    asyncio.create_task(start_countdown_and_delete(message.chat.id, msg_ids_to_del, total_seconds=AUTO_DELETE_TIME))
                 else:
                     await status.edit_text("❌ **Failed to process album media.**")
 
@@ -1028,7 +1078,7 @@ async def private_message_handler(client: Client, message: Message):
                     await status.edit_text("⚠️ **No downloadable media found.**")
                 return
 
-            await status.edit_text("📥 **Fetching media file...**")
+            await status.edit_text("📥 **Fetching media from Telegram...**")
             download_path = await working_client.download_media(
                 target_msg,
                 progress=progress_bar,
@@ -1039,11 +1089,7 @@ async def private_message_handler(client: Client, message: Message):
                 await status.edit_text("❌ **Failed to download media.**")
                 return
 
-            await status.edit_text("📤 **Uploading file...**")
-
-            delete_markup = InlineKeyboardMarkup([[
-                InlineKeyboardButton("🗑️ Delete Now", callback_data="btn_delete_this")
-            ]])
+            await status.edit_text("📤 **Uploading file to chat...**")
 
             caption = target_msg.caption or ""
             sent_msg = None
@@ -1053,7 +1099,6 @@ async def private_message_handler(client: Client, message: Message):
                     video=download_path,
                     caption=caption,
                     supports_streaming=True,
-                    reply_markup=delete_markup,
                     progress=progress_bar,
                     progress_args=(status, "Uploading Video", user_id)
                 )
@@ -1063,7 +1108,6 @@ async def private_message_handler(client: Client, message: Message):
                 sent_msg = await message.reply_photo(
                     photo=download_path,
                     caption=caption,
-                    reply_markup=delete_markup,
                     progress=progress_bar,
                     progress_args=(status, "Uploading Photo", user_id)
                 )
@@ -1073,7 +1117,6 @@ async def private_message_handler(client: Client, message: Message):
                 sent_msg = await message.reply_audio(
                     audio=download_path,
                     caption=caption,
-                    reply_markup=delete_markup,
                     progress=progress_bar,
                     progress_args=(status, "Uploading Audio", user_id)
                 )
@@ -1085,7 +1128,6 @@ async def private_message_handler(client: Client, message: Message):
                 sent_msg = await message.reply_voice(
                     voice=download_path,
                     caption=caption,
-                    reply_markup=delete_markup,
                     progress=progress_bar,
                     progress_args=(status, "Uploading Voice", user_id)
                 )
@@ -1095,14 +1137,14 @@ async def private_message_handler(client: Client, message: Message):
                 sent_msg = await message.reply_document(
                     document=download_path,
                     caption=caption,
-                    reply_markup=delete_markup,
                     progress=progress_bar,
                     progress_args=(status, "Uploading Document", user_id)
                 )
                 asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 0, 0))
 
+            # ⏱️ Trigger Live Countdown Delete
             if sent_msg:
-                asyncio.create_task(auto_delete_messages(message.chat.id, [sent_msg.id, status.id, message.id], delay_seconds=120))
+                asyncio.create_task(start_countdown_and_delete(message.chat.id, [sent_msg.id, status.id, message.id], total_seconds=AUTO_DELETE_TIME))
             else:
                 await status.delete()
 
@@ -1129,12 +1171,12 @@ async def private_message_handler(client: Client, message: Message):
 
         # YouTube URL
         if is_youtube:
-            status = await message.reply_text("⚡ **Analyzing YouTube video...**")
+            status = await message.reply_text("⚡ **Analyzing video streams...**")
             asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, url, "YouTube"))
 
             meta = await asyncio.to_thread(extract_youtube_metadata, url)
             if not meta:
-                await status.edit_text("❌ **Failed to fetch video.** Link may be private, restricted, or unavailable.")
+                await status.edit_text("❌ **Failed to fetch video.** Link may be restricted, private, or invalid.")
                 return
 
             title = meta.get("title", "Video")
@@ -1151,19 +1193,20 @@ async def private_message_handler(client: Client, message: Message):
             buttons = []
             row = []
             for q in qualities:
-                row.append(InlineKeyboardButton(f"📹 {q}p", callback_data=f"dl_res_{url_hash}_{q}"))
+                row.append(InlineKeyboardButton(f"🎬 {q}p", callback_data=f"dl_res_{url_hash}_{q}"))
                 if len(row) == 2:
                     buttons.append(row)
                     row = []
             if row:
                 buttons.append(row)
 
-            buttons.append([InlineKeyboardButton("🔊 Audio", callback_data=f"dl_aud_{url_hash}")])
+            buttons.append([InlineKeyboardButton("🎵 Extract MP3 Audio", callback_data=f"dl_aud_{url_hash}")])
 
             caption_text = (
-                f"📹 **{title}** ➔\n"
-                f"👤 **#YouTube** ➔\n\n"
-                "**Formats to download ↓**"
+                f"🎬 **{title}**\n"
+                "────────────────────────\n"
+                "👤 **Source:** `#YouTube`\n"
+                "⚡ **Choose format below to download:**"
             )
 
             try:
@@ -1180,23 +1223,23 @@ async def private_message_handler(client: Client, message: Message):
         platform = "Facebook" if ("facebook" in url or "fb.watch" in url) else "TikTok" if "tiktok" in url else "Instagram" if "instagram" in url else "Social"
         asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, url, platform))
 
-        status = await message.reply_text(f"⚡ **Downloading {platform} video with audio...**")
+        status = await message.reply_text(f"⚡ **Downloading {platform} media with high quality audio...**")
 
         file_path, title = await asyncio.to_thread(download_direct_social_best, url, user_id)
 
         if not file_path or not os.path.exists(file_path):
-            await status.edit_text("❌ **Download Failed.** Link might be private, deleted, or unsupported.")
+            await status.edit_text("❌ **Download Failed.** Post may be private or unsupported.")
             return
 
         try:
             await status.edit_text(f"📤 **Uploading {platform} video...**")
-            caption = f"📹 **{title}** ➔\n👤 **#{platform}** ➔"
+            caption = f"🎬 **{title}**\n────────────────────────\n👤 **Source:** `#{platform}`"
 
             url_hash = hashlib.md5(f"{url}_{user_id}_{time.time()}".encode()).hexdigest()[:12]
             video_cache[url_hash] = {"url": url, "title": title, "platform": platform}
-            social_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔊 Extract Audio", callback_data=f"dl_aud_{url_hash}")]])
+            social_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🎵 Extract Audio", callback_data=f"dl_aud_{url_hash}")]])
 
-            await message.reply_video(
+            sent_vid = await message.reply_video(
                 video=file_path,
                 caption=caption,
                 supports_streaming=True,
@@ -1208,8 +1251,12 @@ async def private_message_handler(client: Client, message: Message):
             await status.delete()
             asyncio.create_task(asyncio.to_thread(sync_increment_downloads, platform, 1, 0, 1, 0))
             asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, platform, 1, 0, 1, 0))
+
+            # ⏱️ Trigger Live Countdown Delete
+            asyncio.create_task(start_countdown_and_delete(message.chat.id, [sent_vid.id, message.id], total_seconds=AUTO_DELETE_TIME))
+
         except Exception as e:
-            logger.error(f"Social Direct Upload Error: {e}")
+            logger.error(f"Social Upload Error: {e}")
             await status.edit_text(f"❌ **Upload Failed:** `{str(e)}`")
         finally:
             if file_path and os.path.exists(file_path):
@@ -1226,24 +1273,28 @@ async def private_message_handler(client: Client, message: Message):
         except Exception:
             pass
 
-        search_msg = await message.reply_text(f"🔎 **Searching for:** `{text_str}`...")
+        search_msg = await message.reply_text(f"🔍 **Searching:** `{text_str}`...")
         results = await asyncio.to_thread(search_youtube_videos, text_str, 5)
 
         if not results:
-            await search_msg.edit_text("❌ **No results found.** Please try with another keyword.")
+            await search_msg.edit_text("❌ **No results found.** Try with a different search term.")
             return
 
-        text_lines = [f"🔍 **Search results for:** `{text_str}`\n"]
+        text_lines = [
+            f"🎧 **Search Results for:** `{text_str}`",
+            "────────────────────────"
+        ]
         num_row = []
 
         for idx, item in enumerate(results, 1):
-            dur_display = f" `{item['duration']}`" if item['duration'] else ""
+            dur_display = f" `[{item['duration']}]`" if item['duration'] else ""
             text_lines.append(f"**{idx}.** {item['title']}{dur_display}")
             
             s_hash = hashlib.md5(item['url'].encode()).hexdigest()[:8]
             search_cache[s_hash] = item['url']
             num_row.append(InlineKeyboardButton(str(idx), callback_data=f"pick_{s_hash}"))
 
+        text_lines.append("────────────────────────\n_Tap a number below to select:_")
         markup = InlineKeyboardMarkup([num_row])
         await search_msg.edit_text("\n".join(text_lines), reply_markup=markup)
         return
@@ -1260,6 +1311,41 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
             await query.message.delete()
         except Exception:
             await query.answer("Couldn't delete message.", show_alert=False)
+        return
+
+    if data == "btn_open_help":
+        help_text = (
+            "📖 **How to Use this Downloader:**\n"
+            "────────────────────────\n"
+            "1️⃣ **Social Videos:** Copy link from TikTok, Instagram, YouTube, or Facebook and paste it here.\n"
+            "2️⃣ **Telegram Posts:** Send any public or restricted `t.me/...` message link.\n"
+            "3️⃣ **Music Search:** Simply type the song title or artist name directly.\n"
+            "4️⃣ **Auto-Delete:** Files are securely removed after the countdown expires to prevent storage and copyright issues."
+        )
+        await query.message.reply_text(help_text)
+        await query.answer()
+        return
+
+    if data == "btn_open_top":
+        markup = await generate_dynamic_top_markup()
+        await query.message.reply_text("🎧 **TOP Popular Songs (Instant Audio Vault)**\n\n_Tap any track below to stream or download:_ ", reply_markup=markup)
+        await query.answer()
+        return
+
+    if data == "btn_open_lang":
+        lang_text = "🌐 **Select your preferred language:**"
+        lang_buttons = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🇺🇸 English", callback_data="set_lang_en"),
+                InlineKeyboardButton("🇧🇩 বাংলা", callback_data="set_lang_bn")
+            ],
+            [
+                InlineKeyboardButton("🇷🇺 Русский", callback_data="set_lang_ru"),
+                InlineKeyboardButton("🇺🇿 O'zbek", callback_data="set_lang_uz")
+            ]
+        ])
+        await query.message.reply_text(lang_text, reply_markup=lang_buttons)
+        await query.answer()
         return
 
     # Language Selector Callback
@@ -1287,8 +1373,8 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
 
         # Instant Audio Send if Telegram File ID is Cached
         if file_id:
-            await query.answer("🚀 Sending instant audio...", show_alert=False)
-            caption = f"🔊 **{title}**\n🔥 **#PopularSong #Audio**"
+            await query.answer("🚀 Streaming instantly from vault...", show_alert=False)
+            caption = f"🎵 **{title}**\n────────────────────\n🔥 **#PopularSong #AudioVault**"
             sent_audio = await query.message.reply_audio(
                 audio=file_id,
                 caption=caption,
@@ -1296,6 +1382,7 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
             )
             asyncio.create_task(asyncio.to_thread(sync_record_song_download, title, target_url, file_id))
             asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "Others", 1, 0, 0, 1))
+            asyncio.create_task(start_countdown_and_delete(query.message.chat.id, [sent_audio.id], total_seconds=AUTO_DELETE_TIME))
             return
 
         # Fallback: Extract audio and save to cache
@@ -1317,7 +1404,7 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
 
         try:
             await status.edit_text("📤 **Uploading audio file...**")
-            caption = f"🔊 **{fetched_title or title}**\n🔥 **#PopularSong #Audio**"
+            caption = f"🎵 **{fetched_title or title}**\n────────────────────\n🔥 **#PopularSong #AudioVault**"
 
             sent_msg = await query.message.reply_audio(
                 audio=audio_path,
@@ -1333,6 +1420,10 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
 
             asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "Others", 1, 0, 0, 1))
             asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "Others", 1, 0, 0, 1))
+            
+            # ⏱️ Trigger Live Countdown Delete
+            asyncio.create_task(start_countdown_and_delete(query.message.chat.id, [sent_msg.id], total_seconds=AUTO_DELETE_TIME))
+
         except Exception as e:
             logger.error(f"Top Song Upload Error: {e}")
             await status.edit_text(f"❌ **Upload Failed:** `{str(e)}`")
@@ -1353,7 +1444,7 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
             return
 
         await query.answer("Fetching formats...", show_alert=False)
-        status = await query.message.reply_text("⚡ **Analyzing selected track...**")
+        status = await query.message.reply_text("⚡ **Analyzing stream codecs...**")
 
         meta = await asyncio.to_thread(extract_youtube_metadata, target_url)
         if not meta:
@@ -1374,19 +1465,20 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
         buttons = []
         row = []
         for q in qualities:
-            row.append(InlineKeyboardButton(f"📹 {q}p", callback_data=f"dl_res_{url_hash}_{q}"))
+            row.append(InlineKeyboardButton(f"🎬 {q}p", callback_data=f"dl_res_{url_hash}_{q}"))
             if len(row) == 2:
                 buttons.append(row)
                 row = []
         if row:
             buttons.append(row)
 
-        buttons.append([InlineKeyboardButton("🔊 Audio", callback_data=f"dl_aud_{url_hash}")])
+        buttons.append([InlineKeyboardButton("🎵 Extract MP3 Audio", callback_data=f"dl_aud_{url_hash}")])
 
         caption_text = (
-            f"📹 **{title}** ➔\n"
-            f"👤 **#YouTube** ➔\n\n"
-            "**Formats to download ↓**"
+            f"🎬 **{title}**\n"
+            "────────────────────────\n"
+            "👤 **Source:** `#YouTube`\n"
+            "⚡ **Choose format below to download:**"
         )
 
         try:
@@ -1415,20 +1507,20 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
         platform = item["platform"]
         height_val = int(res_tag) if res_tag.isdigit() else None
 
-        await query.answer(f"⏳ Downloading in {res_tag}p...", show_alert=False)
+        await query.answer(f"⏳ Processing {res_tag}p...", show_alert=False)
         status = await query.message.reply_text(f"⚡ **Downloading video ({res_tag}p)...**")
 
         file_path, fetched_title = await asyncio.to_thread(download_youtube_with_quality, target_url, user_id, height_val)
 
         if not file_path or not os.path.exists(file_path):
-            await status.edit_text("❌ **Download Failed.** Could not fetch stream for this quality.")
+            await status.edit_text("❌ **Download Failed.** Could not fetch stream for this resolution.")
             return
 
         try:
-            await status.edit_text("📤 **Uploading video...**")
-            caption = f"📹 **{fetched_title or title}** ➔\n👤 **#{platform}** ➔"
+            await status.edit_text("📤 **Uploading video file...**")
+            caption = f"🎬 **{fetched_title or title}**\n────────────────────────\n👤 **Source:** `#{platform}` • `{res_tag}p`"
 
-            await query.message.reply_video(
+            sent_vid = await query.message.reply_video(
                 video=file_path,
                 caption=caption,
                 supports_streaming=True,
@@ -1438,6 +1530,10 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
             await status.delete()
             asyncio.create_task(asyncio.to_thread(sync_increment_downloads, platform, 1, 0, 1, 0))
             asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, platform, 1, 0, 1, 0))
+
+            # ⏱️ Trigger Live Countdown Delete
+            asyncio.create_task(start_countdown_and_delete(query.message.chat.id, [sent_vid.id], total_seconds=AUTO_DELETE_TIME))
+
         except Exception as e:
             logger.error(f"Video Quality Upload Error: {e}")
             await status.edit_text(f"❌ **Upload Failed:** `{str(e)}`")
@@ -1462,18 +1558,18 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
         title = item["title"]
         platform = item.get("platform", "Audio")
 
-        await query.answer("🔊 Extracting audio stream...", show_alert=False)
-        status = await query.message.reply_text("⚡ **Extracting MP3 audio...**")
+        await query.answer("🎵 Extracting audio stream...", show_alert=False)
+        status = await query.message.reply_text("⚡ **Extracting high quality MP3...**")
 
         audio_path, fetched_title = await asyncio.to_thread(extract_and_download_social_audio, target_url, user_id)
 
         if not audio_path or not os.path.exists(audio_path):
-            await status.edit_text("❌ **Failed to extract audio.**")
+            await status.edit_text("❌ **Failed to extract audio stream.**")
             return
 
         try:
-            await status.edit_text("📤 **Uploading audio file...**")
-            caption = f"🔊 **{fetched_title or title}** ➔\n👤 **#{platform}** ➔"
+            await status.edit_text("📤 **Uploading MP3 audio...**")
+            caption = f"🎵 **{fetched_title or title}**\n────────────────────────\n👤 **Source:** `#{platform}`"
 
             sent_msg = await query.message.reply_audio(
                 audio=audio_path,
@@ -1489,6 +1585,10 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
 
             asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "Others", 1, 0, 0, 1))
             asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "Others", 1, 0, 0, 1))
+
+            # ⏱️ Trigger Live Countdown Delete
+            asyncio.create_task(start_countdown_and_delete(query.message.chat.id, [sent_msg.id], total_seconds=AUTO_DELETE_TIME))
+
         except Exception as e:
             logger.error(f"Audio Upload Error: {e}")
             await status.edit_text(f"❌ **Upload Failed:** `{str(e)}`")
@@ -1533,7 +1633,7 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
         if not sessions:
             await query.answer("No active sessions found.", show_alert=True)
             return
-        text = "📁 **Active Sessions**\n────────────────────\n"
+        text = "📁 **Active Sessions**\n────────────────────────\n"
         for idx, s in enumerate(sessions, 1):
             text += f"`{idx}.` **{s['account_name']}**\n    ID: `{s['doc_id'][:8]}`\n"
         await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_refresh_admin")]]))
@@ -1565,7 +1665,7 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
         if not urls:
             await query.answer("No recent requests logged.", show_alert=True)
             return
-        text = "🔗 **Recent Activity**\n────────────────────\n"
+        text = "🔗 **Recent Activity Feed**\n────────────────────────\n"
         for u in urls:
             text += f"• **{u.get('platform', 'Link')}:** `{u.get('url')[:38]}...`\n  └ User: `{u.get('user_name')}`\n"
         await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_refresh_admin")]]))
