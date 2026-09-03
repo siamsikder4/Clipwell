@@ -6,6 +6,7 @@ import asyncio
 import logging
 import hashlib
 import shutil
+from datetime import datetime
 from aiohttp import web
 import yt_dlp
 from hydrogram import Client, filters
@@ -21,7 +22,12 @@ from hydrogram.types import (
     InputMediaAudio,
     InputMediaDocument
 )
-from hydrogram.errors import SessionPasswordNeeded
+from hydrogram.errors import (
+    SessionPasswordNeeded,
+    FloodWait,
+    UserIsBlocked,
+    InputUserDeactivated
+)
 
 # Auto Setup FFmpeg
 try:
@@ -127,6 +133,17 @@ async def init_session_pool():
     logger.info(f"Session Pool Ready: {len(loaded_user_clients)} active userbots.")
 
 # ----------------- DATABASE HELPERS ----------------- #
+
+def sync_get_all_user_ids():
+    """Fetches all registered users for update announcements"""
+    if not db:
+        return []
+    try:
+        docs = db.collection("bot_users").stream()
+        return [int(d.id) for d in docs if str(d.id).isdigit()]
+    except Exception as e:
+        logger.error(f"Get All Users Error: {e}")
+        return []
 
 def sync_record_song_download(title: str, url: str, file_id: str):
     if not db or not title:
@@ -348,6 +365,82 @@ async def generate_admin_dashboard():
     ])
     return text, keyboard
 
+# ----------------- AUTO UPDATE BROADCASTER ----------------- #
+
+async def broadcast_system_update():
+    """Sends notification to Admin and all registered users upon bot restart/update."""
+    await asyncio.sleep(4)  # Small delay for bot initialization
+    now_time = datetime.now().strftime("%I:%M %p | %d %b %Y")
+
+    # 1. Notify Owner First
+    admin_alert = (
+        "🚀 **System Deployed & Updated Successfully!**\n"
+        "──────────────────────────────\n"
+        f"⏱️ **Time:** `{now_time}`\n"
+        "⚡ **Status:** Engine is Online 🟢\n"
+        "📢 **Broadcasting update notice to all users...**\n"
+        "──────────────────────────────"
+    )
+    try:
+        await bot.send_message(OWNER_ID, admin_alert)
+    except Exception as e:
+        logger.warning(f"Failed to send update alert to admin: {e}")
+
+    # 2. Prepare User Update Notice
+    user_notice = (
+        "🚀 **New Update Deployed!**\n"
+        "──────────────────────────────\n"
+        "We've just updated our system with performance upgrades & new features!\n\n"
+        "✨ **What's New in This Version:**\n"
+        "• ⚡ **Enhanced Downloader Speed:** Faster processing for TikTok, YouTube & Reels\n"
+        "• ⏳ **Live Auto-Delete Countdown:** Media self-destructs safely to maintain privacy\n"
+        "• 🎧 **Audio Vault Upgraded:** Instant 320kbps MP3 streaming\n"
+        "• 🛠️ **Bug Fixes:** Smoother album downloads and link handling\n\n"
+        "💡 *Send any link or song title right now to test it out!* 🐥\n"
+        "──────────────────────────────"
+    )
+
+    all_users = await asyncio.to_thread(sync_get_all_user_ids)
+    if not all_users:
+        logger.info("No registered users found for update broadcast.")
+        return
+
+    success_count = 0
+    failed_count = 0
+
+    for uid in all_users:
+        if uid == OWNER_ID:
+            continue
+        try:
+            await bot.send_message(uid, user_notice)
+            success_count += 1
+            await asyncio.sleep(0.06)  # Safe Telegram broadcast rate-limit preventer
+        except FloodWait as f:
+            await asyncio.sleep(f.value)
+            try:
+                await bot.send_message(uid, user_notice)
+                success_count += 1
+            except Exception:
+                failed_count += 1
+        except (UserIsBlocked, InputUserDeactivated):
+            failed_count += 1
+        except Exception:
+            failed_count += 1
+
+    # 3. Final Report to Admin
+    report_text = (
+        "✅ **Update Broadcast Completed!**\n"
+        "──────────────────────────────\n"
+        f"👥 **Total Registered Users:** `{len(all_users)}`\n"
+        f"📬 **Successfully Delivered:** `{success_count}`\n"
+        f"🚫 **Blocked / Inactive Users:** `{failed_count}`\n"
+        "──────────────────────────────"
+    )
+    try:
+        await bot.send_message(OWNER_ID, report_text)
+    except Exception:
+        pass
+
 # ----------------- UTILITY, PROGRESS & COUNTDOWN ----------------- #
 
 def get_aria2_opts():
@@ -402,10 +495,6 @@ async def progress_bar(current, total, status_msg, action_name, user_id):
 
 # ⏱️ LIVE COUNTDOWN & AUTO-DELETE SYSTEM
 async def start_countdown_and_delete(chat_id: int, message_ids: list, total_seconds: int = AUTO_DELETE_TIME):
-    """
-    Shows a live countdown alert and deletes target messages after the timer expires.
-    Updates in intervals to avoid Telegram flood limits.
-    """
     mins, secs = divmod(total_seconds, 60)
     timer_str = f"{mins:02d}:{secs:02d}"
     
@@ -1056,7 +1145,7 @@ async def private_message_handler(client: Client, message: Message):
                     asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", len(input_media_list), p_count, v_count, a_count))
                     asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", len(input_media_list), p_count, v_count, a_count))
 
-                    # ⏱️ Trigger Live Countdown Delete
+                    # Trigger Live Countdown Delete
                     msg_ids_to_del = [m.id for m in sent_msgs] + [status.id, message.id]
                     asyncio.create_task(start_countdown_and_delete(message.chat.id, msg_ids_to_del, total_seconds=AUTO_DELETE_TIME))
                 else:
@@ -1142,7 +1231,6 @@ async def private_message_handler(client: Client, message: Message):
                 )
                 asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 0, 0))
 
-            # ⏱️ Trigger Live Countdown Delete
             if sent_msg:
                 asyncio.create_task(start_countdown_and_delete(message.chat.id, [sent_msg.id, status.id, message.id], total_seconds=AUTO_DELETE_TIME))
             else:
@@ -1252,7 +1340,6 @@ async def private_message_handler(client: Client, message: Message):
             asyncio.create_task(asyncio.to_thread(sync_increment_downloads, platform, 1, 0, 1, 0))
             asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, platform, 1, 0, 1, 0))
 
-            # ⏱️ Trigger Live Countdown Delete
             asyncio.create_task(start_countdown_and_delete(message.chat.id, [sent_vid.id, message.id], total_seconds=AUTO_DELETE_TIME))
 
         except Exception as e:
@@ -1421,7 +1508,6 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
             asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "Others", 1, 0, 0, 1))
             asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "Others", 1, 0, 0, 1))
             
-            # ⏱️ Trigger Live Countdown Delete
             asyncio.create_task(start_countdown_and_delete(query.message.chat.id, [sent_msg.id], total_seconds=AUTO_DELETE_TIME))
 
         except Exception as e:
@@ -1531,7 +1617,6 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
             asyncio.create_task(asyncio.to_thread(sync_increment_downloads, platform, 1, 0, 1, 0))
             asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, platform, 1, 0, 1, 0))
 
-            # ⏱️ Trigger Live Countdown Delete
             asyncio.create_task(start_countdown_and_delete(query.message.chat.id, [sent_vid.id], total_seconds=AUTO_DELETE_TIME))
 
         except Exception as e:
@@ -1586,7 +1671,6 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
             asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "Others", 1, 0, 0, 1))
             asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "Others", 1, 0, 0, 1))
 
-            # ⏱️ Trigger Live Countdown Delete
             asyncio.create_task(start_countdown_and_delete(query.message.chat.id, [sent_msg.id], total_seconds=AUTO_DELETE_TIME))
 
         except Exception as e:
@@ -1706,6 +1790,10 @@ async def main():
     logger.info("Bot started successfully!")
     await init_session_pool()
     await web_server()
+
+    # 🚀 Auto Broadcast Update Notice to Owner & All Registered Users
+    asyncio.create_task(broadcast_system_update())
+
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
