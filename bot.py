@@ -7,6 +7,7 @@ import logging
 import hashlib
 import shutil
 from datetime import datetime
+import aiohttp
 from aiohttp import web
 import yt_dlp
 from hydrogram import Client, filters
@@ -89,7 +90,6 @@ video_cache = {}
 search_cache = {}
 top_tracks_cache = {}
 
-# Fallback popular songs list
 DEFAULT_TOP_SONGS = [
     {"title": "Dolly Parton - Jolene", "url": "https://www.youtube.com/watch?v=Ixrje2rXLMA", "file_id": ""},
     {"title": "Post Malone - I Had Some Help", "url": "https://www.youtube.com/watch?v=4QIZ7654x40", "file_id": ""},
@@ -135,7 +135,6 @@ async def init_session_pool():
 # ----------------- DATABASE HELPERS ----------------- #
 
 def sync_get_all_user_ids():
-    """Fetches all registered users for update announcements"""
     if not db:
         return []
     try:
@@ -307,7 +306,10 @@ def sync_get_stats():
         stat_doc = db.collection("bot_stats").document("global_analytics").get()
         total_dl = 0
         tg_photos, tg_videos, tg_audios = 0, 0, 0
-        platform_counts = {"Telegram": 0, "YouTube": 0, "TikTok": 0, "Instagram": 0, "Facebook": 0, "Others": 0}
+        platform_counts = {
+            "Telegram": 0, "YouTube": 0, "TikTok": 0, 
+            "Instagram": 0, "Facebook": 0, "Spotify": 0, "Others": 0
+        }
 
         if stat_doc.exists:
             data = stat_doc.to_dict()
@@ -321,6 +323,7 @@ def sync_get_stats():
                 "TikTok": data.get("count_tiktok", 0),
                 "Instagram": data.get("count_instagram", 0),
                 "Facebook": data.get("count_facebook", 0),
+                "Spotify": data.get("count_spotify", 0),
                 "Others": data.get("count_others", 0)
             }
         return total_dl, platform_counts, tg_photos, tg_videos, tg_audios
@@ -341,6 +344,7 @@ async def generate_admin_dashboard():
         "📊 **Platform Metrics**\n"
         f"• ✈️ **Telegram:** `{platforms.get('Telegram', 0):,}`\n"
         f"   └ 🖼️ `{tg_photos:,}` • 🎥 `{tg_videos:,}` • 🎵 `{tg_audios:,}`\n"
+        f"• 🟢 **Spotify:** `{platforms.get('Spotify', 0):,}`\n"
         f"• 🎬 **YouTube:** `{platforms.get('YouTube', 0):,}`\n"
         f"• 🎵 **TikTok:** `{platforms.get('TikTok', 0):,}`\n"
         f"• 📸 **Instagram:** `{platforms.get('Instagram', 0):,}`\n"
@@ -368,16 +372,15 @@ async def generate_admin_dashboard():
 # ----------------- AUTO UPDATE BROADCASTER ----------------- #
 
 async def broadcast_system_update():
-    """Sends notification to Admin and all registered users upon bot restart/update."""
-    await asyncio.sleep(4)  # Small delay for bot initialization
+    await asyncio.sleep(4)
     now_time = datetime.now().strftime("%I:%M %p | %d %b %Y")
 
-    # 1. Notify Owner First
     admin_alert = (
         "🚀 **System Deployed & Updated Successfully!**\n"
         "──────────────────────────────\n"
         f"⏱️ **Time:** `{now_time}`\n"
         "⚡ **Status:** Engine is Online 🟢\n"
+        "🟢 **Spotify Engine:** Enabled\n"
         "📢 **Broadcasting update notice to all users...**\n"
         "──────────────────────────────"
     )
@@ -386,23 +389,22 @@ async def broadcast_system_update():
     except Exception as e:
         logger.warning(f"Failed to send update alert to admin: {e}")
 
-    # 2. Prepare User Update Notice
     user_notice = (
-        "🚀 **New Update Deployed!**\n"
+        "🚀 **New Update: Spotify Downloader Added!**\n"
         "──────────────────────────────\n"
-        "We've just updated our system with performance upgrades & new features!\n\n"
-        "✨ **What's New in This Version:**\n"
-        "• ⚡ **Enhanced Downloader Speed:** Faster processing for TikTok, YouTube & Reels\n"
-        "• ⏳ **Live Auto-Delete Countdown:** Media self-destructs safely to maintain privacy\n"
-        "• 🎧 **Audio Vault Upgraded:** Instant 320kbps MP3 streaming\n"
-        "• 🛠️ **Bug Fixes:** Smoother album downloads and link handling\n\n"
-        "💡 *Send any link or song title right now to test it out!* 🐥\n"
+        "We've just updated our system with powerful new features:\n\n"
+        "✨ **What's New:**\n"
+        "• 🟢 **Spotify Link Support:** Send any Spotify song link for instant MP3!\n"
+        "• ⚡ **Enhanced Engine:** Faster download speeds across all platforms\n"
+        "• ⏳ **Live Auto-Delete:** Keeps your chat organized and secure\n"
+        "• 🎧 **Clean Audio Tags:** Proper artist and song title embeds\n\n"
+        "💡 *Paste any Spotify or YouTube link now to test!* 🐥\n"
         "──────────────────────────────"
     )
 
     all_users = await asyncio.to_thread(sync_get_all_user_ids)
     if not all_users:
-        logger.info("No registered users found for update broadcast.")
+        logger.info("No registered users found for broadcast.")
         return
 
     success_count = 0
@@ -414,7 +416,7 @@ async def broadcast_system_update():
         try:
             await bot.send_message(uid, user_notice)
             success_count += 1
-            await asyncio.sleep(0.06)  # Safe Telegram broadcast rate-limit preventer
+            await asyncio.sleep(0.06)
         except FloodWait as f:
             await asyncio.sleep(f.value)
             try:
@@ -427,7 +429,6 @@ async def broadcast_system_update():
         except Exception:
             failed_count += 1
 
-    # 3. Final Report to Admin
     report_text = (
         "✅ **Update Broadcast Completed!**\n"
         "──────────────────────────────\n"
@@ -441,7 +442,34 @@ async def broadcast_system_update():
     except Exception:
         pass
 
-# ----------------- UTILITY, PROGRESS & COUNTDOWN ----------------- #
+# ----------------- SPOTIFY ENGINE ----------------- #
+
+async def fetch_spotify_track_info(url: str):
+    """Fetches Spotify metadata using public oEmbed API without API keys"""
+    clean_url = url.split("?")[0].strip()
+    oembed_url = f"https://open.spotify.com/oembed?url={clean_url}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(oembed_url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    title = data.get("title", "").strip()
+                    artist = data.get("author_name", "").strip()
+                    thumbnail = data.get("thumbnail_url", "")
+                    
+                    # Construct search query
+                    query = f"{title} {artist}".strip()
+                    return {
+                        "title": title,
+                        "artist": artist,
+                        "query": query,
+                        "thumbnail": thumbnail
+                    }
+    except Exception as e:
+        logger.error(f"Spotify Metadata Error: {e}")
+    return None
+
+# ----------------- UTILITY & PROGRESS ----------------- #
 
 def get_aria2_opts():
     if shutil.which("aria2c"):
@@ -493,7 +521,6 @@ async def progress_bar(current, total, status_msg, action_name, user_id):
     except Exception:
         pass
 
-# ⏱️ LIVE COUNTDOWN & AUTO-DELETE SYSTEM
 async def start_countdown_and_delete(chat_id: int, message_ids: list, total_seconds: int = AUTO_DELETE_TIME):
     mins, secs = divmod(total_seconds, 60)
     timer_str = f"{mins:02d}:{secs:02d}"
@@ -597,18 +624,11 @@ def extract_youtube_metadata(url: str):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(clean_url, download=False)
     except Exception as e:
-        logger.warning(f"Metadata extract failed: {e}. Retrying fallback...")
         try:
-            ydl_opts_fallback = {
-                'quiet': True,
-                'no_warnings': True,
-                'noplaylist': True,
-                'skip_download': True
-            }
+            ydl_opts_fallback = {'quiet': True, 'no_warnings': True, 'noplaylist': True, 'skip_download': True}
             with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
                 info = ydl.extract_info(clean_url, download=False)
-        except Exception as e2:
-            logger.error(f"Metadata fallback failed: {e2}")
+        except Exception:
             return None
 
     if not info:
@@ -678,25 +698,17 @@ def download_youtube_with_quality(url: str, user_id: int, height: int = None):
             for fname in os.listdir(DOWNLOAD_DIR):
                 if fname.startswith(prefix):
                     return os.path.join(DOWNLOAD_DIR, fname), title
-    except Exception as e:
-        logger.warning(f"Download failed: {e}. Retrying fallback...")
+    except Exception:
         try:
-            ydl_opts_fallback = {
-                'format': fmt,
-                'outtmpl': out_template,
-                'merge_output_format': 'mp4',
-                'quiet': True,
-                'no_warnings': True,
-                'noplaylist': True
-            }
+            ydl_opts_fallback = {'format': fmt, 'outtmpl': out_template, 'merge_output_format': 'mp4', 'quiet': True, 'no_warnings': True, 'noplaylist': True}
             with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
                 info = ydl.extract_info(clean_url, download=True)
                 title = str(info.get('title') or "Video") if info else "Video"
                 for fname in os.listdir(DOWNLOAD_DIR):
                     if fname.startswith(prefix):
                         return os.path.join(DOWNLOAD_DIR, fname), title
-        except Exception as e2:
-            logger.error(f"Fallback download failed: {e2}")
+        except Exception:
+            pass
 
     return None, None
 
@@ -723,7 +735,6 @@ def download_direct_social_best(url: str, user_id: int):
         'buffersize': 1024 * 1024 * 16,
         'max_filesize': 1950 * 1024 * 1024,
     }
-    
     ydl_opts.update(get_aria2_opts())
 
     try:
@@ -776,26 +787,18 @@ def extract_and_download_social_audio(url: str, user_id: int):
             for fname in os.listdir(DOWNLOAD_DIR):
                 if fname.startswith(prefix):
                     return os.path.join(DOWNLOAD_DIR, fname), title
-    except Exception as e:
-        logger.warning(f"Audio extraction error: {e}")
+    except Exception:
+        try:
+            ydl_opts_fallback = {'format': 'bestaudio/best', 'outtmpl': out_template, 'quiet': True, 'no_warnings': True, 'noplaylist': True}
+            with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
+                info = ydl.extract_info(clean_url, download=True)
+                title = str(info.get('title') or "Audio") if info else "Audio"
 
-    try:
-        ydl_opts_fallback = {
-            'format': 'bestaudio/best',
-            'outtmpl': out_template,
-            'quiet': True,
-            'no_warnings': True,
-            'noplaylist': True
-        }
-        with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
-            info = ydl.extract_info(clean_url, download=True)
-            title = str(info.get('title') or "Audio") if info else "Audio"
-
-            for fname in os.listdir(DOWNLOAD_DIR):
-                if fname.startswith(prefix):
-                    return os.path.join(DOWNLOAD_DIR, fname), title
-    except Exception as e:
-        logger.error(f"Fallback audio error: {e}")
+                for fname in os.listdir(DOWNLOAD_DIR):
+                    if fname.startswith(prefix):
+                        return os.path.join(DOWNLOAD_DIR, fname), title
+        except Exception:
+            pass
 
     return None, None
 
@@ -961,12 +964,13 @@ async def private_message_handler(client: Client, message: Message):
         start_text = (
             f"👋 **Welcome to Media Vault Bot, {user.first_name}!**\n"
             "──────────────────────────────\n"
-            "⚡ *The all-in-one lightning fast downloader bot.*\n\n"
-            "📥 **What I Can Download:**\n"
-            "• **Social Media:** TikTok, Instagram, YouTube, Facebook, Pinterest\n"
-            "• **Telegram Posts:** Public & Restricted Channel/Group media\n"
-            "• **Music Search:** Instant MP3s by song name or artist\n\n"
-            "⏱️ *Features smart auto-delete countdown for clean chat storage.*\n"
+            "⚡ *The all-in-one lightning fast media downloader.*\n\n"
+            "📥 **Supported Platforms:**\n"
+            "• 🟢 **Spotify:** Direct Track Links & MP3\n"
+            "• 🎬 **Social:** TikTok, Instagram, YouTube, Facebook\n"
+            "• ✈️ **Telegram:** Public & Restricted Channel posts\n"
+            "• 🔍 **Music Search:** Instant MP3 by title or artist\n\n"
+            "⏱️ *Features intelligent auto-delete countdown for clean storage.*\n"
             "──────────────────────────────"
         )
 
@@ -1007,7 +1011,7 @@ async def private_message_handler(client: Client, message: Message):
             "🎵 **Your Playlist & Recent Downloads**\n"
             "────────────────────────\n"
             "• You have no saved offline tracks currently.\n\n"
-            "💡 *Tip:* Send any artist or song name to instantly stream and build your vault!"
+            "💡 *Tip:* Send any Spotify track link or song name to start listening!"
         )
         await message.reply_text(my_text)
         return
@@ -1041,10 +1045,11 @@ async def private_message_handler(client: Client, message: Message):
         help_text = (
             "📖 **How to Use this Downloader:**\n"
             "────────────────────────\n"
-            "1️⃣ **Social Videos:** Copy link from TikTok, Instagram, YouTube, or Facebook and paste it here.\n"
-            "2️⃣ **Telegram Posts:** Send any public or restricted `t.me/...` message link.\n"
-            "3️⃣ **Music Search:** Simply type the song title or artist name directly.\n"
-            "4️⃣ **Auto-Delete:** Files are securely removed after the countdown expires to prevent storage and copyright issues."
+            "🟢 **Spotify:** Copy track link from Spotify and paste it directly.\n"
+            "🎬 **Social Videos:** Paste links from TikTok, Instagram, YouTube, or Facebook.\n"
+            "✈️ **Telegram Posts:** Send any public or restricted post link.\n"
+            "🔍 **Music Search:** Type artist name or song title in chat.\n"
+            "⏱️ **Auto-Delete:** Files are securely removed after the countdown expires."
         )
         await message.reply_text(help_text)
         return
@@ -1113,7 +1118,7 @@ async def private_message_handler(client: Client, message: Message):
                 await status.edit_text("❌ **Post unavailable.** Ensure the session account has access to this chat.")
                 return
 
-            # --- Handle Media Group (Album) ---
+            # --- Handle Album ---
             if len(media_group) > 1:
                 await status.edit_text(f"📥 **Downloading album ({len(media_group)} items)...**")
                 downloaded_files = []
@@ -1145,7 +1150,6 @@ async def private_message_handler(client: Client, message: Message):
                     asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", len(input_media_list), p_count, v_count, a_count))
                     asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", len(input_media_list), p_count, v_count, a_count))
 
-                    # Trigger Live Countdown Delete
                     msg_ids_to_del = [m.id for m in sent_msgs] + [status.id, message.id]
                     asyncio.create_task(start_countdown_and_delete(message.chat.id, msg_ids_to_del, total_seconds=AUTO_DELETE_TIME))
                 else:
@@ -1244,10 +1248,9 @@ async def private_message_handler(client: Client, message: Message):
             await status.edit_text(f"❌ **Error:** `{str(e)}`")
         return
 
-    # ----------------- SOCIAL & YOUTUBE / SEARCH HANDLER ----------------- #
+    # ----------------- URL HANDLERS ----------------- #
     url_pattern = re.search(r'(https?://[^\s]+)', text_str)
 
-    # 1. URL Handler
     if url_pattern:
         try:
             await message.react("🫡")
@@ -1255,9 +1258,79 @@ async def private_message_handler(client: Client, message: Message):
             pass
 
         url = url_pattern.group(0).strip()
-        is_youtube = ("youtube.com" in url or "youtu.be" in url)
 
-        # YouTube URL
+        # 1. Spotify Track Handler
+        if "spotify.com" in url:
+            status = await message.reply_text("⚡ **Fetching Spotify metadata...**")
+            asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, url, "Spotify"))
+
+            spot_info = await fetch_spotify_track_info(url)
+            if not spot_info or not spot_info.get("query"):
+                await status.edit_text("❌ **Failed to parse Spotify link.** Make sure it's a valid track link.")
+                return
+
+            track_title = spot_info.get("title")
+            track_artist = spot_info.get("artist")
+            search_q = spot_info.get("query")
+
+            await status.edit_text(f"🔍 **Found on Spotify:** `{track_title}` - `{track_artist}`\n⚡ Fetching high-quality audio stream...")
+
+            # Match and download stream
+            matched = await asyncio.to_thread(search_youtube_videos, f"{search_q} audio", 1)
+            if not matched:
+                matched = await asyncio.to_thread(search_youtube_videos, search_q, 1)
+
+            if not matched:
+                await status.edit_text("❌ **Could not locate matching audio stream for this track.**")
+                return
+
+            target_yt_url = matched[0]["url"]
+            audio_path, _ = await asyncio.to_thread(extract_and_download_social_audio, target_yt_url, user_id)
+
+            if not audio_path or not os.path.exists(audio_path):
+                await status.edit_text("❌ **Failed to download audio stream.**")
+                return
+
+            try:
+                await status.edit_text("📤 **Uploading MP3 to chat...**")
+                caption = (
+                    f"🎧 **{track_title}**\n"
+                    f"👤 **Artist:** `{track_artist}`\n"
+                    "────────────────────────\n"
+                    "🟢 **Source:** `#Spotify`"
+                )
+
+                sent_msg = await message.reply_audio(
+                    audio=audio_path,
+                    caption=caption,
+                    title=track_title,
+                    performer=track_artist,
+                    progress=progress_bar,
+                    progress_args=(status, "Uploading Spotify Audio", user_id)
+                )
+                await status.delete()
+
+                if sent_msg and sent_msg.audio:
+                    asyncio.create_task(asyncio.to_thread(sync_record_song_download, f"{track_title} - {track_artist}", url, sent_msg.audio.file_id))
+
+                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "Spotify", 1, 0, 0, 1))
+                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "Spotify", 1, 0, 0, 1))
+
+                asyncio.create_task(start_countdown_and_delete(message.chat.id, [sent_msg.id, message.id], total_seconds=AUTO_DELETE_TIME))
+
+            except Exception as e:
+                logger.error(f"Spotify Upload Error: {e}")
+                await status.edit_text(f"❌ **Upload Failed:** `{str(e)}`")
+            finally:
+                if audio_path and os.path.exists(audio_path):
+                    try:
+                        os.remove(audio_path)
+                    except Exception:
+                        pass
+            return
+
+        # 2. YouTube Video Handler
+        is_youtube = ("youtube.com" in url or "youtu.be" in url)
         if is_youtube:
             status = await message.reply_text("⚡ **Analyzing video streams...**")
             asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, url, "YouTube"))
@@ -1307,12 +1380,11 @@ async def private_message_handler(client: Client, message: Message):
                 await message.reply_text(caption_text, reply_markup=InlineKeyboardMarkup(buttons))
             return
 
-        # Direct Social Media (Facebook, TikTok, Instagram)
+        # 3. Direct Social Media (Facebook, TikTok, Instagram)
         platform = "Facebook" if ("facebook" in url or "fb.watch" in url) else "TikTok" if "tiktok" in url else "Instagram" if "instagram" in url else "Social"
         asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, url, platform))
 
         status = await message.reply_text(f"⚡ **Downloading {platform} media with high quality audio...**")
-
         file_path, title = await asyncio.to_thread(download_direct_social_best, url, user_id)
 
         if not file_path or not os.path.exists(file_path):
@@ -1353,7 +1425,7 @@ async def private_message_handler(client: Client, message: Message):
                     pass
         return
 
-    # 2. Text Search Handler (Music/songs by name)
+    # 4. Text Search Handler (Music search by name)
     if text_str and not text_str.startswith("/"):
         try:
             await message.react("🫡")
@@ -1404,10 +1476,11 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
         help_text = (
             "📖 **How to Use this Downloader:**\n"
             "────────────────────────\n"
-            "1️⃣ **Social Videos:** Copy link from TikTok, Instagram, YouTube, or Facebook and paste it here.\n"
-            "2️⃣ **Telegram Posts:** Send any public or restricted `t.me/...` message link.\n"
-            "3️⃣ **Music Search:** Simply type the song title or artist name directly.\n"
-            "4️⃣ **Auto-Delete:** Files are securely removed after the countdown expires to prevent storage and copyright issues."
+            "🟢 **Spotify:** Copy track link from Spotify and paste it directly.\n"
+            "🎬 **Social Videos:** Paste links from TikTok, Instagram, YouTube, or Facebook.\n"
+            "✈️ **Telegram Posts:** Send any public or restricted post link.\n"
+            "🔍 **Music Search:** Type artist name or song title in chat.\n"
+            "⏱️ **Auto-Delete:** Files are securely removed after the countdown expires."
         )
         await query.message.reply_text(help_text)
         await query.answer()
@@ -1458,7 +1531,6 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
         file_id = track.get("file_id")
         target_url = track.get("url")
 
-        # Instant Audio Send if Telegram File ID is Cached
         if file_id:
             await query.answer("🚀 Streaming instantly from vault...", show_alert=False)
             caption = f"🎵 **{title}**\n────────────────────\n🔥 **#PopularSong #AudioVault**"
@@ -1472,7 +1544,6 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
             asyncio.create_task(start_countdown_and_delete(query.message.chat.id, [sent_audio.id], total_seconds=AUTO_DELETE_TIME))
             return
 
-        # Fallback: Extract audio and save to cache
         await query.answer(f"⏳ Extracting {title}...", show_alert=False)
         status = await query.message.reply_text(f"⚡ **Downloading popular track:** `{title}`...")
 
@@ -1684,7 +1755,7 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
                     pass
         return
 
-    # Admin Panel Callbacks (Owner Only)
+    # Admin Panel Callbacks
     if user_id != OWNER_ID:
         await query.answer("⛔ Access Denied.", show_alert=True)
         return
@@ -1775,7 +1846,6 @@ async def web_server():
 async def main():
     await bot.start()
     
-    # Set the Telegram Command Menu Buttons
     try:
         await bot.set_bot_commands([
             BotCommand("my", "your playlist"),
@@ -1791,7 +1861,7 @@ async def main():
     await init_session_pool()
     await web_server()
 
-    # 🚀 Auto Broadcast Update Notice to Owner & All Registered Users
+    # Auto Broadcast Update Notice
     asyncio.create_task(broadcast_system_update())
 
     await asyncio.Event().wait()
