@@ -379,8 +379,8 @@ async def broadcast_system_update():
         "🚀 **System Deployed & Updated Successfully!**\n"
         "──────────────────────────────\n"
         f"⏱️ **Time:** `{now_time}`\n"
-        "⚡ **Status:** Engine is Online 🟢\n"
-        "🟢 **Spotify Engine:** Enabled\n"
+        "⚡ **Status:** Online 🟢\n"
+        "🟢 **Spotify Fix:** Applied (Shortlink & Metadata Redirection)\n"
         "📢 **Broadcasting update notice to all users...**\n"
         "──────────────────────────────"
     )
@@ -390,15 +390,15 @@ async def broadcast_system_update():
         logger.warning(f"Failed to send update alert to admin: {e}")
 
     user_notice = (
-        "🚀 **New Update: Spotify Downloader Added!**\n"
+        "🚀 **System Update: Spotify Downloader Enhanced!**\n"
         "──────────────────────────────\n"
-        "We've just updated our system with powerful new features:\n\n"
-        "✨ **What's New:**\n"
-        "• 🟢 **Spotify Link Support:** Send any Spotify song link for instant MP3!\n"
-        "• ⚡ **Enhanced Engine:** Faster download speeds across all platforms\n"
-        "• ⏳ **Live Auto-Delete:** Keeps your chat organized and secure\n"
-        "• 🎧 **Clean Audio Tags:** Proper artist and song title embeds\n\n"
-        "💡 *Paste any Spotify or YouTube link now to test!* 🐥\n"
+        "Spotify ডাউনলোড এখন আরও নিখুঁত ও দ্রুত!\n\n"
+        "✨ **What's Fixed & Added:**\n"
+        "• 🟢 **Spotify Mobile Share Support:** `spotify.link` শর্টলিঙ্ক এখন ফুল সাপোর্টেড\n"
+        "• 🖼️ **Album Art Cover:** ডাউনলোডকৃত গানে স্পটিফাইয়ের কভার আর্ট যুক্ত থাকবে\n"
+        "• ⚡ **Accurate Audio Match:** সঠিক ট্র্যাকের হাই কোয়ালিটি MP3 অডিও\n"
+        "• ⏳ **Live Countdown:** ফাইল সেভ করার সুবিধার্থে লাইভ অটো-ডিলিট টাইমার\n\n"
+        "💡 *যেকোনো Spotify ট্র্যাক লিঙ্ক পাঠিয়ে এখনই পরীক্ষা করুন!* 🐥\n"
         "──────────────────────────────"
     )
 
@@ -442,32 +442,90 @@ async def broadcast_system_update():
     except Exception:
         pass
 
-# ----------------- SPOTIFY ENGINE ----------------- #
+# ----------------- SPOTIFY ENGINE (ROBUST & RESOLVED) ----------------- #
 
 async def fetch_spotify_track_info(url: str):
-    """Fetches Spotify metadata using public oEmbed API without API keys"""
-    clean_url = url.split("?")[0].strip()
-    oembed_url = f"https://open.spotify.com/oembed?url={clean_url}"
+    """
+    Resolves redirects (including spotify.link), scrapes meta-tags/oEmbed,
+    and downloads album cover art.
+    """
+    clean_url = url.strip()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9"
+    }
+
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(oembed_url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    title = data.get("title", "").strip()
-                    artist = data.get("author_name", "").strip()
-                    thumbnail = data.get("thumbnail_url", "")
-                    
-                    # Construct search query
-                    query = f"{title} {artist}".strip()
-                    return {
-                        "title": title,
-                        "artist": artist,
-                        "query": query,
-                        "thumbnail": thumbnail
-                    }
+        async with aiohttp.ClientSession(headers=headers) as session:
+            # Step 1: Follow redirects if it's a shortlink (spotify.link)
+            final_url = clean_url
+            if "spotify.link" in clean_url or "spoti.fi" in clean_url:
+                async with session.get(clean_url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                    final_url = str(resp.url).split("?")[0]
+
+            # Step 2: Try oEmbed endpoint
+            oembed_url = f"https://open.spotify.com/oembed?url={final_url}"
+            title = ""
+            artist = ""
+            thumbnail_url = ""
+
+            try:
+                async with session.get(oembed_url, timeout=aiohttp.ClientTimeout(total=8)) as o_resp:
+                    if o_resp.status == 200:
+                        data = await o_resp.json()
+                        title = data.get("title", "").strip()
+                        artist = data.get("author_name", "").strip()
+                        thumbnail_url = data.get("thumbnail_url", "").strip()
+            except Exception:
+                pass
+
+            # Step 3: Fallback HTML Scraping if oEmbed is empty
+            if not title:
+                async with session.get(final_url, timeout=aiohttp.ClientTimeout(total=8)) as page_resp:
+                    if page_resp.status == 200:
+                        html = await page_resp.text()
+                        
+                        # Extract og:title
+                        og_title = re.search(r'<meta\s+property=["\']og:title["\']\s+content=["\'](.*?)["\']', html, re.I)
+                        if og_title:
+                            title = og_title.group(1).strip()
+
+                        # Extract og:description (often has artist)
+                        og_desc = re.search(r'<meta\s+property=["\']og:description["\']\s+content=["\'](.*?)["\']', html, re.I)
+                        if og_desc:
+                            artist = og_desc.group(1).split("·")[0].strip()
+
+                        # Extract og:image
+                        og_img = re.search(r'<meta\s+property=["\']og:image["\']\s+content=["\'](.*?)["\']', html, re.I)
+                        if og_img:
+                            thumbnail_url = og_img.group(1).strip()
+
+            if not title:
+                return None
+
+            # Download album art locally for Telegram thumb
+            thumb_path = None
+            if thumbnail_url:
+                try:
+                    async with session.get(thumbnail_url, timeout=aiohttp.ClientTimeout(total=6)) as img_resp:
+                        if img_resp.status == 200:
+                            t_file = os.path.join(DOWNLOAD_DIR, f"spot_thumb_{int(time.time())}.jpg")
+                            with open(t_file, "wb") as f:
+                                f.write(await img_resp.read())
+                            thumb_path = t_file
+                except Exception:
+                    pass
+
+            search_query = f"{title} {artist}".strip()
+            return {
+                "title": title,
+                "artist": artist or "Spotify Artist",
+                "query": search_query,
+                "thumb_path": thumb_path
+            }
     except Exception as e:
-        logger.error(f"Spotify Metadata Error: {e}")
-    return None
+        logger.error(f"Spotify Parser Error: {e}")
+        return None
 
 # ----------------- UTILITY & PROGRESS ----------------- #
 
@@ -623,7 +681,7 @@ def extract_youtube_metadata(url: str):
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(clean_url, download=False)
-    except Exception as e:
+    except Exception:
         try:
             ydl_opts_fallback = {'quiet': True, 'no_warnings': True, 'noplaylist': True, 'skip_download': True}
             with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
@@ -966,7 +1024,7 @@ async def private_message_handler(client: Client, message: Message):
             "──────────────────────────────\n"
             "⚡ *The all-in-one lightning fast media downloader.*\n\n"
             "📥 **Supported Platforms:**\n"
-            "• 🟢 **Spotify:** Direct Track Links & MP3\n"
+            "• 🟢 **Spotify:** Direct Track Links & `spotify.link`\n"
             "• 🎬 **Social:** TikTok, Instagram, YouTube, Facebook\n"
             "• ✈️ **Telegram:** Public & Restricted Channel posts\n"
             "• 🔍 **Music Search:** Instant MP3 by title or artist\n\n"
@@ -1045,7 +1103,7 @@ async def private_message_handler(client: Client, message: Message):
         help_text = (
             "📖 **How to Use this Downloader:**\n"
             "────────────────────────\n"
-            "🟢 **Spotify:** Copy track link from Spotify and paste it directly.\n"
+            "🟢 **Spotify:** Copy track link from Spotify (standard or `spotify.link`) and paste it here.\n"
             "🎬 **Social Videos:** Paste links from TikTok, Instagram, YouTube, or Facebook.\n"
             "✈️ **Telegram Posts:** Send any public or restricted post link.\n"
             "🔍 **Music Search:** Type artist name or song title in chat.\n"
@@ -1259,40 +1317,48 @@ async def private_message_handler(client: Client, message: Message):
 
         url = url_pattern.group(0).strip()
 
-        # 1. Spotify Track Handler
-        if "spotify.com" in url:
-            status = await message.reply_text("⚡ **Fetching Spotify metadata...**")
+        # 1. Spotify Track Handler (Both open.spotify.com and spotify.link)
+        if "spotify.com" in url or "spotify.link" in url or "spoti.fi" in url:
+            status = await message.reply_text("⚡ **Resolving Spotify track & metadata...**")
             asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, url, "Spotify"))
 
             spot_info = await fetch_spotify_track_info(url)
             if not spot_info or not spot_info.get("query"):
-                await status.edit_text("❌ **Failed to parse Spotify link.** Make sure it's a valid track link.")
+                await status.edit_text("❌ **Failed to fetch Spotify track info.** Please ensure it's a valid track link.")
                 return
 
             track_title = spot_info.get("title")
             track_artist = spot_info.get("artist")
             search_q = spot_info.get("query")
+            thumb_path = spot_info.get("thumb_path")
 
-            await status.edit_text(f"🔍 **Found on Spotify:** `{track_title}` - `{track_artist}`\n⚡ Fetching high-quality audio stream...")
+            await status.edit_text(
+                f"🎧 **Track:** `{track_title}`\n"
+                f"👤 **Artist:** `{track_artist}`\n"
+                "⚡ **Downloading high-quality audio stream...**"
+            )
 
-            # Match and download stream
-            matched = await asyncio.to_thread(search_youtube_videos, f"{search_q} audio", 1)
+            matched = await asyncio.to_thread(search_youtube_videos, f"{search_q} official audio", 1)
             if not matched:
                 matched = await asyncio.to_thread(search_youtube_videos, search_q, 1)
 
             if not matched:
-                await status.edit_text("❌ **Could not locate matching audio stream for this track.**")
+                await status.edit_text("❌ **Audio stream not found for this Spotify track.**")
+                if thumb_path and os.path.exists(thumb_path):
+                    os.remove(thumb_path)
                 return
 
             target_yt_url = matched[0]["url"]
             audio_path, _ = await asyncio.to_thread(extract_and_download_social_audio, target_yt_url, user_id)
 
             if not audio_path or not os.path.exists(audio_path):
-                await status.edit_text("❌ **Failed to download audio stream.**")
+                await status.edit_text("❌ **Failed to download Spotify audio stream.**")
+                if thumb_path and os.path.exists(thumb_path):
+                    os.remove(thumb_path)
                 return
 
             try:
-                await status.edit_text("📤 **Uploading MP3 to chat...**")
+                await status.edit_text("📤 **Uploading audio with album cover...**")
                 caption = (
                     f"🎧 **{track_title}**\n"
                     f"👤 **Artist:** `{track_artist}`\n"
@@ -1305,6 +1371,7 @@ async def private_message_handler(client: Client, message: Message):
                     caption=caption,
                     title=track_title,
                     performer=track_artist,
+                    thumb=thumb_path if (thumb_path and os.path.exists(thumb_path)) else None,
                     progress=progress_bar,
                     progress_args=(status, "Uploading Spotify Audio", user_id)
                 )
@@ -1325,6 +1392,11 @@ async def private_message_handler(client: Client, message: Message):
                 if audio_path and os.path.exists(audio_path):
                     try:
                         os.remove(audio_path)
+                    except Exception:
+                        pass
+                if thumb_path and os.path.exists(thumb_path):
+                    try:
+                        os.remove(thumb_path)
                     except Exception:
                         pass
             return
@@ -1476,7 +1548,7 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
         help_text = (
             "📖 **How to Use this Downloader:**\n"
             "────────────────────────\n"
-            "🟢 **Spotify:** Copy track link from Spotify and paste it directly.\n"
+            "🟢 **Spotify:** Copy track link from Spotify (standard or `spotify.link`) and paste it here.\n"
             "🎬 **Social Videos:** Paste links from TikTok, Instagram, YouTube, or Facebook.\n"
             "✈️ **Telegram Posts:** Send any public or restricted post link.\n"
             "🔍 **Music Search:** Type artist name or song title in chat.\n"
