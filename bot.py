@@ -380,8 +380,7 @@ async def broadcast_system_update():
         "──────────────────────────────\n"
         f"⏱️ **Time:** `{now_time}`\n"
         "⚡ **Status:** Online 🟢\n"
-        "🟢 **Spotify Fix:** Applied (Shortlink & Metadata Redirection)\n"
-        "📢 **Broadcasting update notice to all users...**\n"
+        "🚀 **Telegram Engine:** 50MB+ Bypass & Large Album Support Active\n"
         "──────────────────────────────"
     )
     try:
@@ -389,66 +388,9 @@ async def broadcast_system_update():
     except Exception as e:
         logger.warning(f"Failed to send update alert to admin: {e}")
 
-    user_notice = (
-        "🚀 **System Update: Spotify Downloader Enhanced!**\n"
-        "──────────────────────────────\n"
-        "Spotify ডাউনলোড এখন আরও নিখুঁত ও দ্রুত!\n\n"
-        "✨ **What's Fixed & Added:**\n"
-        "• 🟢 **Spotify Mobile Share Support:** `spotify.link` শর্টলিঙ্ক এখন ফুল সাপোর্টেড\n"
-        "• 🖼️ **Album Art Cover:** ডাউনলোডকৃত গানে স্পটিফাইয়ের কভার আর্ট যুক্ত থাকবে\n"
-        "• ⚡ **Accurate Audio Match:** সঠিক ট্র্যাকের হাই কোয়ালিটি MP3 অডিও\n"
-        "• ⏳ **Live Countdown:** ফাইল সেভ করার সুবিধার্থে লাইভ অটো-ডিলিট টাইমার\n\n"
-        "💡 *যেকোনো Spotify ট্র্যাক লিঙ্ক পাঠিয়ে এখনই পরীক্ষা করুন!* 🐥\n"
-        "──────────────────────────────"
-    )
-
-    all_users = await asyncio.to_thread(sync_get_all_user_ids)
-    if not all_users:
-        logger.info("No registered users found for broadcast.")
-        return
-
-    success_count = 0
-    failed_count = 0
-
-    for uid in all_users:
-        if uid == OWNER_ID:
-            continue
-        try:
-            await bot.send_message(uid, user_notice)
-            success_count += 1
-            await asyncio.sleep(0.06)
-        except FloodWait as f:
-            await asyncio.sleep(f.value)
-            try:
-                await bot.send_message(uid, user_notice)
-                success_count += 1
-            except Exception:
-                failed_count += 1
-        except (UserIsBlocked, InputUserDeactivated):
-            failed_count += 1
-        except Exception:
-            failed_count += 1
-
-    report_text = (
-        "✅ **Update Broadcast Completed!**\n"
-        "──────────────────────────────\n"
-        f"👥 **Total Registered Users:** `{len(all_users)}`\n"
-        f"📬 **Successfully Delivered:** `{success_count}`\n"
-        f"🚫 **Blocked / Inactive Users:** `{failed_count}`\n"
-        "──────────────────────────────"
-    )
-    try:
-        await bot.send_message(OWNER_ID, report_text)
-    except Exception:
-        pass
-
-# ----------------- SPOTIFY ENGINE (ROBUST & RESOLVED) ----------------- #
+# ----------------- SPOTIFY ENGINE ----------------- #
 
 async def fetch_spotify_track_info(url: str):
-    """
-    Resolves redirects (including spotify.link), scrapes meta-tags/oEmbed,
-    and downloads album cover art.
-    """
     clean_url = url.strip()
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
@@ -457,13 +399,11 @@ async def fetch_spotify_track_info(url: str):
 
     try:
         async with aiohttp.ClientSession(headers=headers) as session:
-            # Step 1: Follow redirects if it's a shortlink (spotify.link)
             final_url = clean_url
             if "spotify.link" in clean_url or "spoti.fi" in clean_url:
                 async with session.get(clean_url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                     final_url = str(resp.url).split("?")[0]
 
-            # Step 2: Try oEmbed endpoint
             oembed_url = f"https://open.spotify.com/oembed?url={final_url}"
             title = ""
             artist = ""
@@ -479,23 +419,16 @@ async def fetch_spotify_track_info(url: str):
             except Exception:
                 pass
 
-            # Step 3: Fallback HTML Scraping if oEmbed is empty
             if not title:
                 async with session.get(final_url, timeout=aiohttp.ClientTimeout(total=8)) as page_resp:
                     if page_resp.status == 200:
                         html = await page_resp.text()
-                        
-                        # Extract og:title
                         og_title = re.search(r'<meta\s+property=["\']og:title["\']\s+content=["\'](.*?)["\']', html, re.I)
                         if og_title:
                             title = og_title.group(1).strip()
-
-                        # Extract og:description (often has artist)
                         og_desc = re.search(r'<meta\s+property=["\']og:description["\']\s+content=["\'](.*?)["\']', html, re.I)
                         if og_desc:
                             artist = og_desc.group(1).split("·")[0].strip()
-
-                        # Extract og:image
                         og_img = re.search(r'<meta\s+property=["\']og:image["\']\s+content=["\'](.*?)["\']', html, re.I)
                         if og_img:
                             thumbnail_url = og_img.group(1).strip()
@@ -503,7 +436,6 @@ async def fetch_spotify_track_info(url: str):
             if not title:
                 return None
 
-            # Download album art locally for Telegram thumb
             thumb_path = None
             if thumbnail_url:
                 try:
@@ -558,7 +490,8 @@ async def progress_bar(current, total, status_msg, action_name, user_id):
     user_data = progress_status.get(user_id, {})
     last_update = user_data.get("last_time", 0)
 
-    if (now - last_update < 2.5) and current < total:
+    # Throttled to 4.5s to prevent Telegram FloodWait on large downloads
+    if (now - last_update < 4.5) and current < total:
         return
 
     progress_status[user_id] = {"last_time": now}
@@ -576,6 +509,8 @@ async def progress_bar(current, total, status_msg, action_name, user_id):
     )
     try:
         await status_msg.edit_text(text)
+    except FloodWait as f:
+        await asyncio.sleep(f.value)
     except Exception:
         pass
 
@@ -595,9 +530,10 @@ async def start_countdown_and_delete(chat_id: int, message_ids: list, total_seco
     ]])
     
     countdown_msg = None
+    valid_msg_ids = [m for m in message_ids if m]
     try:
         countdown_msg = await bot.send_message(chat_id, notice_text, reply_markup=delete_markup)
-        message_ids.append(countdown_msg.id)
+        valid_msg_ids.append(countdown_msg.id)
     except Exception:
         pass
 
@@ -624,7 +560,7 @@ async def start_countdown_and_delete(chat_id: int, message_ids: list, total_seco
                 pass
 
     try:
-        await bot.delete_messages(chat_id=chat_id, message_ids=message_ids)
+        await bot.delete_messages(chat_id=chat_id, message_ids=valid_msg_ids)
     except Exception:
         pass
 
@@ -669,11 +605,7 @@ def extract_youtube_metadata(url: str):
         'no_warnings': True,
         'noplaylist': True,
         'skip_download': True,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['ios', 'android', 'web']
-            }
-        }
+        'extractor_args': {'youtube': {'player_client': ['ios', 'android', 'web']}}
     }
     ydl_opts.update(get_yt_cookies())
 
@@ -736,14 +668,8 @@ def download_youtube_with_quality(url: str, user_id: int, height: int = None):
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['ios', 'android', 'web']
-            }
-        },
-        'postprocessor_args': {
-            'Merger': ['-movflags', '+faststart', '-c:v', 'copy', '-c:a', 'aac']
-        },
+        'extractor_args': {'youtube': {'player_client': ['ios', 'android', 'web']}},
+        'postprocessor_args': {'Merger': ['-movflags', '+faststart', '-c:v', 'copy', '-c:a', 'aac']},
         'buffersize': 1024 * 1024 * 16,
         'max_filesize': 1950 * 1024 * 1024,
     }
@@ -787,9 +713,7 @@ def download_direct_social_best(url: str, user_id: int):
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
         },
-        'postprocessor_args': {
-            'Merger': ['-movflags', '+faststart', '-c:a', 'aac']
-        },
+        'postprocessor_args': {'Merger': ['-movflags', '+faststart', '-c:a', 'aac']},
         'buffersize': 1024 * 1024 * 16,
         'max_filesize': 1950 * 1024 * 1024,
     }
@@ -819,11 +743,7 @@ def extract_and_download_social_audio(url: str, user_id: int):
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['ios', 'android', 'web']
-            }
-        },
+        'extractor_args': {'youtube': {'player_client': ['ios', 'android', 'web']}},
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -846,17 +766,7 @@ def extract_and_download_social_audio(url: str, user_id: int):
                 if fname.startswith(prefix):
                     return os.path.join(DOWNLOAD_DIR, fname), title
     except Exception:
-        try:
-            ydl_opts_fallback = {'format': 'bestaudio/best', 'outtmpl': out_template, 'quiet': True, 'no_warnings': True, 'noplaylist': True}
-            with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
-                info = ydl.extract_info(clean_url, download=True)
-                title = str(info.get('title') or "Audio") if info else "Audio"
-
-                for fname in os.listdir(DOWNLOAD_DIR):
-                    if fname.startswith(prefix):
-                        return os.path.join(DOWNLOAD_DIR, fname), title
-        except Exception:
-            pass
+        pass
 
     return None, None
 
@@ -887,7 +797,7 @@ async def private_message_handler(client: Client, message: Message):
 
     asyncio.create_task(asyncio.to_thread(sync_track_user, user_id, user.username, user.first_name))
 
-    # Admin Command
+    # Admin Panel Commands
     if text_str.startswith("/admin") or text_str.startswith("/panel"):
         if user_id != OWNER_ID:
             await message.reply_text("⛔ **Access denied.** Admin area only.")
@@ -1022,13 +932,13 @@ async def private_message_handler(client: Client, message: Message):
         start_text = (
             f"👋 **Welcome to Media Vault Bot, {user.first_name}!**\n"
             "──────────────────────────────\n"
-            "⚡ *The all-in-one lightning fast media downloader.*\n\n"
+            "⚡ *All-in-one lightning fast media downloader.*\n\n"
             "📥 **Supported Platforms:**\n"
             "• 🟢 **Spotify:** Direct Track Links & `spotify.link`\n"
             "• 🎬 **Social:** TikTok, Instagram, YouTube, Facebook\n"
-            "• ✈️ **Telegram:** Public & Restricted Channel posts\n"
+            "• ✈️ **Telegram:** Public & Restricted Channel posts & Albums\n"
             "• 🔍 **Music Search:** Instant MP3 by title or artist\n\n"
-            "⏱️ *Features intelligent auto-delete countdown for clean storage.*\n"
+            "⏱️ *Features auto-delete countdown for clean storage.*\n"
             "──────────────────────────────"
         )
 
@@ -1059,41 +969,6 @@ async def private_message_handler(client: Client, message: Message):
         await message.reply_text("🎧 **TOP Popular Songs (Instant Audio Vault)**\n\n_Tap any track below to stream or download:_ ", reply_markup=markup)
         return
 
-    # Menu: Your Playlist (/my)
-    if text_str.startswith("/my"):
-        try:
-            await message.react("🫡")
-        except Exception:
-            pass
-        my_text = (
-            "🎵 **Your Playlist & Recent Downloads**\n"
-            "────────────────────────\n"
-            "• You have no saved offline tracks currently.\n\n"
-            "💡 *Tip:* Send any Spotify track link or song name to start listening!"
-        )
-        await message.reply_text(my_text)
-        return
-
-    # Menu: Change Language (/lang)
-    if text_str.startswith("/lang"):
-        try:
-            await message.react("🫡")
-        except Exception:
-            pass
-        lang_text = "🌐 **Select your preferred language:**"
-        lang_buttons = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("🇺🇸 English", callback_data="set_lang_en"),
-                InlineKeyboardButton("🇧🇩 বাংলা", callback_data="set_lang_bn")
-            ],
-            [
-                InlineKeyboardButton("🇷🇺 Русский", callback_data="set_lang_ru"),
-                InlineKeyboardButton("🇺🇿 O'zbek", callback_data="set_lang_uz")
-            ]
-        ])
-        await message.reply_text(lang_text, reply_markup=lang_buttons)
-        return
-
     # Menu: How to use (/help)
     if text_str.startswith("/help"):
         try:
@@ -1103,11 +978,11 @@ async def private_message_handler(client: Client, message: Message):
         help_text = (
             "📖 **How to Use this Downloader:**\n"
             "────────────────────────\n"
-            "🟢 **Spotify:** Copy track link from Spotify (standard or `spotify.link`) and paste it here.\n"
-            "🎬 **Social Videos:** Paste links from TikTok, Instagram, YouTube, or Facebook.\n"
-            "✈️ **Telegram Posts:** Send any public or restricted post link.\n"
+            "🟢 **Spotify:** Send standard or `spotify.link` track link.\n"
+            "🎬 **Social Videos:** Paste links from TikTok, Instagram, YouTube, Facebook.\n"
+            "✈️ **Telegram Posts:** Send any public or private post link (Single or Full Albums).\n"
             "🔍 **Music Search:** Type artist name or song title in chat.\n"
-            "⏱️ **Auto-Delete:** Files are securely removed after the countdown expires."
+            "⏱️ **Auto-Delete:** Files are safely deleted after the countdown."
         )
         await message.reply_text(help_text)
         return
@@ -1120,7 +995,7 @@ async def private_message_handler(client: Client, message: Message):
         await p_msg.edit_text(f"⚡ **Pong!** `{(end_t - start_t) * 1000:.1f}ms`")
         return
 
-    # ----------------- TELEGRAM POST DOWNLOADER (ALBUM SUPPORTED) ----------------- #
+    # ----------------- TELEGRAM POST DOWNLOADER (LARGE MEDIA & ALBUM FIX) ----------------- #
     private_match = re.search(r"t\.me/c/(\d+)/(\d+)", text_str)
     public_match = re.search(r"t\.me/([a-zA-Z0-9_]+)/(\d+)", text_str)
 
@@ -1156,7 +1031,7 @@ async def private_message_handler(client: Client, message: Message):
 
             for _, _, u_client in loaded_user_clients:
                 try:
-                    msg = await asyncio.wait_for(u_client.get_messages(chat_id, msg_id), timeout=6)
+                    msg = await asyncio.wait_for(u_client.get_messages(chat_id, msg_id), timeout=8)
                     if msg and not msg.empty:
                         target_msg = msg
                         working_client = u_client
@@ -1173,38 +1048,57 @@ async def private_message_handler(client: Client, message: Message):
                     continue
 
             if not target_msg or target_msg.empty:
-                await status.edit_text("❌ **Post unavailable.** Ensure the session account has access to this chat.")
+                await status.edit_text("❌ **Post unavailable.** Ensure the session account has joined this channel/group.")
                 return
 
-            # --- Handle Album ---
+            # --- 1. HANDLE ALBUM (MEDIA GROUP) ---
             if len(media_group) > 1:
+                # Fast bypass: Direct copy of album without downloading
+                try:
+                    mg_ids = [m.id for m in media_group]
+                    copied_msgs = await bot.copy_media_group(chat_id=message.chat.id, from_chat_id=chat_id, message_id=msg_id)
+                    if copied_msgs:
+                        await status.delete()
+                        del_ids = [m.id for m in copied_msgs] + [message.id]
+                        asyncio.create_task(start_countdown_and_delete(message.chat.id, del_ids, total_seconds=AUTO_DELETE_TIME))
+                        return
+                except Exception:
+                    pass
+
                 await status.edit_text(f"📥 **Downloading album ({len(media_group)} items)...**")
                 downloaded_files = []
                 input_media_list = []
                 p_count, v_count, a_count = 0, 0, 0
 
                 for idx, m in enumerate(media_group):
-                    file_path = await working_client.download_media(m)
-                    if file_path and os.path.exists(file_path):
-                        downloaded_files.append(file_path)
-                        cap = m.caption if (m.caption and idx == 0) else (target_msg.caption if idx == 0 else "")
+                    try:
+                        file_path = await working_client.download_media(m)
+                        if file_path and os.path.exists(file_path):
+                            downloaded_files.append(file_path)
+                            cap = m.caption if (m.caption and idx == 0) else (target_msg.caption if idx == 0 else "")
 
-                        if m.photo:
-                            input_media_list.append(InputMediaPhoto(media=file_path, caption=cap))
-                            p_count += 1
-                        elif m.video:
-                            input_media_list.append(InputMediaVideo(media=file_path, caption=cap, supports_streaming=True))
-                            v_count += 1
-                        elif m.audio:
-                            input_media_list.append(InputMediaAudio(media=file_path, caption=cap))
-                            a_count += 1
-                        elif m.document:
-                            input_media_list.append(InputMediaDocument(media=file_path, caption=cap))
+                            if m.photo:
+                                input_media_list.append(InputMediaPhoto(media=file_path, caption=cap))
+                                p_count += 1
+                            elif m.video:
+                                input_media_list.append(InputMediaVideo(media=file_path, caption=cap, supports_streaming=True))
+                                v_count += 1
+                            elif m.audio:
+                                input_media_list.append(InputMediaAudio(media=file_path, caption=cap))
+                                a_count += 1
+                            elif m.document:
+                                input_media_list.append(InputMediaDocument(media=file_path, caption=cap))
+                    except Exception as e:
+                        logger.error(f"Album item download failed: {e}")
 
                 if input_media_list:
                     await status.edit_text("📤 **Uploading album...**")
-                    sent_msgs = await message.reply_media_group(media=input_media_list)
-                    
+                    try:
+                        sent_msgs = await bot.send_media_group(chat_id=message.chat.id, media=input_media_list)
+                    except Exception:
+                        # If bot token upload fails, userbot sends it
+                        sent_msgs = await working_client.send_media_group(chat_id=message.chat.id, media=input_media_list)
+
                     asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", len(input_media_list), p_count, v_count, a_count))
                     asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", len(input_media_list), p_count, v_count, a_count))
 
@@ -1221,7 +1115,7 @@ async def private_message_handler(client: Client, message: Message):
                             pass
                 return
 
-            # --- Handle Single File ---
+            # --- 2. HANDLE SINGLE POST ---
             if not (target_msg.media or target_msg.video or target_msg.photo or target_msg.document or target_msg.audio or target_msg.voice):
                 if target_msg.text:
                     await status.edit_text(f"📝 **Text Content:**\n\n{target_msg.text}")
@@ -1229,7 +1123,30 @@ async def private_message_handler(client: Client, message: Message):
                     await status.edit_text("⚠️ **No downloadable media found.**")
                 return
 
-            await status.edit_text("📥 **Fetching media from Telegram...**")
+            # Check file size limit (2 GB maximum)
+            media_obj = target_msg.video or target_msg.document or target_msg.audio
+            file_size = getattr(media_obj, "file_size", 0) if media_obj else 0
+            if file_size and file_size > 2000 * 1024 * 1024:
+                await status.edit_text(
+                    f"⚠️ **File is too large!** (`{file_size / (1024*1024):.1f} MB`)\n"
+                    "Telegram allows a maximum file size of 2.00 GB."
+                )
+                return
+
+            # Fast Copy Bypass: If channel isn't copy-protected, copy directly
+            try:
+                copied_msg = await bot.copy_message(chat_id=message.chat.id, from_chat_id=chat_id, message_id=msg_id)
+                if copied_msg:
+                    await status.delete()
+                    asyncio.create_task(sync_increment_downloads("telegram", 1, 0, 1 if target_msg.video else 0, 0))
+                    asyncio.create_task(sync_increment_user_downloads(user_id, "telegram", 1, 0, 1 if target_msg.video else 0, 0))
+                    asyncio.create_task(start_countdown_and_delete(message.chat.id, [copied_msg.id, message.id], total_seconds=AUTO_DELETE_TIME))
+                    return
+            except Exception:
+                pass
+
+            # Download locally using userbot
+            await status.edit_text("📥 **Downloading media from Telegram...**")
             download_path = await working_client.download_media(
                 target_msg,
                 progress=progress_bar,
@@ -1241,68 +1158,73 @@ async def private_message_handler(client: Client, message: Message):
                 return
 
             await status.edit_text("📤 **Uploading file to chat...**")
-
             caption = target_msg.caption or ""
             sent_msg = None
 
-            if target_msg.video:
-                sent_msg = await message.reply_video(
-                    video=download_path,
-                    caption=caption,
-                    supports_streaming=True,
-                    progress=progress_bar,
-                    progress_args=(status, "Uploading Video", user_id)
-                )
-                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 1, 0))
-                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 0, 1, 0))
-            elif target_msg.photo:
-                sent_msg = await message.reply_photo(
-                    photo=download_path,
-                    caption=caption,
-                    progress=progress_bar,
-                    progress_args=(status, "Uploading Photo", user_id)
-                )
-                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 1, 0, 0))
-                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 1, 0, 0))
-            elif target_msg.audio:
-                sent_msg = await message.reply_audio(
-                    audio=download_path,
-                    caption=caption,
-                    progress=progress_bar,
-                    progress_args=(status, "Uploading Audio", user_id)
-                )
-                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 0, 1))
-                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 0, 0, 1))
-                if sent_msg and sent_msg.audio:
-                    asyncio.create_task(asyncio.to_thread(sync_record_song_download, sent_msg.audio.title or "Telegram Audio", tg_url, sent_msg.audio.file_id))
-            elif target_msg.voice:
-                sent_msg = await message.reply_voice(
-                    voice=download_path,
-                    caption=caption,
-                    progress=progress_bar,
-                    progress_args=(status, "Uploading Voice", user_id)
-                )
-                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 0, 1))
-                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 0, 0, 1))
-            else:
-                sent_msg = await message.reply_document(
-                    document=download_path,
-                    caption=caption,
-                    progress=progress_bar,
-                    progress_args=(status, "Uploading Document", user_id)
-                )
-                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 0, 0))
+            # Use Userbot to upload if file > 45MB to bypass standard bot 50MB limits
+            uploader = working_client if file_size > 45 * 1024 * 1024 else bot
+
+            try:
+                if target_msg.video:
+                    sent_msg = await uploader.send_video(
+                        chat_id=message.chat.id,
+                        video=download_path,
+                        caption=caption,
+                        supports_streaming=True,
+                        progress=progress_bar,
+                        progress_args=(status, "Uploading Video", user_id)
+                    )
+                    asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 1, 0))
+                    asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 0, 1, 0))
+                elif target_msg.photo:
+                    sent_msg = await uploader.send_photo(
+                        chat_id=message.chat.id,
+                        photo=download_path,
+                        caption=caption,
+                        progress=progress_bar,
+                        progress_args=(status, "Uploading Photo", user_id)
+                    )
+                    asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 1, 0, 0))
+                    asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 1, 0, 0))
+                elif target_msg.audio:
+                    sent_msg = await uploader.send_audio(
+                        chat_id=message.chat.id,
+                        audio=download_path,
+                        caption=caption,
+                        progress=progress_bar,
+                        progress_args=(status, "Uploading Audio", user_id)
+                    )
+                    asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 0, 1))
+                    asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 0, 0, 1))
+                else:
+                    sent_msg = await uploader.send_document(
+                        chat_id=message.chat.id,
+                        document=download_path,
+                        caption=caption,
+                        progress=progress_bar,
+                        progress_args=(status, "Uploading Document", user_id)
+                    )
+                    asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 0, 0))
+                    asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 0, 0, 0))
+            except Exception as up_err:
+                logger.error(f"Primary upload error: {up_err}. Retrying with working userbot...")
+                if uploader != working_client:
+                    sent_msg = await working_client.send_document(chat_id=message.chat.id, document=download_path, caption=caption)
 
             if sent_msg:
-                asyncio.create_task(start_countdown_and_delete(message.chat.id, [sent_msg.id, status.id, message.id], total_seconds=AUTO_DELETE_TIME))
+                try:
+                    await status.delete()
+                except Exception:
+                    pass
+                asyncio.create_task(start_countdown_and_delete(message.chat.id, [sent_msg.id, message.id], total_seconds=AUTO_DELETE_TIME))
             else:
-                await status.delete()
+                await status.edit_text("❌ **Upload failed.**")
 
             if os.path.exists(download_path):
                 os.remove(download_path)
 
         except Exception as e:
-            logger.error(f"Telegram Download Error: {e}")
+            logger.error(f"Telegram Handler Error: {e}")
             await status.edit_text(f"❌ **Error:** `{str(e)}`")
         return
 
@@ -1317,7 +1239,7 @@ async def private_message_handler(client: Client, message: Message):
 
         url = url_pattern.group(0).strip()
 
-        # 1. Spotify Track Handler (Both open.spotify.com and spotify.link)
+        # 1. Spotify Track Handler
         if "spotify.com" in url or "spotify.link" in url or "spoti.fi" in url:
             status = await message.reply_text("⚡ **Resolving Spotify track & metadata...**")
             asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, url, "Spotify"))
@@ -1548,11 +1470,10 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
         help_text = (
             "📖 **How to Use this Downloader:**\n"
             "────────────────────────\n"
-            "🟢 **Spotify:** Copy track link from Spotify (standard or `spotify.link`) and paste it here.\n"
-            "🎬 **Social Videos:** Paste links from TikTok, Instagram, YouTube, or Facebook.\n"
-            "✈️ **Telegram Posts:** Send any public or restricted post link.\n"
-            "🔍 **Music Search:** Type artist name or song title in chat.\n"
-            "⏱️ **Auto-Delete:** Files are securely removed after the countdown expires."
+            "🟢 **Spotify:** Send track link to download audio.\n"
+            "🎬 **Social Videos:** Paste links from TikTok, Instagram, YouTube, Facebook.\n"
+            "✈️ **Telegram Posts:** Send public or private post links/albums.\n"
+            "🔍 **Music Search:** Type track or artist name directly in chat."
         )
         await query.message.reply_text(help_text)
         await query.answer()
@@ -1570,20 +1491,15 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
             [
                 InlineKeyboardButton("🇺🇸 English", callback_data="set_lang_en"),
                 InlineKeyboardButton("🇧🇩 বাংলা", callback_data="set_lang_bn")
-            ],
-            [
-                InlineKeyboardButton("🇷🇺 Русский", callback_data="set_lang_ru"),
-                InlineKeyboardButton("🇺🇿 O'zbek", callback_data="set_lang_uz")
             ]
         ])
         await query.message.reply_text(lang_text, reply_markup=lang_buttons)
         await query.answer()
         return
 
-    # Language Selector Callback
     if data.startswith("set_lang_"):
         lang_code = data.split("_")[2]
-        lang_names = {"en": "English", "bn": "বাংলা", "ru": "Русский", "uz": "O'zbek"}
+        lang_names = {"en": "English", "bn": "বাংলা"}
         await query.answer(f"Language set to {lang_names.get(lang_code, 'English')}", show_alert=True)
         try:
             await query.message.delete()
@@ -1898,7 +1814,7 @@ async def callback_query_handler(client: Client, query: CallbackQuery):
         await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_refresh_admin")]]))
         return
 
-# ----------------- AIOHTTP DUMMY WEB SERVER ----------------- #
+# ----------------- AIOHTTP WEB SERVER ----------------- #
 
 async def web_server():
     async def handle_ping(request):
@@ -1920,9 +1836,7 @@ async def main():
     
     try:
         await bot.set_bot_commands([
-            BotCommand("my", "your playlist"),
             BotCommand("top", "popular songs"),
-            BotCommand("lang", "change language"),
             BotCommand("help", "how to use")
         ])
         logger.info("Bot Menu Commands registered successfully!")
@@ -1933,7 +1847,6 @@ async def main():
     await init_session_pool()
     await web_server()
 
-    # Auto Broadcast Update Notice
     asyncio.create_task(broadcast_system_update())
 
     await asyncio.Event().wait()
