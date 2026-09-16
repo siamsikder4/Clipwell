@@ -71,7 +71,7 @@ if FIREBASE_KEY_RAW:
     except Exception as e:
         logger.error(f"Firebase Init Error: {e}")
 
-# Bot Client
+# Bot Client (Direct MTProto client supports up to 2GB uploads natively)
 bot = Client(
     "bot_instance",
     api_id=API_ID,
@@ -413,7 +413,7 @@ async def progress_bar(current, total, status_msg, action_name, user_id):
         f"  🚀 **Task:** `{action_name}`\n"
         f"  📊 **Status:** `[{bar}]` **{percentage:.1f}%**\n"
         f"  📦 **Volume:** `{curr_mb:.1f} MB` / `{tot_mb:.1f} MB`\n\n"
-        "  ✨ *Optimizing transfer stream...*\n"
+        "  ✨ *Optimizing stream transfer...*\n"
         "┗━━━━━━━━━━━━━━━━━━━━━━━━┛"
     )
     try:
@@ -424,7 +424,7 @@ async def progress_bar(current, total, status_msg, action_name, user_id):
         pass
 
 async def start_countdown_and_delete(chat_id: int, message_ids: list, total_seconds: int = AUTO_DELETE_TIME):
-    """কোনো নোটিশ বা কাউন্টডাউন মেসেজ ছাড়া নিঃশব্দে ব্যাকগ্রাউন্ডে ডিলিট করবে"""
+    """কোনো দৃশ্যমান নোটিশ বা মেসেজ ছাড়া সাইলেন্টলি ব্যাকগ্রাউন্ডে ডিলিট করবে"""
     valid_msg_ids = [m for m in message_ids if m]
     if not valid_msg_ids or total_seconds <= 0:
         return
@@ -926,7 +926,7 @@ async def private_message_handler(client: Client, message: Message):
         await p_msg.edit_text(f"🚀 **Pong!** `{(end_t - start_t) * 1000:.1f}ms`")
         return
 
-    # ----------------- ULTRA-FAST TELEGRAM POST HANDLER ----------------- #
+    # ----------------- TELEGRAM POST & ALBUM HANDLER (FIXED & ULTRA-FAST) ----------------- #
     private_match = re.search(r"t\.me/c/(\d+)/(\d+)", text_str)
     public_match = re.search(r"t\.me/([a-zA-Z0-9_]+)/(\d+)", text_str)
 
@@ -982,9 +982,9 @@ async def private_message_handler(client: Client, message: Message):
                 await status.edit_text("❌ **Post unavailable.** Ensure the connected session has access to this chat.")
                 return
 
-            # --- 1. INSTANT ALBUM PROCESSING (CONCURRENT & FAST) ---
+            # --- 1. ALBUM PROCESSING ---
             if len(media_group) > 1:
-                # 0.5s Fast Bypass: Direct Copy Check
+                # 0.5s Fast Bypass: Direct Server Copy
                 try:
                     copied_msgs = await bot.copy_media_group(chat_id=message.chat.id, from_chat_id=chat_id, message_id=msg_id)
                     if copied_msgs:
@@ -995,84 +995,80 @@ async def private_message_handler(client: Client, message: Message):
                 except Exception:
                     pass
 
-                try:
-                    copied_msgs = await working_client.copy_media_group(chat_id=message.chat.id, from_chat_id=chat_id, message_id=msg_id)
-                    if copied_msgs:
-                        await status.delete()
-                        del_ids = [m.id for m in copied_msgs] + [message.id]
-                        asyncio.create_task(start_countdown_and_delete(message.chat.id, del_ids, total_seconds=AUTO_DELETE_TIME))
-                        return
-                except Exception:
-                    pass
-
-                # Parallel fast download for all album items
-                download_tasks = [working_client.download_media(m) for m in media_group]
-                downloaded_files = await asyncio.gather(*download_tasks, return_exceptions=True)
-
+                # Sequential robust download (prevents MTProto client collision & 0-byte corruptions)
+                downloaded_files = []
                 input_media_list = []
-                valid_paths = []
                 p_count, v_count, a_count = 0, 0, 0
 
-                for idx, file_path in enumerate(downloaded_files):
-                    if isinstance(file_path, str) and os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-                        valid_paths.append(file_path)
-                        m = media_group[idx]
-                        cap = m.caption if (m.caption and idx == 0) else (target_msg.caption if idx == 0 else "")
+                for idx, m in enumerate(media_group):
+                    try:
+                        dest_prefix = os.path.join(DOWNLOAD_DIR, f"alb_{user_id}_{int(time.time())}_{idx}")
+                        file_path = await working_client.download_media(m, file_name=dest_prefix)
 
-                        if m.photo:
-                            input_media_list.append(InputMediaPhoto(media=file_path, caption=cap))
-                            p_count += 1
-                        elif m.video:
-                            input_media_list.append(InputMediaVideo(media=file_path, caption=cap, supports_streaming=True))
-                            v_count += 1
-                        elif m.audio:
-                            input_media_list.append(InputMediaAudio(media=file_path, caption=cap))
-                            a_count += 1
-                        elif m.document:
-                            input_media_list.append(InputMediaDocument(media=file_path, caption=cap))
+                        if file_path and os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                            downloaded_files.append(file_path)
+                            cap = m.caption if (m.caption and idx == 0) else (target_msg.caption if idx == 0 else "")
+
+                            if m.photo:
+                                input_media_list.append(InputMediaPhoto(media=file_path, caption=cap))
+                                p_count += 1
+                            elif m.video:
+                                input_media_list.append(InputMediaVideo(media=file_path, caption=cap, supports_streaming=True))
+                                v_count += 1
+                            elif m.audio:
+                                input_media_list.append(InputMediaAudio(media=file_path, caption=cap))
+                                a_count += 1
+                            elif m.document:
+                                input_media_list.append(InputMediaDocument(media=file_path, caption=cap))
+                        else:
+                            logger.warning(f"Album item {idx} returned empty file: {file_path}")
+                    except Exception as err:
+                        logger.error(f"Album download error on item {idx}: {err}")
 
                 if len(input_media_list) >= 2:
                     sent_msgs = []
                     chunks = [input_media_list[i:i + 10] for i in range(0, len(input_media_list), 10)]
                     for chunk in chunks:
                         try:
-                            res = await working_client.send_media_group(chat_id=message.chat.id, media=chunk)
-                            sent_msgs.extend(res)
-                        except Exception:
                             res = await bot.send_media_group(chat_id=message.chat.id, media=chunk)
                             sent_msgs.extend(res)
+                        except Exception as e:
+                            logger.error(f"Send album chunk error: {e}")
 
                     await status.delete()
 
-                    asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", len(sent_msgs), p_count, v_count, a_count))
-                    asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", len(sent_msgs), p_count, v_count, a_count))
-
-                    msg_ids_to_del = [m.id for m in sent_msgs] + [message.id]
-                    asyncio.create_task(start_countdown_and_delete(message.chat.id, msg_ids_to_del, total_seconds=AUTO_DELETE_TIME))
+                    if sent_msgs:
+                        asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", len(sent_msgs), p_count, v_count, a_count))
+                        asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", len(sent_msgs), p_count, v_count, a_count))
+                        msg_ids_to_del = [m.id for m in sent_msgs] + [message.id]
+                        asyncio.create_task(start_countdown_and_delete(message.chat.id, msg_ids_to_del, total_seconds=AUTO_DELETE_TIME))
 
                 elif len(input_media_list) == 1:
-                    single_file = valid_paths[0]
-                    uploader = working_client if os.path.getsize(single_file) > 45 * 1024 * 1024 else bot
+                    single_file = downloaded_files[0]
+                    cap = target_msg.caption or ""
                     
-                    sent_m = await uploader.send_document(
-                        chat_id=message.chat.id, 
-                        document=single_file, 
-                        caption=target_msg.caption or ""
-                    )
+                    if media_group[0].video:
+                        sent_m = await bot.send_video(chat_id=message.chat.id, video=single_file, caption=cap, supports_streaming=True)
+                    elif media_group[0].photo:
+                        sent_m = await bot.send_photo(chat_id=message.chat.id, photo=single_file, caption=cap)
+                    else:
+                        sent_m = await bot.send_document(chat_id=message.chat.id, document=single_file, caption=cap)
+
                     await status.delete()
                     msg_ids_to_del = [sent_m.id, message.id]
                     asyncio.create_task(start_countdown_and_delete(message.chat.id, msg_ids_to_del, total_seconds=AUTO_DELETE_TIME))
                 else:
                     await status.edit_text("❌ **Could not process album (media unavailable).**")
 
-                for f in valid_paths:
+                for f in downloaded_files:
                     try:
-                        os.remove(f)
+                        if os.path.exists(f):
+                            os.remove(f)
                     except Exception:
                         pass
                 return
 
-            # --- 2. INSTANT SINGLE MEDIA DELIVERY ---
+            # --- 2. SINGLE MEDIA DELIVERY ---
             if not (target_msg.media or target_msg.video or target_msg.photo or target_msg.document or target_msg.audio or target_msg.voice):
                 if target_msg.text:
                     await status.edit_text(f"📝 **Text Content:**\n\n{target_msg.text}")
@@ -1080,7 +1076,7 @@ async def private_message_handler(client: Client, message: Message):
                     await status.edit_text("⚠️ **No downloadable media found.**")
                 return
 
-            # Direct Copy Check (Bot then Userbot) -> 0.3s Transfer
+            # Direct Server Copy (Instant Delivery)
             try:
                 copied_msg = await bot.copy_message(chat_id=message.chat.id, from_chat_id=chat_id, message_id=msg_id)
                 if copied_msg:
@@ -1092,21 +1088,7 @@ async def private_message_handler(client: Client, message: Message):
             except Exception:
                 pass
 
-            try:
-                copied_msg = await working_client.copy_message(chat_id=message.chat.id, from_chat_id=chat_id, message_id=msg_id)
-                if copied_msg:
-                    await status.delete()
-                    asyncio.create_task(sync_increment_downloads("telegram", 1, 0, 1 if target_msg.video else 0, 0))
-                    asyncio.create_task(sync_increment_user_downloads(user_id, "telegram", 1, 0, 1 if target_msg.video else 0, 0))
-                    asyncio.create_task(start_countdown_and_delete(message.chat.id, [copied_msg.id, message.id], total_seconds=AUTO_DELETE_TIME))
-                    return
-            except Exception:
-                pass
-
-            # Restricted Media Fallback: Fast Download & Direct Upload
-            media_obj = target_msg.video or target_msg.document or target_msg.audio
-            file_size = getattr(media_obj, "file_size", 0) if media_obj else 0
-
+            # Restricted Single Media: Download & Upload via Bot
             download_path = await working_client.download_media(target_msg)
 
             if not download_path or not os.path.exists(download_path) or os.path.getsize(download_path) == 0:
@@ -1115,27 +1097,26 @@ async def private_message_handler(client: Client, message: Message):
 
             caption = target_msg.caption or ""
             sent_msg = None
-            uploader = working_client if file_size > 45 * 1024 * 1024 else bot
 
             try:
                 if target_msg.video:
-                    sent_msg = await uploader.send_video(chat_id=message.chat.id, video=download_path, caption=caption, supports_streaming=True)
+                    sent_msg = await bot.send_video(chat_id=message.chat.id, video=download_path, caption=caption, supports_streaming=True)
                     asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 1, 0))
                     asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 0, 1, 0))
                 elif target_msg.photo:
-                    sent_msg = await uploader.send_photo(chat_id=message.chat.id, photo=download_path, caption=caption)
+                    sent_msg = await bot.send_photo(chat_id=message.chat.id, photo=download_path, caption=caption)
                     asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 1, 0, 0))
                     asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 1, 0, 0))
                 elif target_msg.audio:
-                    sent_msg = await uploader.send_audio(chat_id=message.chat.id, audio=download_path, caption=caption)
+                    sent_msg = await bot.send_audio(chat_id=message.chat.id, audio=download_path, caption=caption)
                     asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 0, 1))
                     asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 0, 0, 1))
                 else:
-                    sent_msg = await uploader.send_document(chat_id=message.chat.id, document=download_path, caption=caption)
+                    sent_msg = await bot.send_document(chat_id=message.chat.id, document=download_path, caption=caption)
                     asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 0, 0))
                     asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 0, 0, 0))
-            except Exception:
-                sent_msg = await working_client.send_document(chat_id=message.chat.id, document=download_path, caption=caption)
+            except Exception as up_err:
+                logger.error(f"Single upload failed: {up_err}")
 
             await status.delete()
 
