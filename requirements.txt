@@ -1,11 +1,4 @@
 hydrogram
 tgcrypto
-yt-dlp
 aiohttp
 firebase-admin
-static-ffmpeg
-google-api-python-client
-google-auth
-google-auth-httplib2
-google-auth-oauthlib
-yt-dlp>=2024.08.06
