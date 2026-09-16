@@ -21,7 +21,10 @@ from hydrogram.types import (
 from hydrogram.errors import SessionPasswordNeeded, FloodWait
 
 # Logging Setup
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - [%(levelname)s] - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 # Configuration
@@ -46,11 +49,18 @@ if FIREBASE_KEY_RAW:
         cred = credentials.Certificate(json.loads(FIREBASE_KEY_RAW))
         firebase_admin.initialize_app(cred)
         db = firestore.client()
-        logger.info("Firebase: Connected")
+        logger.info("Firebase: Connected successfully")
     except Exception as e:
         logger.error(f"Firebase Init Error: {e}")
 
-bot = Client("tg_saver_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True, workers=16)
+bot = Client(
+    "tg_vault_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    in_memory=True,
+    workers=16
+)
 
 admin_states = {}
 login_clients = {}
@@ -63,17 +73,22 @@ def sync_get_all_sessions():
         return []
     try:
         return [{"doc_id": d.id, **d.to_dict()} for d in db.collection("telegram_sessions").stream()]
-    except Exception:
+    except Exception as e:
+        logger.error(f"Get Sessions Error: {e}")
         return []
 
 def sync_add_session(session_str: str, name: str):
     if not db:
-        return False
+        return False, "Database disconnected"
     try:
-        db.collection("telegram_sessions").add({"session_string": session_str, "account_name": name, "created_at": time.time()})
-        return True
-    except Exception:
-        return False
+        db.collection("telegram_sessions").add({
+            "session_string": session_str,
+            "account_name": name,
+            "created_at": time.time()
+        })
+        return True, "Success"
+    except Exception as e:
+        return False, str(e)
 
 def sync_delete_session(doc_id: str):
     if not db:
@@ -92,23 +107,29 @@ async def init_session_pool():
     new_pool = []
     for s in sessions:
         try:
-            cl = Client(f"pool_{s['doc_id']}", api_id=API_ID, api_hash=API_HASH, session_string=s['session_string'], in_memory=True)
+            cl = Client(
+                f"pool_{s['doc_id']}",
+                api_id=API_ID,
+                api_hash=API_HASH,
+                session_string=s['session_string'],
+                in_memory=True
+            )
             await cl.start()
             new_pool.append((s['doc_id'], s.get('account_name', 'Userbot'), cl))
         except Exception as e:
-            logger.warning(f"Failed to start pool: {e}")
+            logger.warning(f"Failed to activate session {s['doc_id']}: {e}")
+    
     for _, _, old_cl in loaded_user_clients:
         try:
             await old_cl.stop()
         except Exception:
             pass
     loaded_user_clients = new_pool
-    logger.info(f"Userbots Active: {len(loaded_user_clients)}")
+    logger.info(f"Session Pool Ready: {len(loaded_user_clients)} active userbots.")
 
-# ----------------- SILENT AUTO DELETE ----------------- #
+# ----------------- SILENT AUTO-DELETE ----------------- #
 
 async def silent_auto_delete(chat_id: int, message_ids: list, delay: int = AUTO_DELETE_TIME):
-    """কোনো দৃশ্যমান মেসেজ ছাড়া নির্দিষ্ট সময় পর ফাইল স্বয়ংক্রিয়ভাবে মুছে দেবে"""
     valid_ids = [m for m in message_ids if m]
     if not valid_ids or delay <= 0:
         return
@@ -118,13 +139,246 @@ async def silent_auto_delete(chat_id: int, message_ids: list, delay: int = AUTO_
     except Exception:
         pass
 
-# ----------------- TELEGRAM HANDLER ----------------- #
+# ----------------- ADMIN DASHBOARD ----------------- #
+
+def get_admin_markup(session_count: int):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("➕ সেশন স্ট্রিং যোগ", callback_data="btn_add_str"),
+            InlineKeyboardButton("📱 ফোন দিয়ে লগইন (OTP)", callback_data="btn_login_phone")
+        ],
+        [
+            InlineKeyboardButton(f"📁 সেশন তালিকা ({session_count})", callback_data="btn_list_sessions"),
+            InlineKeyboardButton("🗑️ সেশন ডিলিট মেনু", callback_data="btn_del_menu")
+        ],
+        [
+            InlineKeyboardButton("🔄 রিফ্রেশ ড্যাশবোর্ড", callback_data="btn_refresh_panel")
+        ]
+    ])
+
+@bot.on_message(filters.command(["admin", "panel"]) & filters.user(OWNER_ID) & filters.private)
+async def admin_panel_handler(_, message: Message):
+    sessions = await asyncio.to_thread(sync_get_all_sessions)
+    text = (
+        "┏━━━━━━ 🎛️ **ADMIN CONTROL PANEL** ━━━━━━┓\n\n"
+        f"  📊 **ডাটাবেস স্ট্যাটাস:** `{'Online 🟢' if db else 'Offline 🔴'}`\n"
+        f"  👥 **সক্রিয় ইউজারবট সেশন:** `{len(sessions)} Connected`\n"
+        f"  ⏱️ **অটো-ডিলিট টাইমার:** `{AUTO_DELETE_TIME}s (Silent)`\n\n"
+        "  _নিচের বাটন চেপে নতুন সেশন যোগ বা নিয়ন্ত্রণ করুন:_\n"
+        "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+    )
+    await message.reply_text(text, reply_markup=get_admin_markup(len(sessions)))
+
+@bot.on_callback_query()
+async def admin_callback_handler(_, query: CallbackQuery):
+    user_id = query.from_user.id
+    if user_id != OWNER_ID:
+        await query.answer("⛔ Access Denied", show_alert=True)
+        return
+
+    data = query.data
+
+    if data == "btn_refresh_panel":
+        sessions = await asyncio.to_thread(sync_get_all_sessions)
+        text = (
+            "┏━━━━━━ 🎛️ **ADMIN CONTROL PANEL** ━━━━━━┓\n\n"
+            f"  📊 **ডাটাবেস স্ট্যাটাস:** `{'Online 🟢' if db else 'Offline 🔴'}`\n"
+            f"  👥 **সক্রিয় ইউজারবট সেশন:** `{len(sessions)} Connected`\n"
+            f"  ⏱️ **অটো-ডিলিট টাইমার:** `{AUTO_DELETE_TIME}s (Silent)`\n\n"
+            "  _নিচের বাটন চেপে নতুন সেশন যোগ বা নিয়ন্ত্রণ করুন:_\n"
+            "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+        )
+        await query.message.edit_text(text, reply_markup=get_admin_markup(len(sessions)))
+        await query.answer("রিলোড সম্পন্ন 🔄")
+
+    elif data == "btn_add_str":
+        admin_states[user_id] = "WAIT_STRING"
+        await query.message.reply_text(
+            "📝 **Hydrogram / Pyrogram Session String পাঠান:**\n\n"
+            "_(সরাসরি স্ট্রিং কপি করে এখানে সেন্ড করুন)_",
+            reply_markup=ForceReply(selective=True)
+        )
+        await query.answer()
+
+    elif data == "btn_login_phone":
+        admin_states[user_id] = "WAIT_PHONE"
+        await query.message.reply_text(
+            "📱 **কান্ট্রি কোড সহ ফোন নম্বর পাঠান:**\n\n"
+            "উদাহরণ: `+8801XXXXXXXXX`",
+            reply_markup=ForceReply(selective=True)
+        )
+        await query.answer()
+
+    elif data == "btn_list_sessions":
+        sessions = await asyncio.to_thread(sync_get_all_sessions)
+        if not sessions:
+            await query.answer("কোনো সক্রিয় সেশন নেই!", show_alert=True)
+            return
+        text = "┏━━━━━━ 📁 **ACTIVE SESSIONS** ━━━━━━┓\n\n"
+        for idx, s in enumerate(sessions, 1):
+            text += f"  **{idx}.** `{s.get('account_name', 'Unknown')}`\n      ID: `{s['doc_id'][:10]}`\n"
+        text += "\n┗━━━━━━━━━━━━━━━━━━━━━━━━┛"
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 ব্যাক", callback_data="btn_refresh_panel")]])
+        await query.message.edit_text(text, reply_markup=markup)
+        await query.answer()
+
+    elif data == "btn_del_menu":
+        sessions = await asyncio.to_thread(sync_get_all_sessions)
+        if not sessions:
+            await query.answer("ডিলিট করার মতো কোনো সেশন নেই!", show_alert=True)
+            return
+        buttons = []
+        for s in sessions:
+            buttons.append([InlineKeyboardButton(f"❌ {s.get('account_name', 'Session')}", callback_data=f"del_{s['doc_id']}")])
+        buttons.append([InlineKeyboardButton("🔙 ব্যাক", callback_data="btn_refresh_panel")])
+        await query.message.edit_text("যে সেশনটি রিমুভ করতে চান সেটি সিলেক্ট করুন:", reply_markup=InlineKeyboardMarkup(buttons))
+        await query.answer()
+
+    elif data.startswith("del_"):
+        doc_id = data.split("_", 1)[1]
+        await asyncio.to_thread(sync_delete_session, doc_id)
+        asyncio.create_task(init_session_pool())
+        await query.answer("সেশন মুছে ফেলা হয়েছে!", show_alert=True)
+        sessions = await asyncio.to_thread(sync_get_all_sessions)
+        text = (
+            "┏━━━━━━ 🎛️ **ADMIN CONTROL PANEL** ━━━━━━┓\n\n"
+            f"  📊 **ডাটাবেস স্ট্যাটাস:** `{'Online 🟢' if db else 'Offline 🔴'}`\n"
+            f"  👥 **সক্রিয় ইউজারবট সেশন:** `{len(sessions)} Connected`\n"
+            f"  ⏱️ **অটো-ডিলিট টাইমার:** `{AUTO_DELETE_TIME}s (Silent)`\n\n"
+            "  _নিচের বাটন চেপে নতুন সেশন যোগ বা নিয়ন্ত্রণ করুন:_\n"
+            "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+        )
+        await query.message.edit_text(text, reply_markup=get_admin_markup(len(sessions)))
+
+# ----------------- ADMIN INPUT PROMPT HANDLER ----------------- #
+
+@bot.on_message(filters.reply & filters.user(OWNER_ID) & filters.private)
+async def admin_reply_processor(_, message: Message):
+    state = admin_states.get(message.from_user.id)
+    if not state:
+        return
+
+    text_input = (message.text or "").strip()
+
+    if state == "WAIT_STRING":
+        admin_states.pop(message.from_user.id, None)
+        status_msg = await message.reply_text("🔄 **সেশন স্ট্রিং যাচাই করা হচ্ছে...**")
+
+        test_cl = Client(f"test_{int(time.time())}", api_id=API_ID, api_hash=API_HASH, session_string=text_input, in_memory=True)
+        try:
+            await test_cl.start()
+            me = await test_cl.get_me()
+            acc_name = f"{me.first_name} (@{me.username})" if me.username else me.first_name
+            await test_cl.stop()
+
+            success, err = await asyncio.to_thread(sync_add_session, text_input, acc_name)
+            if success:
+                asyncio.create_task(init_session_pool())
+                await status_msg.edit_text(f"✅ **অ্যাকাউন্ট যুক্ত হয়েছে!**\n\n👤 `{acc_name}`")
+            else:
+                await status_msg.edit_text(f"⚠️ **ডাটাবেস ত্রুটি:** `{err}`")
+        except Exception as e:
+            await status_msg.edit_text(f"❌ **ভুল সেশন স্ট্রিং:** `{e}`")
+
+    elif state == "WAIT_PHONE":
+        admin_states.pop(message.from_user.id, None)
+        phone = text_input.replace(" ", "").strip()
+        status_msg = await message.reply_text("⏳ **টেলিগ্রাম ভেরিফিকেশন কোড পাঠানো হচ্ছে...**")
+
+        temp_cl = Client(f"login_{int(time.time())}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
+        try:
+            await temp_cl.connect()
+            code_info = await temp_cl.send_code(phone)
+            login_clients[message.from_user.id] = {
+                "client": temp_cl,
+                "phone": phone,
+                "phone_code_hash": code_info.phone_code_hash
+            }
+            admin_states[message.from_user.id] = "WAIT_OTP"
+            await status_msg.edit_text(
+                "📩 **প্রাপ্ত ওটিপি (OTP) কোডটি পাঠান:**\n\n"
+                "💡 *টিপস:* ডিজিটের মাঝে স্পেস দিয়ে লিখুন (যেমন: `1 2 3 4 5`)",
+                reply_markup=ForceReply(selective=True)
+            )
+        except Exception as e:
+            if temp_cl.is_connected:
+                await temp_cl.disconnect()
+            await status_msg.edit_text(f"❌ **ওটিপি পাঠানো যায়নি:** `{e}`")
+
+    elif state == "WAIT_OTP":
+        otp = text_input.replace(" ", "").replace("-", "").strip()
+        data = login_clients.get(message.from_user.id)
+        if not data:
+            admin_states.pop(message.from_user.id, None)
+            await message.reply_text("⚠️ সেশনের মেয়াদ শেষ। আবার চেষ্টা করুন।")
+            return
+
+        temp_cl = data["client"]
+        status_msg = await message.reply_text("⏳ **কোড যাচাই করা হচ্ছে...**")
+
+        try:
+            await temp_cl.sign_in(data["phone"], data["phone_code_hash"], otp)
+            sess_str = await temp_cl.export_session_string()
+            me = await temp_cl.get_me()
+            acc_name = f"{me.first_name} (@{me.username})" if me.username else me.first_name
+            await temp_cl.disconnect()
+            
+            login_clients.pop(message.from_user.id, None)
+            admin_states.pop(message.from_user.id, None)
+
+            await asyncio.to_thread(sync_add_session, sess_str, acc_name)
+            asyncio.create_task(init_session_pool())
+            await status_msg.edit_text(f"✅ **লগইন সফল হয়েছে!**\n\n👤 **অ্যাকাউন্ট:** `{acc_name}`")
+        except SessionPasswordNeeded:
+            admin_states[message.from_user.id] = "WAIT_2FA"
+            await status_msg.edit_text(
+                "🔐 **টু-স্টেপ ভেরিফিকেশন অন করা আছে!**\n\nদয়া করে আপনার 2FA পাসওয়ার্ডটি পাঠান:",
+                reply_markup=ForceReply(selective=True)
+            )
+        except Exception as e:
+            if temp_cl.is_connected:
+                await temp_cl.disconnect()
+            login_clients.pop(message.from_user.id, None)
+            admin_states.pop(message.from_user.id, None)
+            await status_msg.edit_text(f"❌ **লগইন ব্যর্থ:** `{e}`")
+
+    elif state == "WAIT_2FA":
+        password = text_input.strip()
+        data = login_clients.get(message.from_user.id)
+        if not data:
+            admin_states.pop(message.from_user.id, None)
+            await message.reply_text("⚠️ সেশনের মেয়াদ শেষ। আবার চেষ্টা করুন।")
+            return
+
+        temp_cl = data["client"]
+        status_msg = await message.reply_text("⏳ **পাসওয়ার্ড চেক করা হচ্ছে...**")
+
+        try:
+            await temp_cl.check_password(password)
+            sess_str = await temp_cl.export_session_string()
+            me = await temp_cl.get_me()
+            acc_name = f"{me.first_name} (@{me.username})" if me.username else me.first_name
+            await temp_cl.disconnect()
+
+            login_clients.pop(message.from_user.id, None)
+            admin_states.pop(message.from_user.id, None)
+
+            await asyncio.to_thread(sync_add_session, sess_str, acc_name)
+            asyncio.create_task(init_session_pool())
+            await status_msg.edit_text(f"✅ **লগইন সফল হয়েছে!**\n\n👤 **অ্যাকাউন্ট:** `{acc_name}`")
+        except Exception as e:
+            if temp_cl.is_connected:
+                await temp_cl.disconnect()
+            login_clients.pop(message.from_user.id, None)
+            admin_states.pop(message.from_user.id, None)
+            await status_msg.edit_text(f"❌ **ভুল 2FA পাসওয়ার্ড:** `{e}`")
+
+# ----------------- FAST TELEGRAM DOWNLOADER ----------------- #
 
 @bot.on_message(filters.private & ~filters.command(["start", "help", "admin", "panel", "ping"]))
-async def telegram_download_handler(client: Client, message: Message):
+async def telegram_media_fetcher(_, message: Message):
     text_str = (message.text or message.caption or "").strip()
 
-    # টেলিগ্রাম পোস্ট লিংক ডিটেকশন
     p_match = re.search(r"t\.me/c/(\d+)/(\d+)", text_str)
     pub_match = re.search(r"t\.me/([a-zA-Z0-9_]+)/(\d+)", text_str)
 
@@ -143,7 +397,7 @@ async def telegram_download_handler(client: Client, message: Message):
         chat_id = pub_match.group(1)
         msg_id = int(pub_match.group(2))
 
-    # ১. আল্ট্রা-ফাস্ট বাইপাস (মিলি-সেকেন্ডে টেলিগ্রাম সার্ভার কপি)
+    # ১. দ্রুততম সার্ভার-কপি (পাবলিক এবং ওপেন পোস্টের জন্য মিলি-সেকেন্ড বাইপাস)
     try:
         copied = await bot.copy_message(chat_id=message.chat.id, from_chat_id=chat_id, message_id=msg_id)
         if copied:
@@ -159,10 +413,10 @@ async def telegram_download_handler(client: Client, message: Message):
         await message.reply_text("❌ কোনো সক্রিয় ইউজারবট সেশন পাওয়া যায়নি। `/admin` দিয়ে সেশন অ্যাড করুন।")
         return
 
-    # ইউজারবট দিয়ে প্রাইভেট/রেস্ট্রিক্টেড মেসেজ চেক
     target_msg = None
     working_client = None
 
+    # ইউজারবট ক্লায়েন্ট যাচাই
     for _, _, u_client in loaded_user_clients:
         try:
             msg = await asyncio.wait_for(u_client.get_messages(chat_id, msg_id), timeout=4)
@@ -174,10 +428,10 @@ async def telegram_download_handler(client: Client, message: Message):
             continue
 
     if not target_msg or target_msg.empty:
-        await message.reply_text("❌ পোস্টটি পাওয়া যায়নি বা অ্যাক্সেস নেই।")
+        await message.reply_text("❌ পোস্ট পাওয়া যায়নি অথবা অ্যাকাউন্টে চ্যানেলটির অ্যাক্সেস নেই।")
         return
 
-    # ২. ইউজারবট ডিরেক্ট সার্ভার ফরওয়ার্ড (মিলি-সেকেন্ড বাইপাস)
+    # ২. ইউজারবট ডিরেক্ট ফরোয়ার্ড বাইপাস
     try:
         fwd = await working_client.forward_messages(message.chat.id, chat_id, msg_id)
         if fwd:
@@ -186,11 +440,11 @@ async def telegram_download_handler(client: Client, message: Message):
     except Exception:
         pass
 
-    # রেস্ট্রিক্টেড পোস্ট হলে অ্যালবাম স্ক্যান
+    # রেস্ট্রিক্টেড পোস্ট হলে অ্যালবাম চেক
     media_group = [target_msg]
     if target_msg.media_group_id:
         try:
-            scan_ids = list(range(max(1, msg_id - 8), msg_id + 9))
+            scan_ids = list(range(max(1, msg_id - 9), msg_id + 10))
             nearby = await working_client.get_messages(chat_id, scan_ids)
             filtered = [m for m in nearby if m and not m.empty and m.media_group_id == target_msg.media_group_id]
             if len(filtered) > 1:
@@ -200,13 +454,14 @@ async def telegram_download_handler(client: Client, message: Message):
 
     status = await message.reply_text("⚡ **ডাউনলোড হচ্ছে...**")
 
-    # অ্যালবাম প্রসেসিং
+    # অ্যালবাম ডেলিভারি
     if len(media_group) > 1:
         files, input_media = [], []
         for idx, m in enumerate(media_group):
             try:
                 ext = ".mp4" if m.video else ".jpg" if m.photo else ".mp3" if m.audio else ".bin"
-                path = await working_client.download_media(m, file_name=os.path.join(DOWNLOAD_DIR, f"{user_id}_{int(time.time())}_{idx}{ext}"))
+                dest = os.path.join(DOWNLOAD_DIR, f"{message.from_user.id}_{int(time.time())}_{idx}{ext}")
+                path = await working_client.download_media(m, file_name=dest)
                 if path and os.path.exists(path):
                     files.append(path)
                     cap = m.caption or (target_msg.caption if idx == 0 else "")
@@ -229,7 +484,7 @@ async def telegram_download_handler(client: Client, message: Message):
             await status.delete()
             asyncio.create_task(silent_auto_delete(message.chat.id, [m.id for m in sent_msgs] + [message.id]))
         else:
-            await status.edit_text("❌ অ্যালবাম প্রসেস করা সম্ভব হয়নি।")
+            await status.edit_text("❌ অ্যালবাম সংগ্রহ করা সম্ভব হয়নি।")
 
         for f in files:
             try:
@@ -238,12 +493,13 @@ async def telegram_download_handler(client: Client, message: Message):
                 pass
         return
 
-    # সিঙ্গেল মিডিয়া প্রসেসিং
+    # সিঙ্গেল মিডিয়া ডেলিভারি
     ext = ".mp4" if target_msg.video else ".jpg" if target_msg.photo else ".mp3" if target_msg.audio else ".bin"
-    file_path = await working_client.download_media(target_msg, file_name=os.path.join(DOWNLOAD_DIR, f"{user_id}_{int(time.time())}{ext}"))
+    single_dest = os.path.join(DOWNLOAD_DIR, f"{message.from_user.id}_{int(time.time())}{ext}")
+    file_path = await working_client.download_media(target_msg, file_name=single_dest)
 
     if not file_path or not os.path.exists(file_path):
-        await status.edit_text("❌ ডাউনলোড ব্যর্থ হয়েছে।")
+        await status.edit_text("❌ মিডিয়া ফাইল ডাউনলোড ব্যর্থ হয়েছে।")
         return
 
     cap = target_msg.caption or ""
@@ -268,151 +524,44 @@ async def telegram_download_handler(client: Client, message: Message):
     except Exception:
         pass
 
-# ----------------- BASIC COMMANDS ----------------- #
+# ----------------- BASE COMMANDS ----------------- #
 
 @bot.on_message(filters.command("start") & filters.private)
-async def start_cmd(_, m: Message):
-    await m.reply_text(
-        "⚡ **ফাস্ট টেলিগ্রাম ডাউনলোডার রেডি!**\n\n"
-        "যেকোনো পাবলিক বা প্রাইভেট চ্যানেলের পোস্ট/অ্যালবাম লিংক পাঠান।"
+async def start_handler(_, message: Message):
+    await message.reply_text(
+        f"👋 **স্বাগতম, {message.from_user.first_name}!**\n\n"
+        "⚡ **আল্ট্রা-ফাস্ট টেলিগ্রাম ফাইল সেভার রেডি।**\n"
+        "যেকোনো টেলিগ্রাম পোস্ট বা অ্যালবামের লিংক পাঠান।"
     )
 
 @bot.on_message(filters.command("ping") & filters.private)
-async def ping_cmd(_, m: Message):
+async def ping_handler(_, message: Message):
     t0 = time.time()
-    msg = await m.reply_text("⚡...")
+    msg = await message.reply_text("⚡ Ping...")
     await msg.edit_text(f"🚀 **ল্যাটেন্সি:** `{(time.time() - t0) * 1000:.1f}ms`")
 
-# ----------------- ADMIN DASHBOARD ----------------- #
-
-@bot.on_message(filters.command(["admin", "panel"]) & filters.user(OWNER_ID) & filters.private)
-async def admin_panel(_, m: Message):
-    sessions = await asyncio.to_thread(sync_get_all_sessions)
-    text = (
-        "🎛️ **অ্যাডমিন কন্ট্রোল**\n\n"
-        f"🟢 সক্রিয় ইউজারবট: `{len(sessions)}` টি\n"
-    )
-    markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ সেশন স্ট্রিং যোগ", callback_data="add_sess"),
-         InlineKeyboardButton("📱 ফোন দিয়ে লগইন", callback_data="login_phone")],
-        [InlineKeyboardButton(f"📁 সেশন তালিকা ({len(sessions)})", callback_data="list_sess")]
-    ])
-    await m.reply_text(text, reply_markup=markup)
-
-@bot.on_callback_query()
-async def cb_handler(_, q: CallbackQuery):
-    if q.from_user.id != OWNER_ID:
-        return await q.answer("অ্যাক্সেস নেই!", show_alert=True)
-
-    if q.data == "add_sess":
-        admin_states[q.from_user.id] = "WAIT_STRING"
-        await q.message.reply_text("📝 Hydrogram/Pyrogram Session String দিন:", reply_markup=ForceReply(selective=True))
-        await q.answer()
-
-    elif q.data == "login_phone":
-        admin_states[q.from_user.id] = "WAIT_PHONE"
-        await q.message.reply_text("📱 কান্ট্রি কোড সহ নম্বর দিন (+880...):", reply_markup=ForceReply(selective=True))
-        await q.answer()
-
-    elif q.data == "list_sess":
-        sessions = await asyncio.to_thread(sync_get_all_sessions)
-        buttons = [[InlineKeyboardButton(f"❌ {s.get('account_name', 'User')}", callback_data=f"del_{s['doc_id']}")] for s in sessions]
-        await q.message.edit_text("ডিলিট করতে যেকোনো অ্যাকাউন্টে চাপ দিন:", reply_markup=InlineKeyboardMarkup(buttons or [[InlineKeyboardButton("খালি", callback_data="none")]]))
-        await q.answer()
-
-    elif q.data.startswith("del_"):
-        await asyncio.to_thread(sync_delete_session, q.data.split("_")[1])
-        asyncio.create_task(init_session_pool())
-        await q.answer("সেশন ডিলিট হয়েছে!", show_alert=True)
-        await q.message.delete()
-
-@bot.on_message(filters.reply & filters.user(OWNER_ID) & filters.private)
-async def admin_input_handler(_, m: Message):
-    state = admin_states.get(m.from_user.id)
-    if not state:
-        return
-
-    txt = m.text.strip()
-
-    if state == "WAIT_STRING":
-        admin_states.pop(m.from_user.id, None)
-        msg = await m.reply_text("🔄 যাচাই করা হচ্ছে...")
-        try:
-            cl = Client(f"verify_{int(time.time())}", api_id=API_ID, api_hash=API_HASH, session_string=txt, in_memory=True)
-            await cl.start()
-            me = await cl.get_me()
-            await cl.stop()
-            await asyncio.to_thread(sync_add_session, txt, me.first_name)
-            asyncio.create_task(init_session_pool())
-            await msg.edit_text(f"✅ কানেক্টেড: `{me.first_name}`")
-        except Exception as e:
-            await msg.edit_text(f"❌ ত্রুটি: {e}")
-
-    elif state == "WAIT_PHONE":
-        admin_states.pop(m.from_user.id, None)
-        phone = txt.replace(" ", "")
-        cl = Client(f"tmp_{int(time.time())}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
-        await cl.connect()
-        code = await cl.send_code(phone)
-        login_clients[m.from_user.id] = {"cl": cl, "phone": phone, "hash": code.phone_code_hash}
-        admin_states[m.from_user.id] = "WAIT_OTP"
-        await m.reply_text("📩 ওটিপি (OTP) কোড পাঠান (মাঝখানে স্পেস দিয়ে, যেমন: 1 2 3 4 5):", reply_markup=ForceReply(selective=True))
-
-    elif state == "WAIT_OTP":
-        otp = txt.replace(" ", "").replace("-", "")
-        data = login_clients.pop(m.from_user.id, None)
-        admin_states.pop(m.from_user.id, None)
-        if not data:
-            return
-        cl = data["cl"]
-        try:
-            await cl.sign_in(data["phone"], data["hash"], otp)
-            sess = await cl.export_session_string()
-            me = await cl.get_me()
-            await cl.disconnect()
-            await asyncio.to_thread(sync_add_session, sess, me.first_name)
-            asyncio.create_task(init_session_pool())
-            await m.reply_text(f"✅ লগইন সম্পন্ন: `{me.first_name}`")
-        except SessionPasswordNeeded:
-            login_clients[m.from_user.id] = {"cl": cl}
-            admin_states[m.from_user.id] = "WAIT_2FA"
-            await m.reply_text("🔐 2-Step Verification পাসওয়ার্ড পাঠান:", reply_markup=ForceReply(selective=True))
-        except Exception as e:
-            await cl.disconnect()
-            await m.reply_text(f"❌ লগইন ব্যর্থ: {e}")
-
-    elif state == "WAIT_2FA":
-        data = login_clients.pop(m.from_user.id, None)
-        admin_states.pop(m.from_user.id, None)
-        if not data:
-            return
-        cl = data["cl"]
-        try:
-            await cl.check_password(txt)
-            sess = await cl.export_session_string()
-            me = await cl.get_me()
-            await cl.disconnect()
-            await asyncio.to_thread(sync_add_session, sess, me.first_name)
-            asyncio.create_task(init_session_pool())
-            await m.reply_text(f"✅ লগইন সম্পন্ন: `{me.first_name}`")
-        except Exception as e:
-            await cl.disconnect()
-            await m.reply_text(f"❌ পাসওয়ার্ড ভুল: {e}")
-
-# ----------------- WEB SERVER & STARTUP ----------------- #
+# ----------------- WEB SERVER & RUNNER ----------------- #
 
 async def web_server():
     app = web.Application()
-    app.router.add_get("/", lambda _: web.Response(text="Running"))
+    app.router.add_get("/", lambda _: web.Response(text="Bot is running!"))
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
 
 async def main():
     await bot.start()
+    try:
+        await bot.set_bot_commands([
+            BotCommand("start", "বট শুরু করুন"),
+            BotCommand("admin", "অ্যাডমিন প্যানেল"),
+            BotCommand("ping", "সার্ভার স্পিড চেক")
+        ])
+    except Exception:
+        pass
     await init_session_pool()
     await web_server()
-    logger.info("Bot is active!")
+    logger.info("Bot Online!")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
