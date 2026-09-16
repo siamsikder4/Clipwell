@@ -4,12 +4,7 @@ import time
 import json
 import asyncio
 import logging
-import hashlib
-import shutil
-from datetime import datetime
-import aiohttp
 from aiohttp import web
-import yt_dlp
 from hydrogram import Client, filters
 from hydrogram.types import (
     Message,
@@ -23,25 +18,10 @@ from hydrogram.types import (
     InputMediaAudio,
     InputMediaDocument
 )
-from hydrogram.errors import (
-    SessionPasswordNeeded,
-    FloodWait,
-    UserIsBlocked,
-    InputUserDeactivated
-)
-
-# Auto Setup FFmpeg
-try:
-    import static_ffmpeg
-    static_ffmpeg.add_paths()
-except ImportError:
-    pass
+from hydrogram.errors import SessionPasswordNeeded, FloodWait
 
 # Logging Setup
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - [%(levelname)s] - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
 logger = logging.getLogger(__name__)
 
 # Configuration
@@ -63,43 +43,46 @@ if FIREBASE_KEY_RAW:
     try:
         import firebase_admin
         from firebase_admin import credentials, firestore
-        cred_dict = json.loads(FIREBASE_KEY_RAW)
-        cred = credentials.Certificate(cred_dict)
+        cred = credentials.Certificate(json.loads(FIREBASE_KEY_RAW))
         firebase_admin.initialize_app(cred)
         db = firestore.client()
-        logger.info("Firebase: Connected successfully")
+        logger.info("Firebase: Connected")
     except Exception as e:
         logger.error(f"Firebase Init Error: {e}")
 
-# Bot Client
-bot = Client(
-    "bot_instance",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    in_memory=True,
-    workers=16
-)
+bot = Client("tg_saver_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True, workers=16)
 
-# Global States
 admin_states = {}
 login_clients = {}
-progress_status = {}
 loaded_user_clients = []
-video_cache = {}
-search_cache = {}
-top_tracks_cache = {}
 
-DEFAULT_TOP_SONGS = [
-    {"title": "Dolly Parton - Jolene", "url": "https://www.youtube.com/watch?v=Ixrje2rXLMA", "file_id": ""},
-    {"title": "Post Malone - I Had Some Help", "url": "https://www.youtube.com/watch?v=4QIZ7654x40", "file_id": ""},
-    {"title": "Kendrick Lamar - Not Like Us", "url": "https://www.youtube.com/watch?v=H58vbez_m4E", "file_id": ""},
-    {"title": "Sabrina Carpenter - Espresso", "url": "https://www.youtube.com/watch?v=eVli-tstM5E", "file_id": ""},
-    {"title": "Billie Eilish - BIRDS OF A FEATHER", "url": "https://www.youtube.com/watch?v=V9PVRfjEBTI", "file_id": ""},
-    {"title": "Teddy Swims - Lose Control", "url": "https://www.youtube.com/watch?v=GZ3zL7DeNg0", "file_id": ""}
-]
+# ----------------- SESSION POOL & DB ----------------- #
 
-# ----------------- SESSION POOL MANAGER ----------------- #
+def sync_get_all_sessions():
+    if not db:
+        return []
+    try:
+        return [{"doc_id": d.id, **d.to_dict()} for d in db.collection("telegram_sessions").stream()]
+    except Exception:
+        return []
+
+def sync_add_session(session_str: str, name: str):
+    if not db:
+        return False
+    try:
+        db.collection("telegram_sessions").add({"session_string": session_str, "account_name": name, "created_at": time.time()})
+        return True
+    except Exception:
+        return False
+
+def sync_delete_session(doc_id: str):
+    if not db:
+        return False
+    try:
+        db.collection("telegram_sessions").document(doc_id).delete()
+        return True
+    except Exception:
+        return False
 
 async def init_session_pool():
     global loaded_user_clients
@@ -109,1671 +92,327 @@ async def init_session_pool():
     new_pool = []
     for s in sessions:
         try:
-            cl = Client(
-                f"pool_{s['doc_id']}",
-                api_id=API_ID,
-                api_hash=API_HASH,
-                session_string=s['session_string'],
-                in_memory=True
-            )
+            cl = Client(f"pool_{s['doc_id']}", api_id=API_ID, api_hash=API_HASH, session_string=s['session_string'], in_memory=True)
             await cl.start()
-            new_pool.append((s['doc_id'], s['account_name'], cl))
+            new_pool.append((s['doc_id'], s.get('account_name', 'Userbot'), cl))
         except Exception as e:
-            logger.warning(f"Failed to start pool client {s['doc_id']}: {e}")
-    
+            logger.warning(f"Failed to start pool: {e}")
     for _, _, old_cl in loaded_user_clients:
         try:
-            if old_cl.is_connected:
-                await old_cl.stop()
+            await old_cl.stop()
         except Exception:
             pass
     loaded_user_clients = new_pool
-    logger.info(f"Session Pool Ready: {len(loaded_user_clients)} active userbots.")
+    logger.info(f"Userbots Active: {len(loaded_user_clients)}")
 
-# ----------------- DATABASE HELPERS ----------------- #
+# ----------------- SILENT AUTO DELETE ----------------- #
 
-def sync_get_all_user_ids():
-    if not db:
-        return []
-    try:
-        docs = db.collection("bot_users").stream()
-        return [int(d.id) for d in docs if str(d.id).isdigit()]
-    except Exception as e:
-        logger.error(f"Get All Users Error: {e}")
-        return []
-
-def sync_record_song_download(title: str, url: str, file_id: str):
-    if not db or not title:
+async def silent_auto_delete(chat_id: int, message_ids: list, delay: int = AUTO_DELETE_TIME):
+    """কোনো দৃশ্যমান মেসেজ ছাড়া নির্দিষ্ট সময় পর ফাইল স্বয়ংক্রিয়ভাবে মুছে দেবে"""
+    valid_ids = [m for m in message_ids if m]
+    if not valid_ids or delay <= 0:
         return
+    await asyncio.sleep(delay)
     try:
-        from firebase_admin import firestore
-        track_id = hashlib.md5((url or title).encode()).hexdigest()[:16]
-        doc_ref = db.collection("popular_tracks").document(track_id)
-        doc_ref.set({
-            "title": title,
-            "url": url or "",
-            "file_id": file_id or "",
-            "download_count": firestore.Increment(1),
-            "last_downloaded": time.time()
-        }, merge=True)
-    except Exception as e:
-        logger.error(f"Record Popular Song Error: {e}")
-
-def sync_get_top_tracks(limit: int = 10):
-    if not db:
-        return DEFAULT_TOP_SONGS
-    try:
-        from firebase_admin import firestore
-        docs = db.collection("popular_tracks").order_by("download_count", direction=firestore.Query.DESCENDING).limit(limit).stream()
-        tracks = []
-        for d in docs:
-            data = d.to_dict()
-            data["doc_id"] = d.id
-            tracks.append(data)
-        return tracks if tracks else DEFAULT_TOP_SONGS
-    except Exception as e:
-        logger.error(f"Get Top Tracks Error: {e}")
-        return DEFAULT_TOP_SONGS
-
-def sync_add_session(session_str: str, name: str):
-    if not db:
-        return False, "Database offline"
-    try:
-        db.collection("telegram_sessions").add({
-            "session_string": session_str,
-            "account_name": name,
-            "created_at": time.time()
-        })
-        return True, "Success"
-    except Exception as e:
-        return False, str(e)
-
-def sync_get_all_sessions():
-    if not db:
-        return []
-    try:
-        docs = db.collection("telegram_sessions").stream()
-        sessions = []
-        for doc in docs:
-            data = doc.to_dict()
-            sessions.append({
-                "doc_id": doc.id,
-                "session_string": data.get("session_string"),
-                "account_name": data.get("account_name", "Unknown")
-            })
-        return sessions
-    except Exception as e:
-        logger.error(f"Get Sessions Error: {e}")
-        return []
-
-def sync_delete_session(doc_id: str):
-    if not db:
-        return False
-    try:
-        db.collection("telegram_sessions").document(doc_id).delete()
-        return True
-    except Exception as e:
-        return False
-
-def sync_track_user(user_id: int, username: str, name: str) -> bool:
-    if not db:
-        return False
-    try:
-        doc_ref = db.collection("bot_users").document(str(user_id))
-        doc_ref.set({
-            "user_id": int(user_id),
-            "username": username or "N/A",
-            "name": name or "N/A",
-            "last_active": time.time()
-        }, merge=True)
-        return True
-    except Exception:
-        return False
-
-def sync_log_url(user_id: int, user_name: str, url: str, platform: str):
-    if not db:
-        return
-    try:
-        db.collection("submitted_urls").add({
-            "user_id": user_id,
-            "user_name": user_name or "Unknown",
-            "url": url,
-            "platform": platform,
-            "timestamp": time.time()
-        })
+        await bot.delete_messages(chat_id=chat_id, message_ids=valid_ids)
     except Exception:
         pass
 
-def sync_get_active_urls(limit: int = 10):
-    if not db:
-        return []
-    try:
-        from firebase_admin import firestore
-        docs = db.collection("submitted_urls").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(limit).stream()
-        return [doc.to_dict() for doc in docs]
-    except Exception:
-        return []
+# ----------------- TELEGRAM HANDLER ----------------- #
 
-def sync_increment_downloads(platform: str, count: int = 1, photos: int = 0, videos: int = 0, audios: int = 0):
-    if not db or count <= 0:
-        return
-    try:
-        from firebase_admin import firestore
-        update_payload = {
-            "total_downloads": firestore.Increment(count),
-            f"count_{platform.lower()}": firestore.Increment(count)
-        }
-        if platform.lower() == "telegram":
-            if photos > 0:
-                update_payload["tg_photos"] = firestore.Increment(photos)
-            if videos > 0:
-                update_payload["tg_videos"] = firestore.Increment(videos)
-            if audios > 0:
-                update_payload["tg_audios"] = firestore.Increment(audios)
-        db.collection("bot_stats").document("global_analytics").set(update_payload, merge=True)
-    except Exception:
-        pass
-
-def sync_increment_user_downloads(user_id: int, platform: str, count: int = 1, photos: int = 0, videos: int = 0, audios: int = 0):
-    if not db or count <= 0:
-        return
-    try:
-        from firebase_admin import firestore
-        update_data = {
-            "total_downloads": firestore.Increment(count),
-            "last_active": time.time()
-        }
-        if platform.lower() == "telegram":
-            update_data["telegram_downloads"] = firestore.Increment(count)
-            if photos > 0:
-                update_data["tg_photos"] = firestore.Increment(photos)
-            if videos > 0:
-                update_data["tg_videos"] = firestore.Increment(videos)
-            if audios > 0:
-                update_data["tg_audios"] = firestore.Increment(audios)
-        else:
-            update_data["social_downloads"] = firestore.Increment(count)
-        db.collection("bot_users").document(str(user_id)).set(update_data, merge=True)
-    except Exception:
-        pass
-
-def sync_get_stats():
-    if not db:
-        return 0, {}, 0, 0, 0
-    try:
-        stat_doc = db.collection("bot_stats").document("global_analytics").get()
-        total_dl = 0
-        tg_photos, tg_videos, tg_audios = 0, 0, 0
-        platform_counts = {
-            "Telegram": 0, "YouTube": 0, "TikTok": 0, 
-            "Instagram": 0, "Facebook": 0, "Spotify": 0, "Others": 0
-        }
-
-        if stat_doc.exists:
-            data = stat_doc.to_dict()
-            total_dl = data.get("total_downloads", 0)
-            tg_photos = data.get("tg_photos", 0)
-            tg_videos = data.get("tg_videos", 0)
-            tg_audios = data.get("tg_audios", 0)
-            platform_counts = {
-                "Telegram": data.get("count_telegram", 0),
-                "YouTube": data.get("count_youtube", 0),
-                "TikTok": data.get("count_tiktok", 0),
-                "Instagram": data.get("count_instagram", 0),
-                "Facebook": data.get("count_facebook", 0),
-                "Spotify": data.get("count_spotify", 0),
-                "Others": data.get("count_others", 0)
-            }
-        return total_dl, platform_counts, tg_photos, tg_videos, tg_audios
-    except Exception:
-        return 0, {}, 0, 0, 0
-
-async def generate_admin_dashboard():
-    total_dl, platforms, tg_photos, tg_videos, tg_audios = await asyncio.to_thread(sync_get_stats)
-    all_sess = await asyncio.to_thread(sync_get_all_sessions)
-    db_status = "Online 🟢" if db else "Offline 🔴"
-
-    text = (
-        "┏━━━━━━ 🎛️ **CONTROL PANEL** ━━━━━━┓\n\n"
-        f"  📊 **Engine Status:** `{db_status}`\n"
-        f"  👥 **Active Userbots:** `{len(all_sess)} Connected`\n"
-        f"  🚀 **Total Deliveries:** `{total_dl:,}` files\n\n"
-        "  ┌─── 📈 **PLATFORM TRAFFIC**\n"
-        f"  ├ ✈️ **Telegram:** `{platforms.get('Telegram', 0):,}`\n"
-        f"  │   └ 🖼️ `{tg_photos:,}` • 🎥 `{tg_videos:,}` • 🎵 `{tg_audios:,}`\n"
-        f"  ├ 🟢 **Spotify:** `{platforms.get('Spotify', 0):,}`\n"
-        f"  ├ 🎬 **YouTube:** `{platforms.get('YouTube', 0):,}`\n"
-        f"  ├ 🎵 **TikTok:** `{platforms.get('TikTok', 0):,}`\n"
-        f"  ├ 📸 **Instagram:** `{platforms.get('Instagram', 0):,}`\n"
-        f"  ├ 📘 **Facebook:** `{platforms.get('Facebook', 0):,}`\n"
-        f"  └ 🌐 **Others:** `{platforms.get('Others', 0):,}`\n\n"
-        "┗━━━━━━━━━━━━━━━━━━━━━━━━┛"
-    )
-
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🔑 Add via Phone (OTP)", callback_data="btn_login_account"),
-            InlineKeyboardButton("➕ Paste String", callback_data="btn_add_session")
-        ],
-        [
-            InlineKeyboardButton(f"📁 Sessions ({len(all_sess)})", callback_data="btn_list_sessions"),
-            InlineKeyboardButton("🗑️ Remove Session", callback_data="btn_del_menu")
-        ],
-        [
-            InlineKeyboardButton("🔗 Live Feed", callback_data="btn_view_urls"),
-            InlineKeyboardButton("🔄 Refresh Dashboard", callback_data="btn_refresh_admin")
-        ]
-    ])
-    return text, keyboard
-
-# ----------------- UTILITY & SILENT AUTO-DELETE ----------------- #
-
-def get_aria2_opts():
-    if shutil.which("aria2c"):
-        return {
-            'external_downloader': {'default': 'aria2c'},
-            'external_downloader_args': {
-                'aria2c': [
-                    '--min-split-size=1M',
-                    '--max-connection-per-server=16',
-                    '--split=16',
-                    '--summary-interval=0',
-                    '--allow-overwrite=true'
-                ]
-            }
-        }
-    return {}
-
-def get_yt_cookies():
-    cookie_path = "cookies.txt"
-    if os.path.exists(cookie_path):
-        return {'cookiefile': cookie_path}
-    return {}
-
-async def progress_bar(current, total, status_msg, action_name, user_id):
-    if not total or total <= 0:
-        return
-    now = time.time()
-    user_data = progress_status.get(user_id, {})
-    last_update = user_data.get("last_time", 0)
-
-    if (now - last_update < 3.5) and current < total:
-        return
-
-    progress_status[user_id] = {"last_time": now}
-    percentage = (current / total) * 100
-    filled = int(percentage // 10)
-    bar = "▰" * filled + "▱" * (10 - filled)
-
-    curr_mb = current / (1024 * 1024)
-    tot_mb = total / (1024 * 1024)
-
-    text = (
-        "┏━━━━━━━ ⚡ **PROCESSING** ━━━━━━━┓\n\n"
-        f"  🚀 **Task:** `{action_name}`\n"
-        f"  📊 **Status:** `[{bar}]` **{percentage:.1f}%**\n"
-        f"  📦 **Volume:** `{curr_mb:.1f} MB` / `{tot_mb:.1f} MB`\n\n"
-        "  ✨ *Optimizing stream transfer...*\n"
-        "┗━━━━━━━━━━━━━━━━━━━━━━━━┛"
-    )
-    try:
-        await status_msg.edit_text(text)
-    except FloodWait as f:
-        await asyncio.sleep(f.value)
-    except Exception:
-        pass
-
-async def start_countdown_and_delete(chat_id: int, message_ids: list, total_seconds: int = AUTO_DELETE_TIME):
-    """কোনো দৃশ্যমান নোটিশ বা মেসেজ ছাড়া সাইলেন্টলি ব্যাকগ্রাউন্ডে ডিলিট করবে"""
-    valid_msg_ids = [m for m in message_ids if m]
-    if not valid_msg_ids or total_seconds <= 0:
-        return
-    
-    await asyncio.sleep(total_seconds)
-    try:
-        await bot.delete_messages(chat_id=chat_id, message_ids=valid_msg_ids)
-    except Exception:
-        pass
-
-# ----------------- SPOTIFY ENGINE ----------------- #
-
-async def fetch_spotify_track_info(url: str):
-    clean_url = url.strip()
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9"
-    }
-
-    try:
-        async with aiohttp.ClientSession(headers=headers) as session:
-            final_url = clean_url
-            if "spotify.link" in clean_url or "spoti.fi" in clean_url:
-                async with session.get(clean_url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                    final_url = str(resp.url).split("?")[0]
-
-            oembed_url = f"https://open.spotify.com/oembed?url={final_url}"
-            title, artist, thumbnail_url = "", "", ""
-
-            try:
-                async with session.get(oembed_url, timeout=aiohttp.ClientTimeout(total=8)) as o_resp:
-                    if o_resp.status == 200:
-                        data = await o_resp.json()
-                        title = data.get("title", "").strip()
-                        artist = data.get("author_name", "").strip()
-                        thumbnail_url = data.get("thumbnail_url", "").strip()
-            except Exception:
-                pass
-
-            if not title:
-                async with session.get(final_url, timeout=aiohttp.ClientTimeout(total=8)) as page_resp:
-                    if page_resp.status == 200:
-                        html = await page_resp.text()
-                        og_title = re.search(r'<meta\s+property=["\']og:title["\']\s+content=["\'](.*?)["\']', html, re.I)
-                        if og_title:
-                            title = og_title.group(1).strip()
-                        og_desc = re.search(r'<meta\s+property=["\']og:description["\']\s+content=["\'](.*?)["\']', html, re.I)
-                        if og_desc:
-                            artist = og_desc.group(1).split("·")[0].strip()
-                        og_img = re.search(r'<meta\s+property=["\']og:image["\']\s+content=["\'](.*?)["\']', html, re.I)
-                        if og_img:
-                            thumbnail_url = og_img.group(1).strip()
-
-            if not title:
-                return None
-
-            thumb_path = None
-            if thumbnail_url:
-                try:
-                    async with session.get(thumbnail_url, timeout=aiohttp.ClientTimeout(total=6)) as img_resp:
-                        if img_resp.status == 200:
-                            t_file = os.path.join(DOWNLOAD_DIR, f"spot_thumb_{int(time.time())}.jpg")
-                            with open(t_file, "wb") as f:
-                                f.write(await img_resp.read())
-                            thumb_path = t_file
-                except Exception:
-                    pass
-
-            search_query = f"{title} {artist}".strip()
-            return {
-                "title": title,
-                "artist": artist or "Spotify Artist",
-                "query": search_query,
-                "thumb_path": thumb_path
-            }
-    except Exception as e:
-        logger.error(f"Spotify Parser Error: {e}")
-        return None
-
-# ----------------- MEDIA ENGINES ----------------- #
-
-def sanitize_youtube_url(url: str) -> str:
-    match = re.search(r'(?:v=|\/|youtu\.be\/)([0-9A-Za-z_-]{11})', url)
-    if match:
-        return f"https://www.youtube.com/watch?v={match.group(1)}"
-    return url.strip()
-
-def search_youtube_videos(query: str, limit: int = 5):
-    ydl_opts = {'quiet': True, 'no_warnings': True, 'extract_flat': True, 'skip_download': True}
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            res = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
-            entries = res.get('entries', [])
-            results = []
-            for e in entries:
-                if not e:
-                    continue
-                dur = e.get('duration') or 0
-                dur_str = f"{int(dur // 60)}:{int(dur % 60):02d}" if dur else ""
-                results.append({
-                    "id": e.get('id'),
-                    "title": e.get('title'),
-                    "url": f"https://www.youtube.com/watch?v={e.get('id')}",
-                    "duration": dur_str
-                })
-            return results
-    except Exception as e:
-        logger.error(f"Search YouTube Error: {e}")
-        return []
-
-def extract_youtube_metadata(url: str):
-    clean_url = sanitize_youtube_url(url)
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'noplaylist': True,
-        'skip_download': True,
-        'extractor_args': {'youtube': {'player_client': ['ios', 'android', 'web']}}
-    }
-    ydl_opts.update(get_yt_cookies())
-
-    info = None
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(clean_url, download=False)
-    except Exception:
-        try:
-            ydl_opts_fb = {'quiet': True, 'no_warnings': True, 'noplaylist': True, 'skip_download': True}
-            with yt_dlp.YoutubeDL(ydl_opts_fb) as ydl:
-                info = ydl.extract_info(clean_url, download=False)
-        except Exception:
-            return None
-
-    if not info:
-        return None
-
-    title = str(info.get('title') or "YouTube Video")
-    thumbnail = info.get('thumbnail')
-    formats = info.get('formats', [])
-
-    available_heights = set()
-    for f in formats:
-        h = f.get('height')
-        vcodec = f.get('vcodec')
-        if h and vcodec and vcodec != 'none':
-            available_heights.add(int(h))
-
-    standard_resolutions = [1080, 720, 480, 360, 240, 144]
-    available_qualities = [res for res in standard_resolutions if res in available_heights]
-    if not available_qualities and available_heights:
-        available_qualities = sorted(list(available_heights), reverse=True)[:4]
-    if not available_qualities:
-        available_qualities = [720, 360]
-
-    return {
-        "title": title,
-        "thumbnail": thumbnail,
-        "qualities": available_qualities
-    }
-
-def download_youtube_with_quality(url: str, user_id: int, height: int = None):
-    clean_url = sanitize_youtube_url(url)
-    timestamp = int(time.time())
-    prefix = f"{user_id}_{timestamp}_yt_"
-    out_template = os.path.join(DOWNLOAD_DIR, f"{prefix}%(id)s.%(ext)s")
-
-    fmt = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best" if height else "bestvideo+bestaudio/best"
-
-    ydl_opts = {
-        'format': fmt,
-        'outtmpl': out_template,
-        'merge_output_format': 'mp4',
-        'quiet': True,
-        'no_warnings': True,
-        'noplaylist': True,
-        'extractor_args': {'youtube': {'player_client': ['ios', 'android', 'web']}},
-        'postprocessor_args': {'Merger': ['-movflags', '+faststart', '-c:v', 'copy', '-c:a', 'aac']},
-        'buffersize': 1024 * 1024 * 16,
-        'max_filesize': 1950 * 1024 * 1024,
-    }
-    ydl_opts.update(get_yt_cookies())
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(clean_url, download=True)
-            title = str(info.get('title') or "Video") if info else "Video"
-            for fname in os.listdir(DOWNLOAD_DIR):
-                if fname.startswith(prefix):
-                    return os.path.join(DOWNLOAD_DIR, fname), title
-    except Exception:
-        pass
-
-    return None, None
-
-def download_direct_social_best(url: str, user_id: int):
-    clean_url = url.strip()
-    timestamp = int(time.time())
-    prefix = f"{user_id}_{timestamp}_soc_"
-    out_template = os.path.join(DOWNLOAD_DIR, f"{prefix}%(id)s.%(ext)s")
-
-    ydl_opts = {
-        'format': 'bestvideo[vcodec^=avc][ext=mp4]+bestaudio[ext=m4a]/bestvideo[vcodec^=avc]+bestaudio/best[vcodec^=avc]/bestvideo+bestaudio/best',
-        'outtmpl': out_template,
-        'merge_output_format': 'mp4',
-        'quiet': True,
-        'no_warnings': True,
-        'noplaylist': True,
-        'concurrent_fragment_downloads': 4,
-        'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'},
-        'postprocessor_args': {'Merger': ['-movflags', '+faststart', '-c:a', 'aac']},
-        'buffersize': 1024 * 1024 * 16,
-        'max_filesize': 1950 * 1024 * 1024,
-    }
-    ydl_opts.update(get_aria2_opts())
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(clean_url, download=True)
-            title = str(info.get('title') or "Social Video") if info else "Social Video"
-            for fname in os.listdir(DOWNLOAD_DIR):
-                if fname.startswith(prefix):
-                    return os.path.join(DOWNLOAD_DIR, fname), title
-    except Exception as e:
-        logger.error(f"Social download error: {e}")
-
-    return None, None
-
-def extract_and_download_social_audio(url: str, user_id: int):
-    clean_url = sanitize_youtube_url(url)
-    timestamp = int(time.time())
-    prefix = f"{user_id}_{timestamp}_aud_"
-    out_template = os.path.join(DOWNLOAD_DIR, f"{prefix}%(id)s.%(ext)s")
-
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': out_template,
-        'quiet': True,
-        'no_warnings': True,
-        'noplaylist': True,
-        'extractor_args': {'youtube': {'player_client': ['ios', 'android', 'web']}},
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
-        'max_filesize': 500 * 1024 * 1024,
-    }
-    ydl_opts.update(get_yt_cookies())
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(clean_url, download=True)
-            title = str(info.get('title') or "Audio") if info else "Audio"
-
-            for fname in os.listdir(DOWNLOAD_DIR):
-                if fname.startswith(prefix) and fname.endswith(".mp3"):
-                    return os.path.join(DOWNLOAD_DIR, fname), title
-
-            for fname in os.listdir(DOWNLOAD_DIR):
-                if fname.startswith(prefix):
-                    return os.path.join(DOWNLOAD_DIR, fname), title
-    except Exception:
-        pass
-
-    return None, None
-
-async def generate_dynamic_top_markup():
-    top_tracks = await asyncio.to_thread(sync_get_top_tracks, 8)
-    buttons = []
-    
-    for idx, track in enumerate(top_tracks, 1):
-        title = track.get("title", f"Track {idx}")
-        t_key = hashlib.md5(title.encode()).hexdigest()[:10]
-        top_tracks_cache[t_key] = track
-        
-        icon = "🎵" if track.get("file_id") else "🎧"
-        btn_label = f"{icon} {title[:30]}"
-        buttons.append([InlineKeyboardButton(btn_label, callback_data=f"play_top_{t_key}")])
-
-    return InlineKeyboardMarkup(buttons)
-
-# ----------------- MESSAGE HANDLER ----------------- #
-
-@bot.on_message(filters.private)
-async def private_message_handler(client: Client, message: Message):
-    user = message.from_user
-    if not user:
-        return
-    user_id = user.id
+@bot.on_message(filters.private & ~filters.command(["start", "help", "admin", "panel", "ping"]))
+async def telegram_download_handler(client: Client, message: Message):
     text_str = (message.text or message.caption or "").strip()
 
-    asyncio.create_task(asyncio.to_thread(sync_track_user, user_id, user.username, user.first_name))
+    # টেলিগ্রাম পোস্ট লিংক ডিটেকশন
+    p_match = re.search(r"t\.me/c/(\d+)/(\d+)", text_str)
+    pub_match = re.search(r"t\.me/([a-zA-Z0-9_]+)/(\d+)", text_str)
 
-    # Admin Panel
-    if text_str.startswith("/admin") or text_str.startswith("/panel"):
-        if user_id != OWNER_ID:
-            await message.reply_text("⛔ **Access Denied.** This area is restricted to the bot owner.")
+    if not (p_match or pub_match):
+        return
+
+    try:
+        await message.react("🫡")
+    except Exception:
+        pass
+
+    if p_match:
+        chat_id = int("-100" + p_match.group(1))
+        msg_id = int(p_match.group(2))
+    else:
+        chat_id = pub_match.group(1)
+        msg_id = int(pub_match.group(2))
+
+    # ১. আল্ট্রা-ফাস্ট বাইপাস (মিলি-সেকেন্ডে টেলিগ্রাম সার্ভার কপি)
+    try:
+        copied = await bot.copy_message(chat_id=message.chat.id, from_chat_id=chat_id, message_id=msg_id)
+        if copied:
+            asyncio.create_task(silent_auto_delete(message.chat.id, [copied.id, message.id]))
             return
-        dash_text, dash_markup = await generate_admin_dashboard()
-        await message.reply_text(dash_text, reply_markup=dash_markup)
+    except Exception:
+        pass
+
+    if not loaded_user_clients:
+        await init_session_pool()
+
+    if not loaded_user_clients:
+        await message.reply_text("❌ কোনো সক্রিয় ইউজারবট সেশন পাওয়া যায়নি। `/admin` দিয়ে সেশন অ্যাড করুন।")
         return
 
-    # Admin: Session String Input
-    if user_id == OWNER_ID and admin_states.get(user_id) == "WAITING_SESSION":
-        admin_states.pop(user_id, None)
-        status_msg = await message.reply_text("🔄 **Verifying Pyrogram session string...**")
+    # ইউজারবট দিয়ে প্রাইভেট/রেস্ট্রিক্টেড মেসেজ চেক
+    target_msg = None
+    working_client = None
 
-        test_client = Client(f"test_{int(time.time())}", api_id=API_ID, api_hash=API_HASH, session_string=text_str, in_memory=True)
+    for _, _, u_client in loaded_user_clients:
         try:
-            await test_client.start()
-            me = await test_client.get_me()
-            acc_name = f"{me.first_name} (@{me.username})" if me.username else me.first_name
-            await test_client.stop()
-
-            success, err_msg = await asyncio.to_thread(sync_add_session, text_str, acc_name)
-            if success:
-                asyncio.create_task(init_session_pool())
-                await status_msg.edit_text(f"✅ **Account Connected!**\n\n👤 **Account:** `{acc_name}`")
-            else:
-                await status_msg.edit_text(f"⚠️ **Database Error:** `{err_msg}`")
-        except Exception as e:
-            await status_msg.edit_text(f"❌ **Invalid Session String:**\n`{str(e)}`")
-        return
-
-    # Admin: Phone Login
-    if user_id == OWNER_ID and admin_states.get(user_id) == "LOGIN_PHONE":
-        admin_states.pop(user_id, None)
-        phone_number = text_str.replace(" ", "").strip()
-        status_msg = await message.reply_text("⏳ **Requesting Telegram verification code...**")
-
-        temp_client = Client(f"login_{int(time.time())}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
-        try:
-            await temp_client.connect()
-            code_info = await temp_client.send_code(phone_number)
-            login_clients[user_id] = {
-                "client": temp_client,
-                "phone": phone_number,
-                "phone_code_hash": code_info.phone_code_hash
-            }
-            admin_states[user_id] = "LOGIN_OTP"
-            await status_msg.edit_text(
-                "📩 **Enter the OTP code received:**\n\n"
-                "💡 *Tip:* Put a space between digits (e.g. `1 2 3 4 5`).",
-                reply_markup=ForceReply(selective=True)
-            )
-        except Exception as e:
-            if temp_client.is_connected:
-                await temp_client.disconnect()
-            await status_msg.edit_text(f"❌ **Failed to send OTP:**\n`{str(e)}`")
-        return
-
-    # Admin: OTP Verification
-    if user_id == OWNER_ID and admin_states.get(user_id) == "LOGIN_OTP":
-        otp_code = text_str.replace(" ", "").replace("-", "").strip()
-        session_data = login_clients.get(user_id)
-
-        if not session_data:
-            admin_states.pop(user_id, None)
-            await message.reply_text("⚠️ **Session expired.** Please restart login.")
-            return
-
-        temp_client = session_data["client"]
-        status_msg = await message.reply_text("⏳ **Verifying code...**")
-
-        try:
-            await temp_client.sign_in(session_data["phone"], session_data["phone_code_hash"], otp_code)
-            session_string = await temp_client.export_session_string()
-            me = await temp_client.get_me()
-            acc_name = f"{me.first_name} (@{me.username})" if me.username else me.first_name
-            await temp_client.disconnect()
-            login_clients.pop(user_id, None)
-            admin_states.pop(user_id, None)
-
-            await asyncio.to_thread(sync_add_session, session_string, acc_name)
-            asyncio.create_task(init_session_pool())
-            await status_msg.edit_text(f"✅ **Account Connected!**\n\n👤 **Name:** `{acc_name}`")
-        except SessionPasswordNeeded:
-            admin_states[user_id] = "LOGIN_2FA"
-            await status_msg.edit_text("🔐 **Two-Step Verification Enabled**\n\nPlease reply with your 2FA password:", reply_markup=ForceReply(selective=True))
-        except Exception as e:
-            if temp_client.is_connected:
-                await temp_client.disconnect()
-            login_clients.pop(user_id, None)
-            admin_states.pop(user_id, None)
-            await status_msg.edit_text(f"❌ **Login Failed:**\n`{str(e)}`")
-        return
-
-    # Admin: 2FA Input
-    if user_id == OWNER_ID and admin_states.get(user_id) == "LOGIN_2FA":
-        password = text_str.strip()
-        session_data = login_clients.get(user_id)
-
-        if not session_data:
-            admin_states.pop(user_id, None)
-            await message.reply_text("⚠️ **Session expired.** Please restart login.")
-            return
-
-        temp_client = session_data["client"]
-        status_msg = await message.reply_text("⏳ **Checking 2FA password...**")
-
-        try:
-            await temp_client.check_password(password)
-            session_string = await temp_client.export_session_string()
-            me = await temp_client.get_me()
-            acc_name = f"{me.first_name} (@{me.username})" if me.username else me.first_name
-            await temp_client.disconnect()
-            login_clients.pop(user_id, None)
-            admin_states.pop(user_id, None)
-
-            await asyncio.to_thread(sync_add_session, session_string, acc_name)
-            asyncio.create_task(init_session_pool())
-            await status_msg.edit_text(f"✅ **Account Connected!**\n\n👤 **Name:** `{acc_name}`")
-        except Exception as e:
-            if temp_client.is_connected:
-                await temp_client.disconnect()
-            login_clients.pop(user_id, None)
-            admin_states.pop(user_id, None)
-            await status_msg.edit_text(f"❌ **2FA Verification Failed:**\n`{str(e)}`")
-        return
-
-    # Start Command (/start)
-    if text_str.startswith("/start"):
-        bot_info = await client.get_me()
-        bot_username = bot_info.username or "bot"
-
-        start_text = (
-            f"👋 **Hey there, {user.first_name}!**\n\n"
-            "┏━━━━━━ ⚡ **MEDIA VAULT BOT** ━━━━━━┓\n\n"
-            "  The fastest all-in-one media downloader with\n"
-            "  intelligent storage protection.\n\n"
-            "  📥 **Supported Platforms:**\n"
-            "  • 🟢 **Spotify:** Tracks & `spotify.link`\n"
-            "  • 🎬 **Social:** TikTok, IG, FB & YouTube\n"
-            "  • ✈️ **Telegram:** Public & Private Posts / Albums\n"
-            "  • 🔍 **Search:** Search & Download any song\n\n"
-            "  ⏱️ *Equipped with auto-destruction timers!*\n"
-            "┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
-        )
-
-        buttons = [
-            [
-                InlineKeyboardButton("➕ Add to Group", url=f"https://t.me/{bot_username}?startgroup=true"),
-                InlineKeyboardButton("🔥 Popular Music", callback_data="btn_open_top")
-            ],
-            [
-                InlineKeyboardButton("📖 User Guide", callback_data="btn_open_help"),
-                InlineKeyboardButton("⚙️ Status", callback_data="btn_open_status")
-            ]
-        ]
-
-        if user_id == OWNER_ID:
-            buttons.append([InlineKeyboardButton("🎛️ Admin Dashboard", callback_data="btn_admin_shortcut")])
-
-        await message.reply_text(start_text, reply_markup=InlineKeyboardMarkup(buttons))
-        return
-
-    # Popular Music (/top)
-    if text_str.startswith("/top"):
-        try:
-            await message.react("🫡")
+            msg = await asyncio.wait_for(u_client.get_messages(chat_id, msg_id), timeout=4)
+            if msg and not msg.empty:
+                target_msg = msg
+                working_client = u_client
+                break
         except Exception:
-            pass
-        markup = await generate_dynamic_top_markup()
-        await message.reply_text(
-            "┏━━━━━━ 🎧 **POPULAR MUSIC VAULT** ━━━━━━┓\n\n"
-            "  _Tap any track below to download or stream instantly:_\n\n"
-            "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛",
-            reply_markup=markup
-        )
+            continue
+
+    if not target_msg or target_msg.empty:
+        await message.reply_text("❌ পোস্টটি পাওয়া যায়নি বা অ্যাক্সেস নেই।")
         return
 
-    # Help Guide (/help)
-    if text_str.startswith("/help"):
+    # ২. ইউজারবট ডিরেক্ট সার্ভার ফরওয়ার্ড (মিলি-সেকেন্ড বাইপাস)
+    try:
+        fwd = await working_client.forward_messages(message.chat.id, chat_id, msg_id)
+        if fwd:
+            asyncio.create_task(silent_auto_delete(message.chat.id, [fwd.id, message.id]))
+            return
+    except Exception:
+        pass
+
+    # রেস্ট্রিক্টেড পোস্ট হলে অ্যালবাম স্ক্যান
+    media_group = [target_msg]
+    if target_msg.media_group_id:
         try:
-            await message.react("🫡")
-        except Exception:
-            pass
-        help_text = (
-            "┏━━━━━━━ 📖 **USER MANUAL** ━━━━━━━┓\n\n"
-            "  🟢 **Spotify:**\n"
-            "  Send any standard link or `spotify.link`.\n\n"
-            "  🎬 **Social Videos:**\n"
-            "  Send links from TikTok, Instagram, YouTube, FB.\n\n"
-            "  ✈️ **Telegram Posts & Albums:**\n"
-            "  Send any post link from public/private channels.\n"
-            "  *Userbot handles restricted albums seamlessly.*\n\n"
-            "  🔍 **Direct Music Search:**\n"
-            "  Type the artist or song name directly in chat.\n\n"
-            "┗━━━━━━━━━━━━━━━━━━━━━━━━┛"
-        )
-        await message.reply_text(help_text)
-        return
-
-    # Ping Command (/ping)
-    if text_str.startswith("/ping"):
-        start_t = time.time()
-        p_msg = await message.reply_text("⚡ Ping...")
-        end_t = time.time()
-        await p_msg.edit_text(f"🚀 **Pong!** `{(end_t - start_t) * 1000:.1f}ms`")
-        return
-
-    # ----------------- TELEGRAM POST & ALBUM HANDLER (100% FIXED) ----------------- #
-    private_match = re.search(r"t\.me/c/(\d+)/(\d+)", text_str)
-    public_match = re.search(r"t\.me/([a-zA-Z0-9_]+)/(\d+)", text_str)
-
-    if private_match or public_match:
-        try:
-            await message.react("🫡")
+            scan_ids = list(range(max(1, msg_id - 8), msg_id + 9))
+            nearby = await working_client.get_messages(chat_id, scan_ids)
+            filtered = [m for m in nearby if m and not m.empty and m.media_group_id == target_msg.media_group_id]
+            if len(filtered) > 1:
+                media_group = sorted(filtered, key=lambda x: x.id)
         except Exception:
             pass
 
-        tg_url = text_str.strip()
-        asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, tg_url, "telegram"))
+    status = await message.reply_text("⚡ **ডাউনলোড হচ্ছে...**")
 
-        if not loaded_user_clients:
-            await init_session_pool()
-
-        if not loaded_user_clients:
-            await message.reply_text("❌ **No active sessions found.** Please add one via `/admin`.")
-            return
-
-        status = await message.reply_text("⚡ **Fetching media...**")
-
-        try:
-            if private_match:
-                chat_id = int("-100" + private_match.group(1))
-                msg_id = int(private_match.group(2))
-            else:
-                chat_id = public_match.group(1)
-                msg_id = int(public_match.group(2))
-
-            target_msg = None
-            working_client = None
-
-            for _, _, u_client in loaded_user_clients:
-                try:
-                    msg = await asyncio.wait_for(u_client.get_messages(chat_id, msg_id), timeout=6)
-                    if msg and not msg.empty:
-                        target_msg = msg
-                        working_client = u_client
-                        break
-                except Exception:
-                    continue
-
-            if not target_msg or target_msg.empty:
-                await status.edit_text("❌ **Post unavailable.** Ensure the connected session has access to this chat.")
-                return
-
-            # --- নির্ভুলভাবে পুরো অ্যালবামের মেসেজগুলো স্ক্যান ও লিস্ট করা ---
-            media_group = [target_msg]
-            if target_msg.media_group_id:
-                try:
-                    check_ids = [i for i in range(max(1, msg_id - 10), msg_id + 11)]
-                    nearby_msgs = await working_client.get_messages(chat_id, check_ids)
-                    filtered = [m for m in nearby_msgs if m and not m.empty and m.media_group_id == target_msg.media_group_id]
-                    if len(filtered) > 1:
-                        media_group = sorted(filtered, key=lambda x: x.id)
-                except Exception as e:
-                    logger.warning(f"Error scanning album messages: {e}")
-
-            # ================= 1. ALBUM HANDLING =================
-            if len(media_group) > 1:
-                # ফরোয়ার্ড পারমিশন থাকলে 0.2 সেকেন্ডে ইনস্ট্যান্ট সেন্ড
-                try:
-                    fwd_msgs = await working_client.forward_messages(
-                        chat_id=message.chat.id,
-                        from_chat_id=chat_id,
-                        message_ids=[m.id for m in media_group]
-                    )
-                    if fwd_msgs:
-                        await status.delete()
-                        del_ids = [m.id for m in fwd_msgs] + [message.id]
-                        asyncio.create_task(start_countdown_and_delete(message.chat.id, del_ids, total_seconds=AUTO_DELETE_TIME))
-                        return
-                except Exception:
-                    pass
-
-                downloaded_files = []
-                input_media_list = []
-                p_count, v_count, a_count = 0, 0, 0
-
-                is_doc_group = any(m.document and not (m.photo or m.video) for m in media_group)
-                is_audio_group = any(m.audio for m in media_group)
-
-                for idx, m in enumerate(media_group):
-                    try:
-                        ext = ".mp4" if m.video else ".jpg" if m.photo else ".mp3" if m.audio else ""
-                        if not ext and m.document:
-                            ext = os.path.splitext(m.document.file_name or "")[1] or ".bin"
-
-                        file_name = os.path.join(DOWNLOAD_DIR, f"alb_{user_id}_{int(time.time())}_{idx}{ext}")
-                        file_path = await working_client.download_media(m, file_name=file_name)
-
-                        if file_path and os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-                            downloaded_files.append(file_path)
-                            cap = m.caption if m.caption else (target_msg.caption if idx == 0 else "")
-
-                            if is_doc_group:
-                                input_media_list.append(InputMediaDocument(media=file_path, caption=cap))
-                            elif is_audio_group:
-                                input_media_list.append(InputMediaAudio(media=file_path, caption=cap))
-                                a_count += 1
-                            else:
-                                if m.video:
-                                    input_media_list.append(InputMediaVideo(media=file_path, caption=cap, supports_streaming=True))
-                                    v_count += 1
-                                else:
-                                    input_media_list.append(InputMediaPhoto(media=file_path, caption=cap))
-                                    p_count += 1
-                        else:
-                            logger.warning(f"Album item {idx} empty or missing")
-                    except Exception as err:
-                        logger.error(f"Error downloading album item {idx}: {err}")
-
-                if len(input_media_list) >= 2:
-                    sent_msgs = []
-                    chunks = [input_media_list[i:i + 10] for i in range(0, len(input_media_list), 10)]
-                    for chunk in chunks:
-                        try:
-                            res = await bot.send_media_group(chat_id=message.chat.id, media=chunk)
-                            sent_msgs.extend(res)
-                        except Exception as e:
-                            logger.warning(f"Bot failed sending album, trying Userbot: {e}")
-                            res = await working_client.send_media_group(chat_id=message.chat.id, media=chunk)
-                            sent_msgs.extend(res)
-
-                    await status.delete()
-
-                    if sent_msgs:
-                        asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", len(sent_msgs), p_count, v_count, a_count))
-                        asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", len(sent_msgs), p_count, v_count, a_count))
-                        msg_ids_to_del = [m.id for m in sent_msgs] + [message.id]
-                        asyncio.create_task(start_countdown_and_delete(message.chat.id, msg_ids_to_del, total_seconds=AUTO_DELETE_TIME))
-
-                elif len(input_media_list) == 1:
-                    single_file = downloaded_files[0]
-                    cap = target_msg.caption or ""
-                    
-                    if media_group[0].video:
-                        sent_m = await bot.send_video(chat_id=message.chat.id, video=single_file, caption=cap, supports_streaming=True)
-                    elif media_group[0].photo:
-                        sent_m = await bot.send_photo(chat_id=message.chat.id, photo=single_file, caption=cap)
+    # অ্যালবাম প্রসেসিং
+    if len(media_group) > 1:
+        files, input_media = [], []
+        for idx, m in enumerate(media_group):
+            try:
+                ext = ".mp4" if m.video else ".jpg" if m.photo else ".mp3" if m.audio else ".bin"
+                path = await working_client.download_media(m, file_name=os.path.join(DOWNLOAD_DIR, f"{user_id}_{int(time.time())}_{idx}{ext}"))
+                if path and os.path.exists(path):
+                    files.append(path)
+                    cap = m.caption or (target_msg.caption if idx == 0 else "")
+                    if m.video:
+                        input_media.append(InputMediaVideo(path, caption=cap, supports_streaming=True))
+                    elif m.photo:
+                        input_media.append(InputMediaPhoto(path, caption=cap))
+                    elif m.audio:
+                        input_media.append(InputMediaAudio(path, caption=cap))
                     else:
-                        sent_m = await bot.send_document(chat_id=message.chat.id, document=single_file, caption=cap)
-
-                    await status.delete()
-                    msg_ids_to_del = [sent_m.id, message.id]
-                    asyncio.create_task(start_countdown_and_delete(message.chat.id, msg_ids_to_del, total_seconds=AUTO_DELETE_TIME))
-                else:
-                    await status.edit_text("❌ **Could not process album (media unavailable).**")
-
-                for f in downloaded_files:
-                    try:
-                        if os.path.exists(f):
-                            os.remove(f)
-                    except Exception:
-                        pass
-                return
-
-            # ================= 2. SINGLE MEDIA HANDLING =================
-            if not (target_msg.media or target_msg.video or target_msg.photo or target_msg.document or target_msg.audio or target_msg.voice):
-                if target_msg.text:
-                    await status.edit_text(f"📝 **Text Content:**\n\n{target_msg.text}")
-                else:
-                    await status.edit_text("⚠️ **No downloadable media found.**")
-                return
-
-            # ডিরেক্ট সার্ভার কপি (0.3s)
-            try:
-                copied_msg = await bot.copy_message(chat_id=message.chat.id, from_chat_id=chat_id, message_id=msg_id)
-                if copied_msg:
-                    await status.delete()
-                    asyncio.create_task(sync_increment_downloads("telegram", 1, 0, 1 if target_msg.video else 0, 0))
-                    asyncio.create_task(sync_increment_user_downloads(user_id, "telegram", 1, 0, 1 if target_msg.video else 0, 0))
-                    asyncio.create_task(start_countdown_and_delete(message.chat.id, [copied_msg.id, message.id], total_seconds=AUTO_DELETE_TIME))
-                    return
+                        input_media.append(InputMediaDocument(path, caption=cap))
             except Exception:
                 pass
 
-            try:
-                copied_msg = await working_client.copy_message(chat_id=message.chat.id, from_chat_id=chat_id, message_id=msg_id)
-                if copied_msg:
-                    await status.delete()
-                    asyncio.create_task(sync_increment_downloads("telegram", 1, 0, 1 if target_msg.video else 0, 0))
-                    asyncio.create_task(sync_increment_user_downloads(user_id, "telegram", 1, 0, 1 if target_msg.video else 0, 0))
-                    asyncio.create_task(start_countdown_and_delete(message.chat.id, [copied_msg.id, message.id], total_seconds=AUTO_DELETE_TIME))
-                    return
-            except Exception:
-                pass
-
-            # রেস্ট্রিক্টেড চ্যানেলের জন্য ডাউনলোড ও আপলোড
-            ext = ".mp4" if target_msg.video else ".jpg" if target_msg.photo else ".mp3" if target_msg.audio else ""
-            if not ext and target_msg.document:
-                ext = os.path.splitext(target_msg.document.file_name or "")[1] or ".bin"
-
-            single_dest = os.path.join(DOWNLOAD_DIR, f"single_{user_id}_{int(time.time())}{ext}")
-            download_path = await working_client.download_media(target_msg, file_name=single_dest)
-
-            if not download_path or not os.path.exists(download_path) or os.path.getsize(download_path) == 0:
-                await status.edit_text("❌ **Failed to download media.**")
-                return
-
-            caption = target_msg.caption or ""
-            sent_msg = None
-
-            try:
-                if target_msg.video:
-                    sent_msg = await bot.send_video(chat_id=message.chat.id, video=download_path, caption=caption, supports_streaming=True)
-                    asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 1, 0))
-                    asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 0, 1, 0))
-                elif target_msg.photo:
-                    sent_msg = await bot.send_photo(chat_id=message.chat.id, photo=download_path, caption=caption)
-                    asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 1, 0, 0))
-                    asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 1, 0, 0))
-                elif target_msg.audio:
-                    sent_msg = await bot.send_audio(chat_id=message.chat.id, audio=download_path, caption=caption)
-                    asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 0, 1))
-                    asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 0, 0, 1))
-                else:
-                    sent_msg = await bot.send_document(chat_id=message.chat.id, document=download_path, caption=caption)
-                    asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 0, 0))
-                    asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 0, 0, 0))
-            except Exception as up_err:
-                logger.error(f"Single upload fallback triggered: {up_err}")
-                sent_msg = await working_client.send_document(chat_id=message.chat.id, document=download_path, caption=caption)
-
+        if len(input_media) >= 2:
+            sent_msgs = []
+            for i in range(0, len(input_media), 10):
+                res = await bot.send_media_group(message.chat.id, input_media[i:i + 10])
+                sent_msgs.extend(res)
             await status.delete()
+            asyncio.create_task(silent_auto_delete(message.chat.id, [m.id for m in sent_msgs] + [message.id]))
+        else:
+            await status.edit_text("❌ অ্যালবাম প্রসেস করা সম্ভব হয়নি।")
 
-            if sent_msg:
-                asyncio.create_task(start_countdown_and_delete(message.chat.id, [sent_msg.id, message.id], total_seconds=AUTO_DELETE_TIME))
-            else:
-                await message.reply_text("❌ **Upload failed.**")
-
-            if os.path.exists(download_path):
-                try:
-                    os.remove(download_path)
-                except Exception:
-                    pass
-
-        except Exception as e:
-            logger.error(f"Telegram Handler Error: {e}")
+        for f in files:
             try:
-                await status.edit_text(f"❌ **Error:** `{str(e)}`")
+                os.remove(f)
             except Exception:
                 pass
         return
 
-    # ----------------- URL HANDLERS ----------------- #
-    url_pattern = re.search(r'(https?://[^\s]+)', text_str)
+    # সিঙ্গেল মিডিয়া প্রসেসিং
+    ext = ".mp4" if target_msg.video else ".jpg" if target_msg.photo else ".mp3" if target_msg.audio else ".bin"
+    file_path = await working_client.download_media(target_msg, file_name=os.path.join(DOWNLOAD_DIR, f"{user_id}_{int(time.time())}{ext}"))
 
-    if url_pattern:
-        try:
-            await message.react("🫡")
-        except Exception:
-            pass
-
-        url = url_pattern.group(0).strip()
-
-        # 1. Spotify Handler
-        if "spotify.com" in url or "spotify.link" in url or "spoti.fi" in url:
-            status = await message.reply_text("⚡ **Resolving Spotify track details...**")
-            asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, url, "Spotify"))
-
-            spot_info = await fetch_spotify_track_info(url)
-            if not spot_info or not spot_info.get("query"):
-                await status.edit_text("❌ **Failed to retrieve Spotify track metadata.**")
-                return
-
-            track_title = spot_info.get("title")
-            track_artist = spot_info.get("artist")
-            search_q = spot_info.get("query")
-            thumb_path = spot_info.get("thumb_path")
-
-            matched = await asyncio.to_thread(search_youtube_videos, f"{search_q} official audio", 1)
-            if not matched:
-                matched = await asyncio.to_thread(search_youtube_videos, search_q, 1)
-
-            if not matched:
-                await status.edit_text("❌ **Audio stream not found.**")
-                if thumb_path and os.path.exists(thumb_path):
-                    os.remove(thumb_path)
-                return
-
-            target_yt_url = matched[0]["url"]
-            audio_path, _ = await asyncio.to_thread(extract_and_download_social_audio, target_yt_url, user_id)
-
-            if not audio_path or not os.path.exists(audio_path):
-                await status.edit_text("❌ **Failed to download audio stream.**")
-                if thumb_path and os.path.exists(thumb_path):
-                    os.remove(thumb_path)
-                return
-
-            try:
-                caption = (
-                    "┏━━━━━━ 🎵 **SPOTIFY TRACK** ━━━━━━┓\n\n"
-                    f"  🎧 **Title:** `{track_title}`\n"
-                    f"  👤 **Artist:** `{track_artist}`\n"
-                    "  🟢 **Source:** `#Spotify`\n\n"
-                    "┗━━━━━━━━━━━━━━━━━━━━━━━━┛"
-                )
-
-                sent_msg = await message.reply_audio(
-                    audio=audio_path,
-                    caption=caption,
-                    title=track_title,
-                    performer=track_artist,
-                    thumb=thumb_path if (thumb_path and os.path.exists(thumb_path)) else None
-                )
-                await status.delete()
-
-                if sent_msg and sent_msg.audio:
-                    asyncio.create_task(asyncio.to_thread(sync_record_song_download, f"{track_title} - {track_artist}", url, sent_msg.audio.file_id))
-
-                asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "Spotify", 1, 0, 0, 1))
-                asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "Spotify", 1, 0, 0, 1))
-
-                asyncio.create_task(start_countdown_and_delete(message.chat.id, [sent_msg.id, message.id], total_seconds=AUTO_DELETE_TIME))
-
-            except Exception as e:
-                logger.error(f"Spotify Upload Error: {e}")
-                await status.edit_text(f"❌ **Upload Failed:** `{str(e)}`")
-            finally:
-                if audio_path and os.path.exists(audio_path):
-                    try:
-                        os.remove(audio_path)
-                    except Exception:
-                        pass
-                if thumb_path and os.path.exists(thumb_path):
-                    try:
-                        os.remove(thumb_path)
-                    except Exception:
-                        pass
-            return
-
-        # 2. YouTube Handler
-        if "youtube.com" in url or "youtu.be" in url:
-            status = await message.reply_text("⚡ **Analyzing video resolutions...**")
-            asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, url, "YouTube"))
-
-            meta = await asyncio.to_thread(extract_youtube_metadata, url)
-            if not meta:
-                await status.edit_text("❌ **Failed to fetch video streams.** The video might be private or restricted.")
-                return
-
-            title = meta.get("title", "Video")
-            thumbnail = meta.get("thumbnail")
-            qualities = meta.get("qualities", [720, 360])
-
-            url_hash = hashlib.md5(f"{url}_{user_id}_{time.time()}".encode()).hexdigest()[:12]
-            video_cache[url_hash] = {"url": url, "title": title, "platform": "YouTube"}
-
-            buttons = []
-            row = []
-            for q in qualities:
-                row.append(InlineKeyboardButton(f"🎬 {q}p", callback_data=f"dl_res_{url_hash}_{q}"))
-                if len(row) == 2:
-                    buttons.append(row)
-                    row = []
-            if row:
-                buttons.append(row)
-
-            buttons.append([InlineKeyboardButton("🎵 Extract Lossless MP3", callback_data=f"dl_aud_{url_hash}")])
-
-            caption_text = (
-                "┏━━━━━━━ 🎬 **YOUTUBE MEDIA** ━━━━━━━┓\n\n"
-                f"  📌 **Title:** `{title}`\n"
-                "  👤 **Source:** `#YouTube`\n\n"
-                "  _Select your preferred quality below:_\n"
-                "┗━━━━━━━━━━━━━━━━━━━━━━━━┛"
-            )
-
-            try:
-                await status.delete()
-                if thumbnail:
-                    await message.reply_photo(photo=thumbnail, caption=caption_text, reply_markup=InlineKeyboardMarkup(buttons))
-                else:
-                    await message.reply_text(caption_text, reply_markup=InlineKeyboardMarkup(buttons))
-            except Exception:
-                await message.reply_text(caption_text, reply_markup=InlineKeyboardMarkup(buttons))
-            return
-
-        # 3. Direct Social Media (TikTok, IG, FB)
-        platform = "Facebook" if ("facebook" in url or "fb.watch" in url) else "TikTok" if "tiktok" in url else "Instagram" if "instagram" in url else "Social"
-        asyncio.create_task(asyncio.to_thread(sync_log_url, user_id, user.first_name, url, platform))
-
-        status = await message.reply_text(f"⚡ **Downloading {platform} media...**")
-        file_path, title = await asyncio.to_thread(download_direct_social_best, url, user_id)
-
-        if not file_path or not os.path.exists(file_path):
-            await status.edit_text("❌ **Download Failed.** The post may be private or unavailable.")
-            return
-
-        try:
-            caption = (
-                f"┏━━━━━━ 🎬 **{platform.upper()} VIDEO** ━━━━━━┓\n\n"
-                f"  📌 **Title:** `{title}`\n"
-                f"  👤 **Source:** `#{platform}`\n\n"
-                "┗━━━━━━━━━━━━━━━━━━━━━━━━┛"
-            )
-
-            url_hash = hashlib.md5(f"{url}_{user_id}_{time.time()}".encode()).hexdigest()[:12]
-            video_cache[url_hash] = {"url": url, "title": title, "platform": platform}
-            social_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🎵 Extract Audio", callback_data=f"dl_aud_{url_hash}")]])
-
-            sent_vid = await message.reply_video(
-                video=file_path,
-                caption=caption,
-                supports_streaming=True,
-                reply_markup=social_markup
-            )
-
-            await status.delete()
-            asyncio.create_task(asyncio.to_thread(sync_increment_downloads, platform, 1, 0, 1, 0))
-            asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, platform, 1, 0, 1, 0))
-
-            asyncio.create_task(start_countdown_and_delete(message.chat.id, [sent_vid.id, message.id], total_seconds=AUTO_DELETE_TIME))
-
-        except Exception as e:
-            logger.error(f"Social Upload Error: {e}")
-            await status.edit_text(f"❌ **Upload Failed:** `{str(e)}`")
-        finally:
-            if file_path and os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                except Exception:
-                    pass
+    if not file_path or not os.path.exists(file_path):
+        await status.edit_text("❌ ডাউনলোড ব্যর্থ হয়েছে।")
         return
 
-    # 4. Search Handler (Music Search by Name)
-    if text_str and not text_str.startswith("/"):
-        try:
-            await message.react("🫡")
-        except Exception:
-            pass
+    cap = target_msg.caption or ""
+    sent = None
 
-        search_msg = await message.reply_text(f"🔍 **Searching:** `{text_str}`...")
-        results = await asyncio.to_thread(search_youtube_videos, text_str, 5)
+    if target_msg.video:
+        sent = await bot.send_video(message.chat.id, file_path, caption=cap, supports_streaming=True)
+    elif target_msg.photo:
+        sent = await bot.send_photo(message.chat.id, file_path, caption=cap)
+    elif target_msg.audio:
+        sent = await bot.send_audio(message.chat.id, file_path, caption=cap)
+    else:
+        sent = await bot.send_document(message.chat.id, file_path, caption=cap)
 
-        if not results:
-            await search_msg.edit_text("❌ **No matching tracks found.** Try a different keyword.")
-            return
+    await status.delete()
 
-        text_lines = [
-            "┏━━━━━━━ 🔍 **SEARCH RESULTS** ━━━━━━━┓\n"
-        ]
-        num_row = []
+    if sent:
+        asyncio.create_task(silent_auto_delete(message.chat.id, [sent.id, message.id]))
 
-        for idx, item in enumerate(results, 1):
-            dur_display = f" `[{item['duration']}]`" if item['duration'] else ""
-            text_lines.append(f"  **{idx}.** {item['title']}{dur_display}")
-            
-            s_hash = hashlib.md5(item['url'].encode()).hexdigest()[:8]
-            search_cache[s_hash] = item['url']
-            num_row.append(InlineKeyboardButton(str(idx), callback_data=f"pick_{s_hash}"))
+    try:
+        os.remove(file_path)
+    except Exception:
+        pass
 
-        text_lines.append("\n  _Tap a track number below to download:_\n┗━━━━━━━━━━━━━━━━━━━━━━━━┛")
-        markup = InlineKeyboardMarkup([num_row])
-        await search_msg.edit_text("\n".join(text_lines), reply_markup=markup)
-        return
+# ----------------- BASIC COMMANDS ----------------- #
 
-# ----------------- CALLBACK QUERY HANDLER ----------------- #
+@bot.on_message(filters.command("start") & filters.private)
+async def start_cmd(_, m: Message):
+    await m.reply_text(
+        "⚡ **ফাস্ট টেলিগ্রাম ডাউনলোডার রেডি!**\n\n"
+        "যেকোনো পাবলিক বা প্রাইভেট চ্যানেলের পোস্ট/অ্যালবাম লিংক পাঠান।"
+    )
+
+@bot.on_message(filters.command("ping") & filters.private)
+async def ping_cmd(_, m: Message):
+    t0 = time.time()
+    msg = await m.reply_text("⚡...")
+    await msg.edit_text(f"🚀 **ল্যাটেন্সি:** `{(time.time() - t0) * 1000:.1f}ms`")
+
+# ----------------- ADMIN DASHBOARD ----------------- #
+
+@bot.on_message(filters.command(["admin", "panel"]) & filters.user(OWNER_ID) & filters.private)
+async def admin_panel(_, m: Message):
+    sessions = await asyncio.to_thread(sync_get_all_sessions)
+    text = (
+        "🎛️ **অ্যাডমিন কন্ট্রোল**\n\n"
+        f"🟢 সক্রিয় ইউজারবট: `{len(sessions)}` টি\n"
+    )
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ সেশন স্ট্রিং যোগ", callback_data="add_sess"),
+         InlineKeyboardButton("📱 ফোন দিয়ে লগইন", callback_data="login_phone")],
+        [InlineKeyboardButton(f"📁 সেশন তালিকা ({len(sessions)})", callback_data="list_sess")]
+    ])
+    await m.reply_text(text, reply_markup=markup)
 
 @bot.on_callback_query()
-async def callback_query_handler(client: Client, query: CallbackQuery):
-    data = query.data
-    user_id = query.from_user.id
+async def cb_handler(_, q: CallbackQuery):
+    if q.from_user.id != OWNER_ID:
+        return await q.answer("অ্যাক্সেস নেই!", show_alert=True)
 
-    if data == "btn_delete_this":
-        try:
-            await query.message.delete()
-        except Exception:
-            await query.answer("Couldn't delete message.", show_alert=False)
-        return
+    if q.data == "add_sess":
+        admin_states[q.from_user.id] = "WAIT_STRING"
+        await q.message.reply_text("📝 Hydrogram/Pyrogram Session String দিন:", reply_markup=ForceReply(selective=True))
+        await q.answer()
 
-    if data == "btn_open_help":
-        help_text = (
-            "┏━━━━━━━ 📖 **USER MANUAL** ━━━━━━━┓\n\n"
-            "  🟢 **Spotify:**\n"
-            "  Send any standard link or `spotify.link`.\n\n"
-            "  🎬 **Social Videos:**\n"
-            "  Send links from TikTok, Instagram, YouTube, FB.\n\n"
-            "  ✈️ **Telegram Posts & Albums:**\n"
-            "  Send any post link from public/private channels.\n"
-            "  *Userbot handles restricted albums seamlessly.*\n\n"
-            "  🔍 **Direct Music Search:**\n"
-            "  Type the artist or song name directly in chat.\n\n"
-            "┗━━━━━━━━━━━━━━━━━━━━━━━━┛"
-        )
-        await query.message.reply_text(help_text)
-        await query.answer()
-        return
+    elif q.data == "login_phone":
+        admin_states[q.from_user.id] = "WAIT_PHONE"
+        await q.message.reply_text("📱 কান্ট্রি কোড সহ নম্বর দিন (+880...):", reply_markup=ForceReply(selective=True))
+        await q.answer()
 
-    if data == "btn_open_top":
-        markup = await generate_dynamic_top_markup()
-        await query.message.reply_text(
-            "┏━━━━━━ 🎧 **POPULAR MUSIC VAULT** ━━━━━━┓\n\n"
-            "  _Tap any track below to download or stream instantly:_\n\n"
-            "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛",
-            reply_markup=markup
-        )
-        await query.answer()
-        return
-
-    if data == "btn_open_status":
-        await query.answer("⚡ Engine: Online 🟢 | All Systems Operational", show_alert=True)
-        return
-
-    # Direct Stream from /top
-    if data.startswith("play_top_"):
-        t_key = data.split("_")[2]
-        track = top_tracks_cache.get(t_key)
-        if not track:
-            await query.answer("Track session expired. Send /top again.", show_alert=True)
-            return
-
-        title = track.get("title", "Popular Track")
-        file_id = track.get("file_id")
-        target_url = track.get("url")
-
-        if file_id:
-            await query.answer("🚀 Streaming instantly...", show_alert=False)
-            caption = f"🎵 **{title}**\n────────────────────\n🔥 **#PopularSong #AudioVault**"
-            sent_audio = await query.message.reply_audio(
-                audio=file_id,
-                caption=caption,
-                title=title
-            )
-            asyncio.create_task(asyncio.to_thread(sync_record_song_download, title, target_url, file_id))
-            asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "Others", 1, 0, 0, 1))
-            asyncio.create_task(start_countdown_and_delete(query.message.chat.id, [sent_audio.id], total_seconds=AUTO_DELETE_TIME))
-            return
-
-        await query.answer(f"⏳ Extracting {title}...", show_alert=False)
-        status = await query.message.reply_text(f"⚡ **Downloading popular track:** `{title}`...")
-
-        if not target_url:
-            s_res = await asyncio.to_thread(search_youtube_videos, title, 1)
-            target_url = s_res[0]["url"] if s_res else None
-
-        if not target_url:
-            await status.edit_text("❌ Failed to fetch audio stream for this track.")
-            return
-
-        audio_path, fetched_title = await asyncio.to_thread(extract_and_download_social_audio, target_url, user_id)
-        if not audio_path or not os.path.exists(audio_path):
-            await status.edit_text("❌ Failed to download audio stream.")
-            return
-
-        try:
-            caption = f"🎵 **{fetched_title or title}**\n────────────────────\n🔥 **#PopularSong #AudioVault**"
-
-            sent_msg = await query.message.reply_audio(
-                audio=audio_path,
-                caption=caption,
-                title=fetched_title or title
-            )
-            await status.delete()
-
-            if sent_msg and sent_msg.audio:
-                asyncio.create_task(asyncio.to_thread(sync_record_song_download, fetched_title or title, target_url, sent_msg.audio.file_id))
-
-            asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "Others", 1, 0, 0, 1))
-            asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "Others", 1, 0, 0, 1))
-            
-            asyncio.create_task(start_countdown_and_delete(query.message.chat.id, [sent_msg.id], total_seconds=AUTO_DELETE_TIME))
-
-        except Exception as e:
-            logger.error(f"Top Song Upload Error: {e}")
-            await status.edit_text(f"❌ **Upload Failed:** `{str(e)}`")
-        finally:
-            if audio_path and os.path.exists(audio_path):
-                try:
-                    os.remove(audio_path)
-                except Exception:
-                    pass
-        return
-
-    # Item picked from search list
-    if data.startswith("pick_"):
-        s_hash = data.split("_")[1]
-        target_url = search_cache.get(s_hash)
-        if not target_url:
-            await query.answer("Search expired. Please search again.", show_alert=True)
-            return
-
-        await query.answer("Fetching formats...", show_alert=False)
-        status = await query.message.reply_text("⚡ **Analyzing media formats...**")
-
-        meta = await asyncio.to_thread(extract_youtube_metadata, target_url)
-        if not meta:
-            await status.edit_text("❌ Failed to fetch stream details.")
-            return
-
-        title = meta.get("title", "Track")
-        thumbnail = meta.get("thumbnail")
-        qualities = meta.get("qualities", [720, 360])
-
-        url_hash = hashlib.md5(f"{target_url}_{user_id}_{time.time()}".encode()).hexdigest()[:12]
-        video_cache[url_hash] = {"url": target_url, "title": title, "platform": "YouTube"}
-
-        buttons = []
-        row = []
-        for q in qualities:
-            row.append(InlineKeyboardButton(f"🎬 {q}p", callback_data=f"dl_res_{url_hash}_{q}"))
-            if len(row) == 2:
-                buttons.append(row)
-                row = []
-        if row:
-            buttons.append(row)
-
-        buttons.append([InlineKeyboardButton("🎵 Extract Lossless MP3", callback_data=f"dl_aud_{url_hash}")])
-
-        caption_text = (
-            "┏━━━━━━━ 🎬 **YOUTUBE MEDIA** ━━━━━━━┓\n\n"
-            f"  📌 **Title:** `{title}`\n"
-            "  👤 **Source:** `#YouTube`\n\n"
-            "  _Select your preferred quality below:_\n"
-            "┗━━━━━━━━━━━━━━━━━━━━━━━━┛"
-        )
-
-        try:
-            await status.delete()
-            if thumbnail:
-                await query.message.reply_photo(photo=thumbnail, caption=caption_text, reply_markup=InlineKeyboardMarkup(buttons))
-            else:
-                await query.message.reply_text(caption_text, reply_markup=InlineKeyboardMarkup(buttons))
-        except Exception:
-            await query.message.reply_text(caption_text, reply_markup=InlineKeyboardMarkup(buttons))
-        return
-
-    # Download Specific Video Resolution
-    if data.startswith("dl_res_"):
-        parts = data.split("_")
-        url_hash = parts[2]
-        res_tag = parts[3]
-
-        item = video_cache.get(url_hash)
-        if not item:
-            await query.answer("⚠️ Session expired. Send the link again.", show_alert=True)
-            return
-
-        target_url = item["url"]
-        title = item["title"]
-        platform = item["platform"]
-        height_val = int(res_tag) if res_tag.isdigit() else None
-
-        await query.answer(f"⏳ Processing {res_tag}p...", show_alert=False)
-        status = await query.message.reply_text(f"⚡ **Downloading video ({res_tag}p)...**")
-
-        file_path, fetched_title = await asyncio.to_thread(download_youtube_with_quality, target_url, user_id, height_val)
-
-        if not file_path or not os.path.exists(file_path):
-            await status.edit_text("❌ **Download Failed.** Stream unavailable.")
-            return
-
-        try:
-            caption = (
-                f"┏━━━━━━ 🎬 **{platform.upper()} VIDEO** ━━━━━━┓\n\n"
-                f"  📌 **Title:** `{fetched_title or title}`\n"
-                f"  📊 **Quality:** `{res_tag}p`\n"
-                f"  👤 **Source:** `#{platform}`\n\n"
-                "┗━━━━━━━━━━━━━━━━━━━━━━━━┛"
-            )
-
-            sent_vid = await query.message.reply_video(
-                video=file_path,
-                caption=caption,
-                supports_streaming=True
-            )
-            await status.delete()
-            asyncio.create_task(asyncio.to_thread(sync_increment_downloads, platform, 1, 0, 1, 0))
-            asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, platform, 1, 0, 1, 0))
-
-            asyncio.create_task(start_countdown_and_delete(query.message.chat.id, [sent_vid.id, message.id], total_seconds=AUTO_DELETE_TIME))
-
-        except Exception as e:
-            logger.error(f"Video Quality Upload Error: {e}")
-            await status.edit_text(f"❌ **Upload Failed:** `{str(e)}`")
-        finally:
-            if file_path and os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                except Exception:
-                    pass
-        return
-
-    # Extract MP3 Audio Callback
-    if data.startswith("dl_aud_"):
-        url_hash = data.split("_", 2)[2]
-        item = video_cache.get(url_hash)
-
-        if not item:
-            await query.answer("⚠️ Session expired. Send the link again.", show_alert=True)
-            return
-
-        target_url = item["url"]
-        title = item["title"]
-        platform = item.get("platform", "Audio")
-
-        await query.answer("🎵 Extracting audio stream...", show_alert=False)
-        status = await query.message.reply_text("⚡ **Extracting high quality MP3...**")
-
-        audio_path, fetched_title = await asyncio.to_thread(extract_and_download_social_audio, target_url, user_id)
-
-        if not audio_path or not os.path.exists(audio_path):
-            await status.edit_text("❌ **Failed to extract audio stream.**")
-            return
-
-        try:
-            caption = (
-                "┏━━━━━━ 🎵 **EXTRACTED AUDIO** ━━━━━━┓\n\n"
-                f"  🎧 **Title:** `{fetched_title or title}`\n"
-                f"  👤 **Source:** `#{platform}`\n\n"
-                "┗━━━━━━━━━━━━━━━━━━━━━━━━┛"
-            )
-
-            sent_msg = await query.message.reply_audio(
-                audio=audio_path,
-                caption=caption,
-                title=fetched_title or title
-            )
-            await status.delete()
-
-            if sent_msg and sent_msg.audio:
-                asyncio.create_task(asyncio.to_thread(sync_record_song_download, fetched_title or title, target_url, sent_msg.audio.file_id))
-
-            asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "Others", 1, 0, 0, 1))
-            asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "Others", 1, 0, 0, 1))
-
-            asyncio.create_task(start_countdown_and_delete(query.message.chat.id, [sent_msg.id, message.id], total_seconds=AUTO_DELETE_TIME))
-
-        except Exception as e:
-            logger.error(f"Audio Upload Error: {e}")
-            await status.edit_text(f"❌ **Upload Failed:** `{str(e)}`")
-        finally:
-            if audio_path and os.path.exists(audio_path):
-                try:
-                    os.remove(audio_path)
-                except Exception:
-                    pass
-        return
-
-    # Admin Panel Callbacks
-    if user_id != OWNER_ID:
-        await query.answer("⛔ Access Denied.", show_alert=True)
-        return
-
-    if data in ["btn_admin_shortcut", "btn_refresh_admin"]:
-        text, markup = await generate_admin_dashboard()
-        await query.message.edit_text(text, reply_markup=markup)
-        return
-
-    if data == "btn_add_session":
-        admin_states[user_id] = "WAITING_SESSION"
-        await query.message.reply_text(
-            "📝 **Send your Pyrogram/Hydrogram Session String:**",
-            reply_markup=ForceReply(selective=True)
-        )
-        await query.answer()
-        return
-
-    if data == "btn_login_account":
-        admin_states[user_id] = "LOGIN_PHONE"
-        await query.message.reply_text(
-            "📱 **Send phone number with country code** (e.g. `+8801XXXXXXXXX`):",
-            reply_markup=ForceReply(selective=True)
-        )
-        await query.answer()
-        return
-
-    if data == "btn_list_sessions":
+    elif q.data == "list_sess":
         sessions = await asyncio.to_thread(sync_get_all_sessions)
-        if not sessions:
-            await query.answer("No active sessions found.", show_alert=True)
-            return
-        text = "┏━━━━━━ 📁 **ACTIVE SESSIONS** ━━━━━━┓\n\n"
-        for idx, s in enumerate(sessions, 1):
-            text += f"  **{idx}.** `{s['account_name']}`\n      ID: `{s['doc_id'][:8]}`\n"
-        text += "\n┗━━━━━━━━━━━━━━━━━━━━━━━━┛"
-        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_refresh_admin")]]))
-        return
+        buttons = [[InlineKeyboardButton(f"❌ {s.get('account_name', 'User')}", callback_data=f"del_{s['doc_id']}")] for s in sessions]
+        await q.message.edit_text("ডিলিট করতে যেকোনো অ্যাকাউন্টে চাপ দিন:", reply_markup=InlineKeyboardMarkup(buttons or [[InlineKeyboardButton("খালি", callback_data="none")]]))
+        await q.answer()
 
-    if data == "btn_del_menu":
-        sessions = await asyncio.to_thread(sync_get_all_sessions)
-        if not sessions:
-            await query.answer("No sessions available to delete.", show_alert=True)
-            return
-        buttons = []
-        for s in sessions:
-            buttons.append([InlineKeyboardButton(f"❌ {s['account_name']}", callback_data=f"del_{s['doc_id']}")])
-        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="btn_refresh_admin")])
-        await query.message.edit_text("Select an account session to remove:", reply_markup=InlineKeyboardMarkup(buttons))
-        return
-
-    if data.startswith("del_"):
-        doc_id = data.split("_", 1)[1]
-        await asyncio.to_thread(sync_delete_session, doc_id)
+    elif q.data.startswith("del_"):
+        await asyncio.to_thread(sync_delete_session, q.data.split("_")[1])
         asyncio.create_task(init_session_pool())
-        await query.answer("Session removed successfully.", show_alert=True)
-        text, markup = await generate_admin_dashboard()
-        await query.message.edit_text(text, reply_markup=markup)
+        await q.answer("সেশন ডিলিট হয়েছে!", show_alert=True)
+        await q.message.delete()
+
+@bot.on_message(filters.reply & filters.user(OWNER_ID) & filters.private)
+async def admin_input_handler(_, m: Message):
+    state = admin_states.get(m.from_user.id)
+    if not state:
         return
 
-    if data == "btn_view_urls":
-        urls = await asyncio.to_thread(sync_get_active_urls, 8)
-        if not urls:
-            await query.answer("No recent requests logged.", show_alert=True)
+    txt = m.text.strip()
+
+    if state == "WAIT_STRING":
+        admin_states.pop(m.from_user.id, None)
+        msg = await m.reply_text("🔄 যাচাই করা হচ্ছে...")
+        try:
+            cl = Client(f"verify_{int(time.time())}", api_id=API_ID, api_hash=API_HASH, session_string=txt, in_memory=True)
+            await cl.start()
+            me = await cl.get_me()
+            await cl.stop()
+            await asyncio.to_thread(sync_add_session, txt, me.first_name)
+            asyncio.create_task(init_session_pool())
+            await msg.edit_text(f"✅ কানেক্টেড: `{me.first_name}`")
+        except Exception as e:
+            await msg.edit_text(f"❌ ত্রুটি: {e}")
+
+    elif state == "WAIT_PHONE":
+        admin_states.pop(m.from_user.id, None)
+        phone = txt.replace(" ", "")
+        cl = Client(f"tmp_{int(time.time())}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
+        await cl.connect()
+        code = await cl.send_code(phone)
+        login_clients[m.from_user.id] = {"cl": cl, "phone": phone, "hash": code.phone_code_hash}
+        admin_states[m.from_user.id] = "WAIT_OTP"
+        await m.reply_text("📩 ওটিপি (OTP) কোড পাঠান (মাঝখানে স্পেস দিয়ে, যেমন: 1 2 3 4 5):", reply_markup=ForceReply(selective=True))
+
+    elif state == "WAIT_OTP":
+        otp = txt.replace(" ", "").replace("-", "")
+        data = login_clients.pop(m.from_user.id, None)
+        admin_states.pop(m.from_user.id, None)
+        if not data:
             return
-        text = "┏━━━━━━ 🔗 **LIVE ACTIVITY FEED** ━━━━━━┓\n\n"
-        for u in urls:
-            text += f"  • **{u.get('platform', 'Link')}:** `{u.get('url')[:30]}...`\n    └ User: `{u.get('user_name')}`\n"
-        text += "\n┗━━━━━━━━━━━━━━━━━━━━━━━━┛"
-        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_refresh_admin")]]))
-        return
+        cl = data["cl"]
+        try:
+            await cl.sign_in(data["phone"], data["hash"], otp)
+            sess = await cl.export_session_string()
+            me = await cl.get_me()
+            await cl.disconnect()
+            await asyncio.to_thread(sync_add_session, sess, me.first_name)
+            asyncio.create_task(init_session_pool())
+            await m.reply_text(f"✅ লগইন সম্পন্ন: `{me.first_name}`")
+        except SessionPasswordNeeded:
+            login_clients[m.from_user.id] = {"cl": cl}
+            admin_states[m.from_user.id] = "WAIT_2FA"
+            await m.reply_text("🔐 2-Step Verification পাসওয়ার্ড পাঠান:", reply_markup=ForceReply(selective=True))
+        except Exception as e:
+            await cl.disconnect()
+            await m.reply_text(f"❌ লগইন ব্যর্থ: {e}")
 
-# ----------------- AIOHTTP WEB SERVER ----------------- #
+    elif state == "WAIT_2FA":
+        data = login_clients.pop(m.from_user.id, None)
+        admin_states.pop(m.from_user.id, None)
+        if not data:
+            return
+        cl = data["cl"]
+        try:
+            await cl.check_password(txt)
+            sess = await cl.export_session_string()
+            me = await cl.get_me()
+            await cl.disconnect()
+            await asyncio.to_thread(sync_add_session, sess, me.first_name)
+            asyncio.create_task(init_session_pool())
+            await m.reply_text(f"✅ লগইন সম্পন্ন: `{me.first_name}`")
+        except Exception as e:
+            await cl.disconnect()
+            await m.reply_text(f"❌ পাসওয়ার্ড ভুল: {e}")
+
+# ----------------- WEB SERVER & STARTUP ----------------- #
 
 async def web_server():
-    async def handle_ping(request):
-        return web.Response(text="Bot is running smoothly!")
-
     app = web.Application()
-    app.router.add_get("/", handle_ping)
-    app.router.add_get("/health", handle_ping)
+    app.router.add_get("/", lambda _: web.Response(text="Running"))
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    logger.info(f"Aiohttp web server running on port {PORT}")
-
-# ----------------- BOT STARTUP ----------------- #
+    await web.TCPSite(runner, "0.0.0.0", PORT).start()
 
 async def main():
     await bot.start()
-    
-    try:
-        await bot.set_bot_commands([
-            BotCommand("top", "popular songs"),
-            BotCommand("help", "how to use"),
-            BotCommand("ping", "check latency")
-        ])
-        logger.info("Bot Menu Commands registered successfully!")
-    except Exception as e:
-        logger.warning(f"Failed to set bot commands: {e}")
-
-    logger.info("Bot started successfully!")
     await init_session_pool()
     await web_server()
-
+    logger.info("Bot is active!")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
