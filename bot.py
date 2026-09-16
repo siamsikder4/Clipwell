@@ -71,7 +71,7 @@ if FIREBASE_KEY_RAW:
     except Exception as e:
         logger.error(f"Firebase Init Error: {e}")
 
-# Bot Client (Direct MTProto client supports up to 2GB uploads natively)
+# Bot Client
 bot = Client(
     "bot_instance",
     api_id=API_ID,
@@ -926,7 +926,7 @@ async def private_message_handler(client: Client, message: Message):
         await p_msg.edit_text(f"🚀 **Pong!** `{(end_t - start_t) * 1000:.1f}ms`")
         return
 
-    # ----------------- TELEGRAM POST & ALBUM HANDLER (FIXED & ULTRA-FAST) ----------------- #
+    # ----------------- TELEGRAM POST & ALBUM HANDLER (100% FIXED) ----------------- #
     private_match = re.search(r"t\.me/c/(\d+)/(\d+)", text_str)
     public_match = re.search(r"t\.me/([a-zA-Z0-9_]+)/(\d+)", text_str)
 
@@ -958,7 +958,6 @@ async def private_message_handler(client: Client, message: Message):
 
             target_msg = None
             working_client = None
-            media_group = []
 
             for _, _, u_client in loaded_user_clients:
                 try:
@@ -966,14 +965,6 @@ async def private_message_handler(client: Client, message: Message):
                     if msg and not msg.empty:
                         target_msg = msg
                         working_client = u_client
-
-                        if msg.media_group_id:
-                            try:
-                                media_group = await u_client.get_media_group(chat_id, msg_id)
-                            except Exception:
-                                media_group = [msg]
-                        else:
-                            media_group = [msg]
                         break
                 except Exception:
                     continue
@@ -982,48 +973,71 @@ async def private_message_handler(client: Client, message: Message):
                 await status.edit_text("❌ **Post unavailable.** Ensure the connected session has access to this chat.")
                 return
 
-            # --- 1. ALBUM PROCESSING ---
-            if len(media_group) > 1:
-                # 0.5s Fast Bypass: Direct Server Copy
+            # --- নির্ভুলভাবে পুরো অ্যালবামের মেসেজগুলো স্ক্যান ও লিস্ট করা ---
+            media_group = [target_msg]
+            if target_msg.media_group_id:
                 try:
-                    copied_msgs = await bot.copy_media_group(chat_id=message.chat.id, from_chat_id=chat_id, message_id=msg_id)
-                    if copied_msgs:
+                    check_ids = [i for i in range(max(1, msg_id - 10), msg_id + 11)]
+                    nearby_msgs = await working_client.get_messages(chat_id, check_ids)
+                    filtered = [m for m in nearby_msgs if m and not m.empty and m.media_group_id == target_msg.media_group_id]
+                    if len(filtered) > 1:
+                        media_group = sorted(filtered, key=lambda x: x.id)
+                except Exception as e:
+                    logger.warning(f"Error scanning album messages: {e}")
+
+            # ================= 1. ALBUM HANDLING =================
+            if len(media_group) > 1:
+                # ফরোয়ার্ড পারমিশন থাকলে 0.2 সেকেন্ডে ইনস্ট্যান্ট সেন্ড
+                try:
+                    fwd_msgs = await working_client.forward_messages(
+                        chat_id=message.chat.id,
+                        from_chat_id=chat_id,
+                        message_ids=[m.id for m in media_group]
+                    )
+                    if fwd_msgs:
                         await status.delete()
-                        del_ids = [m.id for m in copied_msgs] + [message.id]
+                        del_ids = [m.id for m in fwd_msgs] + [message.id]
                         asyncio.create_task(start_countdown_and_delete(message.chat.id, del_ids, total_seconds=AUTO_DELETE_TIME))
                         return
                 except Exception:
                     pass
 
-                # Sequential robust download (prevents MTProto client collision & 0-byte corruptions)
                 downloaded_files = []
                 input_media_list = []
                 p_count, v_count, a_count = 0, 0, 0
 
+                is_doc_group = any(m.document and not (m.photo or m.video) for m in media_group)
+                is_audio_group = any(m.audio for m in media_group)
+
                 for idx, m in enumerate(media_group):
                     try:
-                        dest_prefix = os.path.join(DOWNLOAD_DIR, f"alb_{user_id}_{int(time.time())}_{idx}")
-                        file_path = await working_client.download_media(m, file_name=dest_prefix)
+                        ext = ".mp4" if m.video else ".jpg" if m.photo else ".mp3" if m.audio else ""
+                        if not ext and m.document:
+                            ext = os.path.splitext(m.document.file_name or "")[1] or ".bin"
+
+                        file_name = os.path.join(DOWNLOAD_DIR, f"alb_{user_id}_{int(time.time())}_{idx}{ext}")
+                        file_path = await working_client.download_media(m, file_name=file_name)
 
                         if file_path and os.path.exists(file_path) and os.path.getsize(file_path) > 0:
                             downloaded_files.append(file_path)
-                            cap = m.caption if (m.caption and idx == 0) else (target_msg.caption if idx == 0 else "")
+                            cap = m.caption if m.caption else (target_msg.caption if idx == 0 else "")
 
-                            if m.photo:
-                                input_media_list.append(InputMediaPhoto(media=file_path, caption=cap))
-                                p_count += 1
-                            elif m.video:
-                                input_media_list.append(InputMediaVideo(media=file_path, caption=cap, supports_streaming=True))
-                                v_count += 1
-                            elif m.audio:
+                            if is_doc_group:
+                                input_media_list.append(InputMediaDocument(media=file_path, caption=cap))
+                            elif is_audio_group:
                                 input_media_list.append(InputMediaAudio(media=file_path, caption=cap))
                                 a_count += 1
-                            elif m.document:
-                                input_media_list.append(InputMediaDocument(media=file_path, caption=cap))
+                            else:
+                                if m.video:
+                                    input_media_list.append(InputMediaVideo(media=file_path, caption=cap, supports_streaming=True))
+                                    v_count += 1
+                                else:
+                                    input_media_list.append(InputMediaPhoto(media=file_path, caption=cap))
+                                    p_count += 1
                         else:
-                            logger.warning(f"Album item {idx} returned empty file: {file_path}")
+                            logger.warning(f"Album item {idx} empty or missing")
                     except Exception as err:
-                        logger.error(f"Album download error on item {idx}: {err}")
+                        logger.error(f"Error downloading album item {idx}: {err}")
 
                 if len(input_media_list) >= 2:
                     sent_msgs = []
@@ -1033,7 +1047,9 @@ async def private_message_handler(client: Client, message: Message):
                             res = await bot.send_media_group(chat_id=message.chat.id, media=chunk)
                             sent_msgs.extend(res)
                         except Exception as e:
-                            logger.error(f"Send album chunk error: {e}")
+                            logger.warning(f"Bot failed sending album, trying Userbot: {e}")
+                            res = await working_client.send_media_group(chat_id=message.chat.id, media=chunk)
+                            sent_msgs.extend(res)
 
                     await status.delete()
 
@@ -1068,7 +1084,7 @@ async def private_message_handler(client: Client, message: Message):
                         pass
                 return
 
-            # --- 2. SINGLE MEDIA DELIVERY ---
+            # ================= 2. SINGLE MEDIA HANDLING =================
             if not (target_msg.media or target_msg.video or target_msg.photo or target_msg.document or target_msg.audio or target_msg.voice):
                 if target_msg.text:
                     await status.edit_text(f"📝 **Text Content:**\n\n{target_msg.text}")
@@ -1076,7 +1092,7 @@ async def private_message_handler(client: Client, message: Message):
                     await status.edit_text("⚠️ **No downloadable media found.**")
                 return
 
-            # Direct Server Copy (Instant Delivery)
+            # ডিরেক্ট সার্ভার কপি (0.3s)
             try:
                 copied_msg = await bot.copy_message(chat_id=message.chat.id, from_chat_id=chat_id, message_id=msg_id)
                 if copied_msg:
@@ -1088,8 +1104,24 @@ async def private_message_handler(client: Client, message: Message):
             except Exception:
                 pass
 
-            # Restricted Single Media: Download & Upload via Bot
-            download_path = await working_client.download_media(target_msg)
+            try:
+                copied_msg = await working_client.copy_message(chat_id=message.chat.id, from_chat_id=chat_id, message_id=msg_id)
+                if copied_msg:
+                    await status.delete()
+                    asyncio.create_task(sync_increment_downloads("telegram", 1, 0, 1 if target_msg.video else 0, 0))
+                    asyncio.create_task(sync_increment_user_downloads(user_id, "telegram", 1, 0, 1 if target_msg.video else 0, 0))
+                    asyncio.create_task(start_countdown_and_delete(message.chat.id, [copied_msg.id, message.id], total_seconds=AUTO_DELETE_TIME))
+                    return
+            except Exception:
+                pass
+
+            # রেস্ট্রিক্টেড চ্যানেলের জন্য ডাউনলোড ও আপলোড
+            ext = ".mp4" if target_msg.video else ".jpg" if target_msg.photo else ".mp3" if target_msg.audio else ""
+            if not ext and target_msg.document:
+                ext = os.path.splitext(target_msg.document.file_name or "")[1] or ".bin"
+
+            single_dest = os.path.join(DOWNLOAD_DIR, f"single_{user_id}_{int(time.time())}{ext}")
+            download_path = await working_client.download_media(target_msg, file_name=single_dest)
 
             if not download_path or not os.path.exists(download_path) or os.path.getsize(download_path) == 0:
                 await status.edit_text("❌ **Failed to download media.**")
@@ -1116,7 +1148,8 @@ async def private_message_handler(client: Client, message: Message):
                     asyncio.create_task(asyncio.to_thread(sync_increment_downloads, "telegram", 1, 0, 0, 0))
                     asyncio.create_task(asyncio.to_thread(sync_increment_user_downloads, user_id, "telegram", 1, 0, 0, 0))
             except Exception as up_err:
-                logger.error(f"Single upload failed: {up_err}")
+                logger.error(f"Single upload fallback triggered: {up_err}")
+                sent_msg = await working_client.send_document(chat_id=message.chat.id, document=download_path, caption=caption)
 
             await status.delete()
 
