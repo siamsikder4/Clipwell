@@ -38,7 +38,8 @@ OWNER_ID = 6142774415
 PORT = int(os.environ.get("PORT", "8080"))
 AUTO_DELETE_TIME = int(os.environ.get("AUTO_DELETE_TIME", "120"))  # Seconds
 
-DOWNLOAD_DIR = "/dev/shm" if os.path.exists("/dev/shm") and os.access("/dev/shm", os.W_OK) else "downloads"
+# Persistent local disk (No 64MB /dev/shm memory limit)
+DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # Firebase Setup
@@ -74,8 +75,45 @@ mem_broadcast_settings = {
     "message": "🔥 Join our channel for high-speed updates!",
     "interval_minutes": 2
 }
-# {chat_id: {"title": str, "last_msg_id": int, "is_active": bool}}
 mem_broadcast_chats = {}
+
+# ----------------- PROGRESS BAR TRACKER ----------------- #
+
+def human_bytes(size: int) -> str:
+    if not size:
+        return "0 B"
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if size < 1024.0:
+            return f"{size:.2f} {unit}"
+        size /= 1024.0
+    return f"{size:.2f} PB"
+
+class ProgressTracker:
+    def __init__(self, message: Message, action_text: str):
+        self.message = message
+        self.action_text = action_text
+        self.last_update_time = time.time()
+
+    async def progress(self, current: int, total: int):
+        now = time.time()
+        # Update progress every 4 seconds to avoid flood limits
+        if now - self.last_update_time < 4 and current != total:
+            return
+        self.last_update_time = now
+        
+        percent = (current / total) * 100 if total > 0 else 0
+        filled = int(percent / 10)
+        bar = "▓" * filled + "░" * (10 - filled)
+        
+        text = (
+            f"⚡ **{self.action_text}**\n\n"
+            f"[{bar}] `{percent:.1f}%`\n"
+            f"📥 `{human_bytes(current)}` / `{human_bytes(total)}`"
+        )
+        try:
+            await self.message.edit_text(text)
+        except Exception:
+            pass
 
 # ----------------- DATABASE & PERMISSION HELPERS ----------------- #
 
@@ -186,7 +224,6 @@ def sync_save_broadcast_settings(data: dict):
     except Exception:
         pass
 
-# Chat-specific auto-broadcast storage
 def sync_get_all_broadcast_chats():
     if not db:
         return dict(mem_broadcast_chats)
@@ -294,7 +331,7 @@ async def silent_auto_delete(chat_id: int, message_ids: list, delay: int = AUTO_
     except Exception:
         pass
 
-# ----------------- AUTO-BROADCAST WORKER (FILTER PER-CHAT) ----------------- #
+# ----------------- AUTO-BROADCAST WORKER ----------------- #
 
 async def auto_broadcast_worker():
     await asyncio.sleep(10)
@@ -308,7 +345,6 @@ async def auto_broadcast_worker():
             if is_enabled and msg_text:
                 target_chats = await asyncio.to_thread(sync_get_all_broadcast_chats)
                 for chat_id, c_data in target_chats.items():
-                    # চেক করা চ্যাটটির অটো-মেসেজ অপশন অন আছে কিনা
                     if not c_data.get("is_active", True):
                         continue
 
@@ -463,7 +499,6 @@ async def admin_callback_handler(_, query: CallbackQuery):
         await query.message.edit_text(text, reply_markup=get_role_based_markup(user_id, len(sessions), config.get("is_enabled", False)))
         await query.answer("Refreshed 🔄")
 
-    # Broadcast Settings & Per-Chat Management
     elif data == "btn_broadcast_panel":
         if not has_perm(user_id, "broadcast"):
             return await query.answer("Permission Denied", show_alert=True)
@@ -510,9 +545,9 @@ async def admin_callback_handler(_, query: CallbackQuery):
         buttons.append([InlineKeyboardButton("🔙 Back to Broadcast", callback_data="btn_broadcast_panel")])
         await query.message.edit_text(
             "📋 **Chat Auto-Broadcast Settings**\n\n"
-            "🟢 = Auto-message is active for this chat\n"
-            "🔴 = Auto-message is disabled for this chat\n\n"
-            "Click any chat to toggle or remove it:",
+            "🟢 = Auto-message active\n"
+            "🔴 = Auto-message disabled\n\n"
+            "Select any chat to toggle:",
             reply_markup=InlineKeyboardMarkup(buttons)
         )
         await query.answer()
@@ -530,7 +565,7 @@ async def admin_callback_handler(_, query: CallbackQuery):
         text = (
             f"📌 **Chat Details:** `{cinfo.get('title')}`\n"
             f"🆔 **Chat ID:** `{cid}`\n"
-            f"⚡ **Auto-Message Status:** `{'🟢 Active' if is_active else '🔴 Disabled'}`\n\n"
+            f"⚡ **Status:** `{'🟢 Active' if is_active else '🔴 Disabled'}`\n\n"
             "Select an action:"
         )
         markup = InlineKeyboardMarkup([
@@ -548,14 +583,13 @@ async def admin_callback_handler(_, query: CallbackQuery):
         new_state = await asyncio.to_thread(sync_toggle_chat_active, cid)
         await query.answer(f"Auto-message {'Enabled' if new_state else 'Disabled'} for this chat!")
 
-        # Refresh the current view
         chats = await asyncio.to_thread(sync_get_all_broadcast_chats)
         cinfo = chats.get(cid, {"title": "Chat", "is_active": new_state})
         tog_btn = "🔴 Disable Auto-Message" if new_state else "🟢 Enable Auto-Message"
         text = (
             f"📌 **Chat Details:** `{cinfo.get('title')}`\n"
             f"🆔 **Chat ID:** `{cid}`\n"
-            f"⚡ **Auto-Message Status:** `{'🟢 Active' if new_state else '🔴 Disabled'}`\n\n"
+            f"⚡ **Status:** `{'🟢 Active' if new_state else '🔴 Disabled'}`\n\n"
             "Select an action:"
         )
         markup = InlineKeyboardMarkup([
@@ -572,7 +606,6 @@ async def admin_callback_handler(_, query: CallbackQuery):
         await asyncio.to_thread(sync_remove_broadcast_chat, cid)
         await query.answer("Chat removed completely!", show_alert=True)
         
-        # Go back to chat list
         chats = await asyncio.to_thread(sync_get_all_broadcast_chats)
         buttons = []
         for c, cinfo in chats.items():
@@ -858,22 +891,25 @@ async def admin_reply_processor(_, message: Message):
                 ])
             )
 
-# ----------------- TELEGRAM MEDIA DOWNLOADER ----------------- #
+# ----------------- ROBUST TELEGRAM MEDIA DOWNLOADER ----------------- #
 
-sem = asyncio.Semaphore(3)
+sem = asyncio.Semaphore(2)
 
 async def download_album_item(client, media_msg, idx, user_id):
     async with sem:
-        try:
-            ext = ".mp4" if media_msg.video else ".jpg" if media_msg.photo else ".mp3" if media_msg.audio else ""
-            if not ext and media_msg.document:
-                ext = os.path.splitext(media_msg.document.file_name or "")[1] or ".bin"
-            dest = os.path.join(DOWNLOAD_DIR, f"alb_{user_id}_{int(time.time())}_{idx}{ext}")
-            path = await client.download_media(media_msg, file_name=dest)
-            if path and os.path.exists(path) and os.path.getsize(path) > 0:
-                return path, media_msg, idx
-        except Exception as e:
-            logger.error(f"Download Error: {e}")
+        ext = ".mp4" if media_msg.video else ".jpg" if media_msg.photo else ".mp3" if media_msg.audio else ""
+        if not ext and media_msg.document:
+            ext = os.path.splitext(media_msg.document.file_name or "")[1] or ".bin"
+        dest = os.path.join(DOWNLOAD_DIR, f"alb_{user_id}_{int(time.time())}_{idx}{ext}")
+        
+        for attempt in range(2):
+            try:
+                path = await client.download_media(media_msg, file_name=dest)
+                if path and os.path.exists(path) and os.path.getsize(path) > 0:
+                    return path, media_msg, idx
+            except Exception as e:
+                logger.warning(f"Album item {idx} attempt {attempt+1} failed: {e}")
+                await asyncio.sleep(2)
         return None, media_msg, idx
 
 @bot.on_message(filters.private & ~filters.command(["start", "help", "admin", "panel", "ping", "addchat"]))
@@ -910,12 +946,12 @@ async def telegram_media_fetcher(_, message: Message):
         await init_session_pool()
 
     if not loaded_user_clients:
-        return await message.reply_text("❌ No active sessions found.")
+        return await message.reply_text("❌ No active sessions found. Add via `/admin`.")
 
     target_msg, working_client = None, None
     for _, _, u_client in loaded_user_clients:
         try:
-            msg = await asyncio.wait_for(u_client.get_messages(chat_id, msg_id), timeout=8)
+            msg = await asyncio.wait_for(u_client.get_messages(chat_id, msg_id), timeout=12)
             if msg and not msg.empty:
                 target_msg, working_client = msg, u_client
                 break
@@ -925,7 +961,7 @@ async def telegram_media_fetcher(_, message: Message):
     if not target_msg or target_msg.empty:
         return await message.reply_text("❌ Post unavailable or channel not joined.")
 
-    # Fast Direct Forward
+    # Fast Direct Forward Bypass
     try:
         fwd = await working_client.forward_messages(message.chat.id, chat_id, msg_id)
         if fwd:
@@ -945,10 +981,11 @@ async def telegram_media_fetcher(_, message: Message):
         except Exception:
             pass
 
-    status = await message.reply_text("⚡ **Fetching media...**")
+    status = await message.reply_text("⚡ **Preparing download...**")
 
     # Album Handler
     if len(media_group) > 1:
+        await status.edit_text(f"📦 **Downloading album ({len(media_group)} files)... Please wait.**")
         tasks = [download_album_item(working_client, m, idx, message.from_user.id) for idx, m in enumerate(media_group)]
         results = await asyncio.gather(*tasks)
         files, input_media = [], []
@@ -965,6 +1002,7 @@ async def telegram_media_fetcher(_, message: Message):
                 input_media.append(InputMediaDocument(path, caption=cap))
 
         if len(input_media) >= 2:
+            await status.edit_text("⚡ **Uploading album to Telegram...**")
             sent_msgs = []
             for i in range(0, len(input_media), 10):
                 res = await bot.send_media_group(message.chat.id, input_media[i:i + 10])
@@ -972,7 +1010,7 @@ async def telegram_media_fetcher(_, message: Message):
             await status.delete()
             asyncio.create_task(silent_auto_delete(message.chat.id, [m.id for m in sent_msgs] + [message.id]))
         else:
-            await status.edit_text("❌ Album processing failed.")
+            await status.edit_text("❌ Album processing failed. Some files were unavailable.")
 
         for f in files:
             try:
@@ -992,21 +1030,66 @@ async def telegram_media_fetcher(_, message: Message):
         ext = os.path.splitext(target_msg.document.file_name or "")[1] or ".bin"
 
     single_dest = os.path.join(DOWNLOAD_DIR, f"{message.from_user.id}_{int(time.time())}{ext}")
-    file_path = await working_client.download_media(target_msg, file_name=single_dest)
+    
+    # Live Download Progress Tracker
+    dl_tracker = ProgressTracker(status, "Downloading media...")
+    file_path = None
 
-    if not file_path or not os.path.exists(file_path):
-        return await status.edit_text("❌ Download failed.")
+    for attempt in range(2):
+        try:
+            file_path = await working_client.download_media(
+                target_msg,
+                file_name=single_dest,
+                progress=dl_tracker.progress
+            )
+            if file_path and os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                break
+        except Exception as e:
+            logger.warning(f"Download attempt {attempt+1} failed: {e}")
+            if attempt == 0:
+                await status.edit_text("⚠️ Retrying download connection...")
+                await asyncio.sleep(2)
 
+    if not file_path or not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+        return await status.edit_text("❌ **Download failed after retry.** File might be restricted or network dropped.")
+
+    # Live Upload Progress Tracker
+    up_tracker = ProgressTracker(status, "Uploading media...")
     cap = target_msg.caption or ""
     sent = None
-    if target_msg.video:
-        sent = await bot.send_video(message.chat.id, file_path, caption=cap, supports_streaming=True)
-    elif target_msg.photo:
-        sent = await bot.send_photo(message.chat.id, file_path, caption=cap)
-    elif target_msg.audio:
-        sent = await bot.send_audio(message.chat.id, file_path, caption=cap)
-    else:
-        sent = await bot.send_document(message.chat.id, file_path, caption=cap)
+
+    try:
+        if target_msg.video:
+            sent = await bot.send_video(
+                message.chat.id,
+                file_path,
+                caption=cap,
+                supports_streaming=True,
+                progress=up_tracker.progress
+            )
+        elif target_msg.photo:
+            sent = await bot.send_photo(
+                message.chat.id,
+                file_path,
+                caption=cap,
+                progress=up_tracker.progress
+            )
+        elif target_msg.audio:
+            sent = await bot.send_audio(
+                message.chat.id,
+                file_path,
+                caption=cap,
+                progress=up_tracker.progress
+            )
+        else:
+            sent = await bot.send_document(
+                message.chat.id,
+                file_path,
+                caption=cap,
+                progress=up_tracker.progress
+            )
+    except Exception as e:
+        await status.edit_text(f"❌ **Upload failed:** `{e}`")
 
     await status.delete()
     if sent:
@@ -1055,7 +1138,7 @@ async def main():
     await init_session_pool()
     await web_server()
     asyncio.create_task(auto_broadcast_worker())
-    logger.info("Bot Online with Per-Chat Broadcast Toggle Controls!")
+    logger.info("Bot Online with Progress Tracking & Disk Fix!")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
