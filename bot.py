@@ -37,7 +37,6 @@ OWNER_ID = 6142774415
 PORT = int(os.environ.get("PORT", "8080"))
 AUTO_DELETE_TIME = int(os.environ.get("AUTO_DELETE_TIME", "120"))  # In seconds
 
-# High-speed RAM disk if available, fallback to regular disk
 DOWNLOAD_DIR = "/dev/shm" if os.path.exists("/dev/shm") and os.access("/dev/shm", os.W_OK) else "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
@@ -54,7 +53,6 @@ if FIREBASE_KEY_RAW:
     except Exception as e:
         logger.error(f"Firebase Init Error: {e}")
 
-# Hydrogram Bot Client
 bot = Client(
     "tg_vault_bot",
     api_id=API_ID,
@@ -210,6 +208,26 @@ async def admin_callback_handler(_, query: CallbackQuery):
             reply_markup=ForceReply(selective=True)
         )
         await query.answer()
+
+    elif data == "btn_retry_2fa":
+        admin_states[user_id] = "WAIT_2FA"
+        await query.message.reply_text(
+            "🔐 **Please re-enter your 2-Step Verification Password:**",
+            reply_markup=ForceReply(selective=True)
+        )
+        await query.answer()
+
+    elif data == "btn_cancel_login":
+        session_data = login_clients.pop(user_id, None)
+        admin_states.pop(user_id, None)
+        if session_data and session_data.get("client"):
+            try:
+                if session_data["client"].is_connected:
+                    await session_data["client"].disconnect()
+            except Exception:
+                pass
+        await query.message.edit_text("❌ **Login process cancelled.**")
+        await query.answer("Cancelled", show_alert=True)
 
     elif data == "btn_list_sessions":
         sessions = await asyncio.to_thread(sync_get_all_sessions)
@@ -369,15 +387,24 @@ async def admin_reply_processor(_, message: Message):
             asyncio.create_task(init_session_pool())
             await status_msg.edit_text(f"✅ **Login Successful!**\n\n👤 **Account:** `{acc_name}`")
         except Exception as e:
-            if temp_cl.is_connected:
-                await temp_cl.disconnect()
-            login_clients.pop(message.from_user.id, None)
-            admin_states.pop(message.from_user.id, None)
-            await status_msg.edit_text(f"❌ **Invalid 2FA Password:** `{e}`")
+            # Keep client alive & provide interactive options
+            admin_states[message.from_user.id] = "WAIT_2FA"
+            retry_markup = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🔄 Try Again", callback_data="btn_retry_2fa"),
+                    InlineKeyboardButton("❌ Cancel Login", callback_data="btn_cancel_login")
+                ]
+            ])
+            await status_msg.edit_text(
+                f"❌ **Wrong 2FA Password!**\n\n"
+                f"Error: `{e}`\n\n"
+                "Please choose an option below:",
+                reply_markup=retry_markup
+            )
 
 # ----------------- ULTRA-FAST TELEGRAM DOWNLOADER ----------------- #
 
-sem = asyncio.Semaphore(3)  # Maximum 3 concurrent downloads to maximize speed without FloodWait
+sem = asyncio.Semaphore(3)
 
 async def download_album_item(client, media_msg, idx, user_id):
     async with sem:
@@ -416,7 +443,7 @@ async def telegram_media_fetcher(_, message: Message):
         chat_id = pub_match.group(1)
         msg_id = int(pub_match.group(2))
 
-    # 1. Instant Server-Copy Bypass (Millisecond transfer for open posts)
+    # Instant Server-Copy Bypass
     try:
         copied = await bot.copy_message(chat_id=message.chat.id, from_chat_id=chat_id, message_id=msg_id)
         if copied:
@@ -435,10 +462,9 @@ async def telegram_media_fetcher(_, message: Message):
     target_msg = None
     working_client = None
 
-    # Find the userbot session with chat access
     for _, _, u_client in loaded_user_clients:
         try:
-            msg = await asyncio.wait_for(u_client.get_messages(chat_id, msg_id), timeout=4)
+            msg = await asyncio.wait_for(u_client.get_messages(chat_id, msg_id), timeout=8)
             if msg and not msg.empty:
                 target_msg = msg
                 working_client = u_client
@@ -450,7 +476,7 @@ async def telegram_media_fetcher(_, message: Message):
         await message.reply_text("❌ **Post unavailable or account lacks channel access.**")
         return
 
-    # 2. Direct Userbot Forward Bypass
+    # Direct Userbot Forward Bypass
     try:
         fwd = await working_client.forward_messages(message.chat.id, chat_id, msg_id)
         if fwd:
@@ -459,7 +485,6 @@ async def telegram_media_fetcher(_, message: Message):
     except Exception:
         pass
 
-    # Detect Album / Media Group
     media_group = [target_msg]
     if target_msg.media_group_id:
         try:
@@ -473,9 +498,8 @@ async def telegram_media_fetcher(_, message: Message):
 
     status = await message.reply_text("⚡ **Fetching media...**")
 
-    # ================= ALBUM PROCESSING =================
+    # Album Processing
     if len(media_group) > 1:
-        # High-Speed Parallel Concurrent Download
         tasks = [download_album_item(working_client, m, idx, message.from_user.id) for idx, m in enumerate(media_group)]
         results = await asyncio.gather(*tasks)
 
@@ -509,7 +533,7 @@ async def telegram_media_fetcher(_, message: Message):
                 pass
         return
 
-    # ================= SINGLE MEDIA PROCESSING =================
+    # Single Media Processing
     if not (target_msg.media or target_msg.video or target_msg.photo or target_msg.document or target_msg.audio or target_msg.voice):
         if target_msg.text:
             await status.edit_text(f"📝 **Text Content:**\n\n{target_msg.text}")
