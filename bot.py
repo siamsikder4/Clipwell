@@ -38,7 +38,7 @@ OWNER_ID = 6142774415
 PORT = int(os.environ.get("PORT", "8080"))
 AUTO_DELETE_TIME = int(os.environ.get("AUTO_DELETE_TIME", "120"))  # Seconds
 
-# Persistent local disk (No 64MB /dev/shm memory limit)
+# Local disk storage for handling large files safely
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
@@ -69,7 +69,7 @@ login_clients = {}
 loaded_user_clients = []
 loaded_admins = {}
 
-# Fallbacks & Broadcast State
+# Broadcast In-Memory State
 mem_broadcast_settings = {
     "is_enabled": True,
     "message": "🔥 Join our channel for high-speed updates!",
@@ -77,7 +77,7 @@ mem_broadcast_settings = {
 }
 mem_broadcast_chats = {}
 
-# ----------------- PROGRESS BAR TRACKER ----------------- #
+# ----------------- PROGRESS TRACKER ----------------- #
 
 def human_bytes(size: int) -> str:
     if not size:
@@ -96,15 +96,14 @@ class ProgressTracker:
 
     async def progress(self, current: int, total: int):
         now = time.time()
-        # Update progress every 4 seconds to avoid flood limits
         if now - self.last_update_time < 4 and current != total:
             return
         self.last_update_time = now
-        
+
         percent = (current / total) * 100 if total > 0 else 0
         filled = int(percent / 10)
         bar = "▓" * filled + "░" * (10 - filled)
-        
+
         text = (
             f"⚡ **{self.action_text}**\n\n"
             f"[{bar}] `{percent:.1f}%`\n"
@@ -115,7 +114,7 @@ class ProgressTracker:
         except Exception:
             pass
 
-# ----------------- DATABASE & PERMISSION HELPERS ----------------- #
+# ----------------- DATABASE & PERMISSIONS ----------------- #
 
 def sync_get_all_admins():
     admins = {}
@@ -506,7 +505,7 @@ async def admin_callback_handler(_, query: CallbackQuery):
         chats = await asyncio.to_thread(sync_get_all_broadcast_chats)
         status_text = "🟢 ACTIVE" if config.get("is_enabled") else "🔴 DISABLED"
         toggle_text = "🔴 Turn OFF (Global)" if config.get("is_enabled") else "🟢 Turn ON (Global)"
-        
+
         text = (
             "┏━━━━━━ 📢 **AUTO-BROADCAST CONFIG** ━━━━━━┓\n\n"
             f"  ⚡ **Global Status:** `{status_text}`\n"
@@ -558,10 +557,10 @@ async def admin_callback_handler(_, query: CallbackQuery):
         cid = int(data.split("_")[1])
         chats = await asyncio.to_thread(sync_get_all_broadcast_chats)
         cinfo = chats.get(cid, {"title": "Chat", "is_active": True})
-        
+
         is_active = cinfo.get("is_active", True)
         tog_btn = "🔴 Disable Auto-Message" if is_active else "🟢 Enable Auto-Message"
-        
+
         text = (
             f"📌 **Chat Details:** `{cinfo.get('title')}`\n"
             f"🆔 **Chat ID:** `{cid}`\n"
@@ -605,7 +604,7 @@ async def admin_callback_handler(_, query: CallbackQuery):
         cid = int(data.split("_")[1])
         await asyncio.to_thread(sync_remove_broadcast_chat, cid)
         await query.answer("Chat removed completely!", show_alert=True)
-        
+
         chats = await asyncio.to_thread(sync_get_all_broadcast_chats)
         buttons = []
         for c, cinfo in chats.items():
@@ -623,7 +622,7 @@ async def admin_callback_handler(_, query: CallbackQuery):
         config["is_enabled"] = new_state
         await asyncio.to_thread(sync_save_broadcast_settings, config)
         await query.answer(f"Global Broadcast {'Enabled' if new_state else 'Disabled'}")
-        
+
         chats = await asyncio.to_thread(sync_get_all_broadcast_chats)
         status_text = "🟢 ACTIVE" if new_state else "🔴 DISABLED"
         toggle_text = "🔴 Turn OFF (Global)" if new_state else "🟢 Turn ON (Global)"
@@ -661,7 +660,6 @@ async def admin_callback_handler(_, query: CallbackQuery):
         await query.message.reply_text("⏱️ Enter interval in minutes (e.g. 2, 5, 30):", reply_markup=ForceReply(selective=True))
         await query.answer()
 
-    # Session Management
     elif data == "btn_add_str":
         if not has_perm(user_id, "sessions"):
             return await query.answer("Permission Denied", show_alert=True)
@@ -705,7 +703,6 @@ async def admin_callback_handler(_, query: CallbackQuery):
         await query.answer("Session deleted", show_alert=True)
         await query.message.delete()
 
-    # Admin Management (Owner Only)
     elif data == "btn_manage_admins":
         if user_id != OWNER_ID:
             return await query.answer("Owner Only", show_alert=True)
@@ -891,7 +888,7 @@ async def admin_reply_processor(_, message: Message):
                 ])
             )
 
-# ----------------- ROBUST TELEGRAM MEDIA DOWNLOADER ----------------- #
+# ----------------- ROBUST TELEGRAM DOWNLOADER WITH METADATA FIX ----------------- #
 
 sem = asyncio.Semaphore(2)
 
@@ -901,16 +898,26 @@ async def download_album_item(client, media_msg, idx, user_id):
         if not ext and media_msg.document:
             ext = os.path.splitext(media_msg.document.file_name or "")[1] or ".bin"
         dest = os.path.join(DOWNLOAD_DIR, f"alb_{user_id}_{int(time.time())}_{idx}{ext}")
-        
+
+        path = None
         for attempt in range(2):
             try:
                 path = await client.download_media(media_msg, file_name=dest)
                 if path and os.path.exists(path) and os.path.getsize(path) > 0:
-                    return path, media_msg, idx
+                    break
             except Exception as e:
                 logger.warning(f"Album item {idx} attempt {attempt+1} failed: {e}")
                 await asyncio.sleep(2)
-        return None, media_msg, idx
+
+        thumb_path = None
+        if path and media_msg.video and media_msg.video.thumbs:
+            try:
+                thumb_dest = os.path.join(DOWNLOAD_DIR, f"alb_thumb_{user_id}_{int(time.time())}_{idx}.jpg")
+                thumb_path = await client.download_media(media_msg.video.thumbs[0].file_id, file_name=thumb_dest)
+            except Exception:
+                pass
+
+        return path, media_msg, idx, thumb_path
 
 @bot.on_message(filters.private & ~filters.command(["start", "help", "admin", "panel", "ping", "addchat"]))
 async def telegram_media_fetcher(_, message: Message):
@@ -983,21 +990,33 @@ async def telegram_media_fetcher(_, message: Message):
 
     status = await message.reply_text("⚡ **Preparing download...**")
 
-    # Album Handler
+    # ----------------- ALBUM PROCESSING ----------------- #
     if len(media_group) > 1:
         await status.edit_text(f"📦 **Downloading album ({len(media_group)} files)... Please wait.**")
         tasks = [download_album_item(working_client, m, idx, message.from_user.id) for idx, m in enumerate(media_group)]
         results = await asyncio.gather(*tasks)
-        files, input_media = [], []
-        for path, m, idx in sorted([r for r in results if r[0]], key=lambda x: x[2]):
-            files.append(path)
+
+        files_to_cleanup, thumbs_to_cleanup, input_media = [], [], []
+        for path, m, idx, thumb_path in sorted([r for r in results if r[0]], key=lambda x: x[2]):
+            files_to_cleanup.append(path)
+            if thumb_path:
+                thumbs_to_cleanup.append(thumb_path)
+
             cap = m.caption or (target_msg.caption if idx == 0 else "")
             if m.video:
-                input_media.append(InputMediaVideo(path, caption=cap, supports_streaming=True))
+                input_media.append(InputMediaVideo(
+                    path,
+                    thumb=thumb_path,
+                    duration=m.video.duration or 0,
+                    width=m.video.width or 0,
+                    height=m.video.height or 0,
+                    caption=cap,
+                    supports_streaming=True
+                ))
             elif m.photo:
                 input_media.append(InputMediaPhoto(path, caption=cap))
             elif m.audio:
-                input_media.append(InputMediaAudio(path, caption=cap))
+                input_media.append(InputMediaAudio(path, caption=cap, duration=m.audio.duration or 0))
             else:
                 input_media.append(InputMediaDocument(path, caption=cap))
 
@@ -1012,14 +1031,15 @@ async def telegram_media_fetcher(_, message: Message):
         else:
             await status.edit_text("❌ Album processing failed. Some files were unavailable.")
 
-        for f in files:
+        for f in files_to_cleanup + thumbs_to_cleanup:
             try:
-                os.remove(f)
+                if os.path.exists(f):
+                    os.remove(f)
             except Exception:
                 pass
         return
 
-    # Single Media Handler
+    # ----------------- SINGLE MEDIA PROCESSING ----------------- #
     if not (target_msg.media or target_msg.video or target_msg.photo or target_msg.document or target_msg.audio or target_msg.voice):
         if target_msg.text:
             return await status.edit_text(f"📝 **Text:**\n\n{target_msg.text}")
@@ -1030,8 +1050,6 @@ async def telegram_media_fetcher(_, message: Message):
         ext = os.path.splitext(target_msg.document.file_name or "")[1] or ".bin"
 
     single_dest = os.path.join(DOWNLOAD_DIR, f"{message.from_user.id}_{int(time.time())}{ext}")
-    
-    # Live Download Progress Tracker
     dl_tracker = ProgressTracker(status, "Downloading media...")
     file_path = None
 
@@ -1051,9 +1069,26 @@ async def telegram_media_fetcher(_, message: Message):
                 await asyncio.sleep(2)
 
     if not file_path or not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-        return await status.edit_text("❌ **Download failed after retry.** File might be restricted or network dropped.")
+        return await status.edit_text("❌ **Download failed after retry.** File might be restricted or connection timed out.")
 
-    # Live Upload Progress Tracker
+    # Extract Video Metadata & Download Original Thumbnail
+    thumb_path = None
+    duration = 0
+    width = 0
+    height = 0
+
+    if target_msg.video:
+        duration = target_msg.video.duration or 0
+        width = target_msg.video.width or 0
+        height = target_msg.video.height or 0
+        if target_msg.video.thumbs:
+            try:
+                thumb_dest = os.path.join(DOWNLOAD_DIR, f"thumb_{message.from_user.id}_{int(time.time())}.jpg")
+                thumb_path = await working_client.download_media(target_msg.video.thumbs[0].file_id, file_name=thumb_dest)
+            except Exception as err:
+                logger.warning(f"Thumbnail download failed: {err}")
+
+    # Live Upload Progress
     up_tracker = ProgressTracker(status, "Uploading media...")
     cap = target_msg.caption or ""
     sent = None
@@ -1064,6 +1099,10 @@ async def telegram_media_fetcher(_, message: Message):
                 message.chat.id,
                 file_path,
                 caption=cap,
+                duration=duration,
+                width=width,
+                height=height,
+                thumb=thumb_path,
                 supports_streaming=True,
                 progress=up_tracker.progress
             )
@@ -1079,6 +1118,7 @@ async def telegram_media_fetcher(_, message: Message):
                 message.chat.id,
                 file_path,
                 caption=cap,
+                duration=target_msg.audio.duration or 0,
                 progress=up_tracker.progress
             )
         else:
@@ -1095,10 +1135,13 @@ async def telegram_media_fetcher(_, message: Message):
     if sent:
         asyncio.create_task(silent_auto_delete(message.chat.id, [sent.id, message.id]))
 
-    try:
-        os.remove(file_path)
-    except Exception:
-        pass
+    # Cleanup Local Media & Thumbnail
+    for f in [file_path, thumb_path]:
+        if f and os.path.exists(f):
+            try:
+                os.remove(f)
+            except Exception:
+                pass
 
 # ----------------- BASE COMMANDS ----------------- #
 
@@ -1138,7 +1181,7 @@ async def main():
     await init_session_pool()
     await web_server()
     asyncio.create_task(auto_broadcast_worker())
-    logger.info("Bot Online with Progress Tracking & Disk Fix!")
+    logger.info("Bot Online with Full Thumbnail & Duration Metadata Fix!")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
