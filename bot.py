@@ -38,7 +38,6 @@ OWNER_ID = 6142774415
 PORT = int(os.environ.get("PORT", "8080"))
 AUTO_DELETE_TIME = int(os.environ.get("AUTO_DELETE_TIME", "120"))  # Seconds
 
-# High-speed RAM disk if available, fallback to regular disk
 DOWNLOAD_DIR = "/dev/shm" if os.path.exists("/dev/shm") and os.access("/dev/shm", os.W_OK) else "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
@@ -68,7 +67,7 @@ admin_states = {}
 login_clients = {}
 loaded_user_clients = []
 
-# Default broadcast settings with 2-minute interval
+# Default broadcast settings (2-minute interval)
 mem_broadcast_settings = {
     "is_enabled": True,
     "message": "🔥 Join our channel for high-speed updates!",
@@ -200,10 +199,10 @@ async def silent_auto_delete(chat_id: int, message_ids: list, delay: int = AUTO_
     except Exception:
         pass
 
-# ----------------- BACKGROUND AUTO-BROADCAST WORKER ----------------- #
+# ----------------- BACKGROUND AUTO-BROADCAST WITH OWNER LOGS ----------------- #
 
 async def auto_broadcast_worker():
-    await asyncio.sleep(10)  # Startup delay
+    await asyncio.sleep(10)
     while True:
         try:
             config = await asyncio.to_thread(sync_get_broadcast_settings)
@@ -213,21 +212,71 @@ async def auto_broadcast_worker():
 
             if is_enabled and msg_text:
                 target_chats = await asyncio.to_thread(sync_get_all_broadcast_chats)
-                for chat_id in target_chats:
+                
+                # Report to Owner if no channels are saved
+                if not target_chats:
                     try:
-                        await bot.send_message(chat_id, msg_text)
-                        await asyncio.sleep(0.5)  # Telegram API flood protection
-                    except FloodWait as f:
-                        await asyncio.sleep(f.value)
-                    except Exception as err:
-                        err_str = str(err)
-                        if any(x in err_str for x in ["CHAT_WRITE_FORBIDDEN", "USER_BANNED_IN_CHANNEL", "PEER_ID_INVALID"]):
-                            await asyncio.to_thread(sync_remove_broadcast_chat, chat_id)
-                        logger.warning(f"Broadcast failed to {chat_id}: {err}")
+                        await bot.send_message(
+                            OWNER_ID,
+                            "⚠️ **[Auto-Broadcast Alert]**\n\n"
+                            "কোনো চ্যানেল বা গ্রুপ লিস্টে যুক্ত নেই!\n"
+                            "👉 বটকে আপনার চ্যানেলে অ্যাডমিন করুন অথবা লিখুন:\n"
+                            "`/addchat -100xxxxxxxxxx`"
+                        )
+                    except Exception:
+                        pass
+                else:
+                    success_count = 0
+                    fail_count = 0
+
+                    for chat_id in target_chats:
+                        try:
+                            await bot.send_message(chat_id, msg_text)
+                            success_count += 1
+                            # Send success log to owner
+                            try:
+                                await bot.send_message(
+                                    OWNER_ID,
+                                    f"✅ **[Broadcast Sent]**\nChat ID: `{chat_id}`"
+                                )
+                            except Exception:
+                                pass
+                            await asyncio.sleep(0.5)
+                        except FloodWait as f:
+                            await asyncio.sleep(f.value)
+                        except Exception as err:
+                            fail_count += 1
+                            err_str = str(err)
+                            if any(x in err_str for x in ["CHAT_WRITE_FORBIDDEN", "USER_BANNED_IN_CHANNEL", "PEER_ID_INVALID"]):
+                                await asyncio.to_thread(sync_remove_broadcast_chat, chat_id)
+                            # Send failure log to owner
+                            try:
+                                await bot.send_message(
+                                    OWNER_ID,
+                                    f"❌ **[Broadcast Failed]**\nChat ID: `{chat_id}`\nError: `{err_str}`"
+                                )
+                            except Exception:
+                                pass
+
+                    # Summary log to owner
+                    try:
+                        await bot.send_message(
+                            OWNER_ID,
+                            f"📊 **[Broadcast Summary]**\n\n"
+                            f"• Success: `{success_count}`\n"
+                            f"• Failed: `{fail_count}`\n"
+                            f"• Next round in: `{interval_mins} mins`"
+                        )
+                    except Exception:
+                        pass
 
             await asyncio.sleep(interval_mins * 60)
         except Exception as e:
             logger.error(f"Broadcast Loop Error: {e}")
+            try:
+                await bot.send_message(OWNER_ID, f"⚠️ **Broadcast Error:** `{str(e)}`")
+            except Exception:
+                pass
             await asyncio.sleep(30)
 
 # ----------------- CHAT TRACKING EVENTS ----------------- #
@@ -243,10 +292,17 @@ async def bot_join_leave_detector(_, update: ChatMemberUpdated):
             chat_title = update.chat.title or "Telegram Chat"
             if status in ["administrator", "member"]:
                 await asyncio.to_thread(sync_add_broadcast_chat, update.chat.id, chat_title)
-                logger.info(f"Registered for Broadcast: {chat_title} ({update.chat.id})")
+                logger.info(f"Registered: {chat_title} ({update.chat.id})")
+                try:
+                    await bot.send_message(
+                        OWNER_ID,
+                        f"📢 **New Chat Added to Broadcast!**\n\nTitle: `{chat_title}`\nID: `{update.chat.id}`"
+                    )
+                except Exception:
+                    pass
             elif status in ["left", "banned"]:
                 await asyncio.to_thread(sync_remove_broadcast_chat, update.chat.id)
-                logger.info(f"Removed from Broadcast: {chat_title} ({update.chat.id})")
+                logger.info(f"Removed: {chat_title} ({update.chat.id})")
     except Exception as e:
         logger.error(f"Chat Member Update Error: {e}")
 
@@ -256,6 +312,20 @@ async def auto_track_channel_messages(_, message: Message):
         await asyncio.to_thread(sync_add_broadcast_chat, message.chat.id, message.chat.title or "Chat")
     except Exception:
         pass
+
+# Manual Command to Add Channel/Group
+@bot.on_message(filters.command("addchat") & filters.user(OWNER_ID) & filters.private)
+async def manual_add_chat(_, message: Message):
+    args = message.text.split()
+    if len(args) < 2:
+        await message.reply_text("❌ Usage: `/addchat -100xxxxxxxxxx`")
+        return
+    try:
+        target_id = int(args[1].strip())
+        await asyncio.to_thread(sync_add_broadcast_chat, target_id, "Manually Added")
+        await message.reply_text(f"✅ Chat `{target_id}` added to broadcast list successfully!")
+    except Exception as e:
+        await message.reply_text(f"❌ Error: `{e}`")
 
 # ----------------- ADMIN DASHBOARD & MENUS ----------------- #
 
@@ -483,7 +553,7 @@ async def admin_reply_processor(_, message: Message):
         config = await asyncio.to_thread(sync_get_broadcast_settings)
         config["message"] = text_input
         await asyncio.to_thread(sync_save_broadcast_settings, config)
-        await message.reply_text("✅ **Broadcast message updated successfully!**\n\nOpen `/admin` to verify.")
+        await message.reply_text("✅ **Broadcast message updated successfully!**")
 
     elif state == "WAIT_BROADCAST_INTERVAL":
         admin_states.pop(message.from_user.id, None)
@@ -634,7 +704,7 @@ async def download_album_item(client, media_msg, idx, user_id):
             logger.error(f"Download item {idx} error: {e}")
         return None, media_msg, idx
 
-@bot.on_message(filters.private & ~filters.command(["start", "help", "admin", "panel", "ping"]))
+@bot.on_message(filters.private & ~filters.command(["start", "help", "admin", "panel", "ping", "addchat"]))
 async def telegram_media_fetcher(_, message: Message):
     text_str = (message.text or message.caption or "").strip()
 
@@ -818,7 +888,8 @@ async def main():
         await bot.set_bot_commands([
             BotCommand("start", "Start the bot"),
             BotCommand("admin", "Admin control panel"),
-            BotCommand("ping", "Check server latency")
+            BotCommand("ping", "Check server latency"),
+            BotCommand("addchat", "Add channel/group for broadcast")
         ])
     except Exception:
         pass
