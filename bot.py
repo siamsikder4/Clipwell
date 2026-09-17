@@ -16,7 +16,8 @@ from hydrogram.types import (
     InputMediaPhoto,
     InputMediaVideo,
     InputMediaAudio,
-    InputMediaDocument
+    InputMediaDocument,
+    ChatMemberUpdated
 )
 from hydrogram.errors import SessionPasswordNeeded, FloodWait
 
@@ -35,8 +36,9 @@ FIREBASE_KEY_RAW = os.environ.get("FIREBASE_KEY", "").strip()
 
 OWNER_ID = 6142774415
 PORT = int(os.environ.get("PORT", "8080"))
-AUTO_DELETE_TIME = int(os.environ.get("AUTO_DELETE_TIME", "120"))  # In seconds
+AUTO_DELETE_TIME = int(os.environ.get("AUTO_DELETE_TIME", "120"))  # Seconds
 
+# High-speed RAM disk if available, fallback to regular disk
 DOWNLOAD_DIR = "/dev/shm" if os.path.exists("/dev/shm") and os.access("/dev/shm", os.W_OK) else "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
@@ -66,7 +68,15 @@ admin_states = {}
 login_clients = {}
 loaded_user_clients = []
 
-# ----------------- SESSION POOL & DB ----------------- #
+# Default broadcast settings with 2-minute interval
+mem_broadcast_settings = {
+    "is_enabled": True,
+    "message": "🔥 Join our channel for high-speed updates!",
+    "interval_minutes": 2
+}
+mem_broadcast_chats = set()
+
+# ----------------- DATABASE HELPERS ----------------- #
 
 def sync_get_all_sessions():
     if not db:
@@ -98,6 +108,57 @@ def sync_delete_session(doc_id: str):
         return True
     except Exception:
         return False
+
+def sync_get_broadcast_settings():
+    if not db:
+        return mem_broadcast_settings
+    try:
+        doc = db.collection("bot_settings").document("broadcast_config").get()
+        if doc.exists:
+            return doc.to_dict()
+        return mem_broadcast_settings
+    except Exception:
+        return mem_broadcast_settings
+
+def sync_save_broadcast_settings(data: dict):
+    global mem_broadcast_settings
+    mem_broadcast_settings.update(data)
+    if not db:
+        return
+    try:
+        db.collection("bot_settings").document("broadcast_config").set(data, merge=True)
+    except Exception as e:
+        logger.error(f"Save Broadcast Settings Error: {e}")
+
+def sync_add_broadcast_chat(chat_id: int, title: str):
+    mem_broadcast_chats.add(chat_id)
+    if not db:
+        return
+    try:
+        db.collection("broadcast_chats").document(str(chat_id)).set({
+            "chat_id": chat_id,
+            "title": title or "Chat",
+            "updated_at": time.time()
+        }, merge=True)
+    except Exception:
+        pass
+
+def sync_remove_broadcast_chat(chat_id: int):
+    mem_broadcast_chats.discard(chat_id)
+    if not db:
+        return
+    try:
+        db.collection("broadcast_chats").document(str(chat_id)).delete()
+    except Exception:
+        pass
+
+def sync_get_all_broadcast_chats():
+    if not db:
+        return list(mem_broadcast_chats)
+    try:
+        return [int(d.id) for d in db.collection("broadcast_chats").stream()]
+    except Exception:
+        return list(mem_broadcast_chats)
 
 async def init_session_pool():
     global loaded_user_clients
@@ -139,9 +200,67 @@ async def silent_auto_delete(chat_id: int, message_ids: list, delay: int = AUTO_
     except Exception:
         pass
 
-# ----------------- ADMIN DASHBOARD ----------------- #
+# ----------------- BACKGROUND AUTO-BROADCAST WORKER ----------------- #
 
-def get_admin_markup(session_count: int):
+async def auto_broadcast_worker():
+    await asyncio.sleep(10)  # Startup delay
+    while True:
+        try:
+            config = await asyncio.to_thread(sync_get_broadcast_settings)
+            is_enabled = config.get("is_enabled", False)
+            msg_text = config.get("message", "").strip()
+            interval_mins = max(1, config.get("interval_minutes", 2))
+
+            if is_enabled and msg_text:
+                target_chats = await asyncio.to_thread(sync_get_all_broadcast_chats)
+                for chat_id in target_chats:
+                    try:
+                        await bot.send_message(chat_id, msg_text)
+                        await asyncio.sleep(0.5)  # Telegram API flood protection
+                    except FloodWait as f:
+                        await asyncio.sleep(f.value)
+                    except Exception as err:
+                        err_str = str(err)
+                        if any(x in err_str for x in ["CHAT_WRITE_FORBIDDEN", "USER_BANNED_IN_CHANNEL", "PEER_ID_INVALID"]):
+                            await asyncio.to_thread(sync_remove_broadcast_chat, chat_id)
+                        logger.warning(f"Broadcast failed to {chat_id}: {err}")
+
+            await asyncio.sleep(interval_mins * 60)
+        except Exception as e:
+            logger.error(f"Broadcast Loop Error: {e}")
+            await asyncio.sleep(30)
+
+# ----------------- CHAT TRACKING EVENTS ----------------- #
+
+@bot.on_chat_member_updated()
+async def bot_join_leave_detector(_, update: ChatMemberUpdated):
+    if not update.new_chat_member:
+        return
+    try:
+        me = await bot.get_me()
+        if update.new_chat_member.user.id == me.id:
+            status = update.new_chat_member.status
+            chat_title = update.chat.title or "Telegram Chat"
+            if status in ["administrator", "member"]:
+                await asyncio.to_thread(sync_add_broadcast_chat, update.chat.id, chat_title)
+                logger.info(f"Registered for Broadcast: {chat_title} ({update.chat.id})")
+            elif status in ["left", "banned"]:
+                await asyncio.to_thread(sync_remove_broadcast_chat, update.chat.id)
+                logger.info(f"Removed from Broadcast: {chat_title} ({update.chat.id})")
+    except Exception as e:
+        logger.error(f"Chat Member Update Error: {e}")
+
+@bot.on_message((filters.group | filters.channel) & ~filters.service)
+async def auto_track_channel_messages(_, message: Message):
+    try:
+        await asyncio.to_thread(sync_add_broadcast_chat, message.chat.id, message.chat.title or "Chat")
+    except Exception:
+        pass
+
+# ----------------- ADMIN DASHBOARD & MENUS ----------------- #
+
+def get_admin_markup(session_count: int, is_broadcast_active: bool):
+    b_tag = "🟢 Active" if is_broadcast_active else "🔴 Disabled"
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("➕ Add Session String", callback_data="btn_add_str"),
@@ -152,22 +271,43 @@ def get_admin_markup(session_count: int):
             InlineKeyboardButton("🗑️ Delete Session", callback_data="btn_del_menu")
         ],
         [
+            InlineKeyboardButton(f"📢 Auto-Broadcast [{b_tag}]", callback_data="btn_broadcast_panel")
+        ],
+        [
             InlineKeyboardButton("🔄 Refresh Dashboard", callback_data="btn_refresh_panel")
+        ]
+    ])
+
+def get_broadcast_markup(is_enabled: bool):
+    toggle_text = "🔴 Turn OFF" if is_enabled else "🟢 Turn ON"
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(toggle_text, callback_data="btn_toggle_broadcast")
+        ],
+        [
+            InlineKeyboardButton("✏️ Edit Message", callback_data="btn_edit_broadcast_msg"),
+            InlineKeyboardButton("⏱️ Set Interval", callback_data="btn_set_broadcast_interval")
+        ],
+        [
+            InlineKeyboardButton("🔙 Back to Dashboard", callback_data="btn_refresh_panel")
         ]
     ])
 
 @bot.on_message(filters.command(["admin", "panel"]) & filters.user(OWNER_ID) & filters.private)
 async def admin_panel_handler(_, message: Message):
     sessions = await asyncio.to_thread(sync_get_all_sessions)
+    config = await asyncio.to_thread(sync_get_broadcast_settings)
+    
     text = (
         "┏━━━━━━ 🎛️ **ADMIN CONTROL PANEL** ━━━━━━┓\n\n"
         f"  📊 **Database Status:** `{'Online 🟢' if db else 'Offline 🔴'}`\n"
         f"  👥 **Active Userbots:** `{len(sessions)} Connected`\n"
-        f"  ⏱️ **Auto-Delete Timer:** `{AUTO_DELETE_TIME}s (Silent)`\n\n"
-        "  _Select an action below to manage sessions:_\n"
+        f"  ⏱️ **Auto-Delete Timer:** `{AUTO_DELETE_TIME}s (Silent)`\n"
+        f"  📢 **Auto-Broadcast:** `{'Enabled 🟢' if config.get('is_enabled') else 'Disabled 🔴'}`\n\n"
+        "  _Select an action below to manage features:_\n"
         "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
     )
-    await message.reply_text(text, reply_markup=get_admin_markup(len(sessions)))
+    await message.reply_text(text, reply_markup=get_admin_markup(len(sessions), config.get("is_enabled", False)))
 
 @bot.on_callback_query()
 async def admin_callback_handler(_, query: CallbackQuery):
@@ -180,22 +320,79 @@ async def admin_callback_handler(_, query: CallbackQuery):
 
     if data == "btn_refresh_panel":
         sessions = await asyncio.to_thread(sync_get_all_sessions)
+        config = await asyncio.to_thread(sync_get_broadcast_settings)
         text = (
             "┏━━━━━━ 🎛️ **ADMIN CONTROL PANEL** ━━━━━━┓\n\n"
             f"  📊 **Database Status:** `{'Online 🟢' if db else 'Offline 🔴'}`\n"
             f"  👥 **Active Userbots:** `{len(sessions)} Connected`\n"
-            f"  ⏱️ **Auto-Delete Timer:** `{AUTO_DELETE_TIME}s (Silent)`\n\n"
-            "  _Select an action below to manage sessions:_\n"
+            f"  ⏱️ **Auto-Delete Timer:** `{AUTO_DELETE_TIME}s (Silent)`\n"
+            f"  📢 **Auto-Broadcast:** `{'Enabled 🟢' if config.get('is_enabled') else 'Disabled 🔴'}`\n\n"
+            "  _Select an action below to manage features:_\n"
             "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
         )
-        await query.message.edit_text(text, reply_markup=get_admin_markup(len(sessions)))
+        await query.message.edit_text(text, reply_markup=get_admin_markup(len(sessions), config.get("is_enabled", False)))
         await query.answer("Dashboard Refreshed 🔄")
+
+    elif data == "btn_broadcast_panel":
+        config = await asyncio.to_thread(sync_get_broadcast_settings)
+        chats = await asyncio.to_thread(sync_get_all_broadcast_chats)
+        status_text = "🟢 ACTIVE" if config.get("is_enabled") else "🔴 DISABLED"
+        
+        text = (
+            "┏━━━━━━ 📢 **AUTO-BROADCAST CONFIG** ━━━━━━┓\n\n"
+            f"  ⚡ **Status:** `{status_text}`\n"
+            f"  ⏱️ **Interval:** Every `{config.get('interval_minutes', 2)} minutes`\n"
+            f"  🎯 **Connected Chats:** `{len(chats)} Groups & Channels`\n\n"
+            f"  📝 **Current Message:**\n"
+            f"  `{config.get('message', 'None')}`\n\n"
+            "  _Tap below to edit message or toggle status:_\n"
+            "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+        )
+        await query.message.edit_text(text, reply_markup=get_broadcast_markup(config.get("is_enabled", False)))
+        await query.answer()
+
+    elif data == "btn_toggle_broadcast":
+        config = await asyncio.to_thread(sync_get_broadcast_settings)
+        new_state = not config.get("is_enabled", False)
+        config["is_enabled"] = new_state
+        await asyncio.to_thread(sync_save_broadcast_settings, config)
+        
+        chats = await asyncio.to_thread(sync_get_all_broadcast_chats)
+        status_text = "🟢 ACTIVE" if new_state else "🔴 DISABLED"
+        text = (
+            "┏━━━━━━ 📢 **AUTO-BROADCAST CONFIG** ━━━━━━┓\n\n"
+            f"  ⚡ **Status:** `{status_text}`\n"
+            f"  ⏱️ **Interval:** Every `{config.get('interval_minutes', 2)} minutes`\n"
+            f"  🎯 **Connected Chats:** `{len(chats)} Groups & Channels`\n\n"
+            f"  📝 **Current Message:**\n"
+            f"  `{config.get('message', 'None')}`\n\n"
+            "  _Tap below to edit message or toggle status:_\n"
+            "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+        )
+        await query.message.edit_text(text, reply_markup=get_broadcast_markup(new_state))
+        await query.answer(f"Broadcast is now {'Active' if new_state else 'Disabled'}")
+
+    elif data == "btn_edit_broadcast_msg":
+        admin_states[user_id] = "WAIT_BROADCAST_MSG"
+        await query.message.reply_text(
+            "📝 **Send the new broadcast message text:**\n\n"
+            "_(Formatting and links are fully supported)_",
+            reply_markup=ForceReply(selective=True)
+        )
+        await query.answer()
+
+    elif data == "btn_set_broadcast_interval":
+        admin_states[user_id] = "WAIT_BROADCAST_INTERVAL"
+        await query.message.reply_text(
+            "⏱️ **Enter interval time in minutes** (e.g. `2`, `5`, `30`):",
+            reply_markup=ForceReply(selective=True)
+        )
+        await query.answer()
 
     elif data == "btn_add_str":
         admin_states[user_id] = "WAIT_STRING"
         await query.message.reply_text(
-            "📝 **Send your Hydrogram / Pyrogram Session String:**\n\n"
-            "_(Paste and send the string directly in chat)_",
+            "📝 **Send your Hydrogram / Pyrogram Session String:**",
             reply_markup=ForceReply(selective=True)
         )
         await query.answer()
@@ -203,8 +400,7 @@ async def admin_callback_handler(_, query: CallbackQuery):
     elif data == "btn_login_phone":
         admin_states[user_id] = "WAIT_PHONE"
         await query.message.reply_text(
-            "📱 **Send your phone number with country code:**\n\n"
-            "Example: `+8801XXXXXXXXX`",
+            "📱 **Send your phone number with country code** (e.g. `+8801XXXXXXXXX`):",
             reply_markup=ForceReply(selective=True)
         )
         await query.answer()
@@ -212,7 +408,7 @@ async def admin_callback_handler(_, query: CallbackQuery):
     elif data == "btn_retry_2fa":
         admin_states[user_id] = "WAIT_2FA"
         await query.message.reply_text(
-            "🔐 **Please re-enter your 2-Step Verification Password:**",
+            "🔐 **Please re-enter your 2FA password:**",
             reply_markup=ForceReply(selective=True)
         )
         await query.answer()
@@ -226,7 +422,7 @@ async def admin_callback_handler(_, query: CallbackQuery):
                     await session_data["client"].disconnect()
             except Exception:
                 pass
-        await query.message.edit_text("❌ **Login process cancelled.**")
+        await query.message.edit_text("❌ **Login cancelled.**")
         await query.answer("Cancelled", show_alert=True)
 
     elif data == "btn_list_sessions":
@@ -258,17 +454,19 @@ async def admin_callback_handler(_, query: CallbackQuery):
         doc_id = data.split("_", 1)[1]
         await asyncio.to_thread(sync_delete_session, doc_id)
         asyncio.create_task(init_session_pool())
-        await query.answer("Session deleted successfully!", show_alert=True)
+        await query.answer("Session removed!", show_alert=True)
         sessions = await asyncio.to_thread(sync_get_all_sessions)
+        config = await asyncio.to_thread(sync_get_broadcast_settings)
         text = (
             "┏━━━━━━ 🎛️ **ADMIN CONTROL PANEL** ━━━━━━┓\n\n"
             f"  📊 **Database Status:** `{'Online 🟢' if db else 'Offline 🔴'}`\n"
             f"  👥 **Active Userbots:** `{len(sessions)} Connected`\n"
-            f"  ⏱️ **Auto-Delete Timer:** `{AUTO_DELETE_TIME}s (Silent)`\n\n"
-            "  _Select an action below to manage sessions:_\n"
+            f"  ⏱️ **Auto-Delete Timer:** `{AUTO_DELETE_TIME}s (Silent)`\n"
+            f"  📢 **Auto-Broadcast:** `{'Enabled 🟢' if config.get('is_enabled') else 'Disabled 🔴'}`\n\n"
+            "  _Select an action below to manage features:_\n"
             "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
         )
-        await query.message.edit_text(text, reply_markup=get_admin_markup(len(sessions)))
+        await query.message.edit_text(text, reply_markup=get_admin_markup(len(sessions), config.get("is_enabled", False)))
 
 # ----------------- ADMIN INPUT PROMPT HANDLER ----------------- #
 
@@ -278,9 +476,27 @@ async def admin_reply_processor(_, message: Message):
     if not state:
         return
 
-    text_input = (message.text or "").strip()
+    text_input = (message.text or message.caption or "").strip()
 
-    if state == "WAIT_STRING":
+    if state == "WAIT_BROADCAST_MSG":
+        admin_states.pop(message.from_user.id, None)
+        config = await asyncio.to_thread(sync_get_broadcast_settings)
+        config["message"] = text_input
+        await asyncio.to_thread(sync_save_broadcast_settings, config)
+        await message.reply_text("✅ **Broadcast message updated successfully!**\n\nOpen `/admin` to verify.")
+
+    elif state == "WAIT_BROADCAST_INTERVAL":
+        admin_states.pop(message.from_user.id, None)
+        if not text_input.isdigit() or int(text_input) < 1:
+            await message.reply_text("❌ **Invalid interval!** Please provide a positive number.")
+            return
+        mins = int(text_input)
+        config = await asyncio.to_thread(sync_get_broadcast_settings)
+        config["interval_minutes"] = mins
+        await asyncio.to_thread(sync_save_broadcast_settings, config)
+        await message.reply_text(f"✅ **Broadcast interval set to {mins} minutes!**")
+
+    elif state == "WAIT_STRING":
         admin_states.pop(message.from_user.id, None)
         status_msg = await message.reply_text("🔄 **Verifying session string...**")
 
@@ -387,7 +603,6 @@ async def admin_reply_processor(_, message: Message):
             asyncio.create_task(init_session_pool())
             await status_msg.edit_text(f"✅ **Login Successful!**\n\n👤 **Account:** `{acc_name}`")
         except Exception as e:
-            # Keep client alive & provide interactive options
             admin_states[message.from_user.id] = "WAIT_2FA"
             retry_markup = InlineKeyboardMarkup([
                 [
@@ -396,9 +611,7 @@ async def admin_reply_processor(_, message: Message):
                 ]
             ])
             await status_msg.edit_text(
-                f"❌ **Wrong 2FA Password!**\n\n"
-                f"Error: `{e}`\n\n"
-                "Please choose an option below:",
+                f"❌ **Wrong 2FA Password!**\n\nError: `{e}`\n\nPlease choose an option below:",
                 reply_markup=retry_markup
             )
 
@@ -611,7 +824,8 @@ async def main():
         pass
     await init_session_pool()
     await web_server()
-    logger.info("Bot Online!")
+    asyncio.create_task(auto_broadcast_worker())
+    logger.info("Bot Online with Auto-Broadcast worker active!")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
