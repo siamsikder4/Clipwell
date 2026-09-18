@@ -114,6 +114,44 @@ class ProgressTracker:
         except Exception:
             pass
 
+class AlbumProgressTracker:
+    def __init__(self, message: Message, total_files: int, action_text: str = "Downloading album"):
+        self.message = message
+        self.total_files = total_files
+        self.action_text = action_text
+        self.last_update_time = time.time()
+        self.file_progress = {}
+        self.lock = asyncio.Lock()
+
+    async def progress(self, current: int, total: int, idx: int):
+        self.file_progress[idx] = (current, total)
+        now = time.time()
+        if now - self.last_update_time < 3 and current != total:
+            return
+
+        async with self.lock:
+            if time.time() - self.last_update_time < 3 and current != total:
+                return
+            self.last_update_time = time.time()
+
+            total_downloaded = sum(c for c, _ in self.file_progress.values())
+            total_size = sum(t for _, t in self.file_progress.values())
+            completed_files = sum(1 for c, t in self.file_progress.values() if t > 0 and c >= t)
+
+            percent = (total_downloaded / total_size * 100) if total_size > 0 else 0
+            filled = min(10, int(percent / 10))
+            bar = "▓" * filled + "░" * (10 - filled)
+
+            text = (
+                f"⚡ **{self.action_text} ({completed_files}/{self.total_files})**\n\n"
+                f"[{bar}] `{percent:.1f}%`\n"
+                f"📥 `{human_bytes(total_downloaded)}` / `{human_bytes(total_size)}`"
+            )
+            try:
+                await self.message.edit_text(text)
+            except Exception:
+                pass
+
 # ----------------- DATABASE & PERMISSIONS ----------------- #
 
 def sync_get_all_admins():
@@ -892,17 +930,25 @@ async def admin_reply_processor(_, message: Message):
 
 sem = asyncio.Semaphore(2)
 
-async def download_album_item(client, media_msg, idx, user_id):
+async def download_album_item(client, media_msg, idx, user_id, tracker: AlbumProgressTracker = None):
     async with sem:
         ext = ".mp4" if media_msg.video else ".jpg" if media_msg.photo else ".mp3" if media_msg.audio else ""
         if not ext and media_msg.document:
             ext = os.path.splitext(media_msg.document.file_name or "")[1] or ".bin"
         dest = os.path.join(DOWNLOAD_DIR, f"alb_{user_id}_{int(time.time())}_{idx}{ext}")
 
+        async def _item_progress(current, total):
+            if tracker:
+                await tracker.progress(current, total, idx)
+
         path = None
         for attempt in range(2):
             try:
-                path = await client.download_media(media_msg, file_name=dest)
+                path = await client.download_media(
+                    media_msg,
+                    file_name=dest,
+                    progress=_item_progress if tracker else None
+                )
                 if path and os.path.exists(path) and os.path.getsize(path) > 0:
                     break
             except Exception as e:
@@ -992,8 +1038,13 @@ async def telegram_media_fetcher(_, message: Message):
 
     # ----------------- ALBUM PROCESSING ----------------- #
     if len(media_group) > 1:
-        await status.edit_text(f"📦 **Downloading album ({len(media_group)} files)... Please wait.**")
-        tasks = [download_album_item(working_client, m, idx, message.from_user.id) for idx, m in enumerate(media_group)]
+        alb_tracker = AlbumProgressTracker(status, len(media_group), "Downloading album...")
+        for i, m in enumerate(media_group):
+            m_obj = m.video or m.document or m.audio or m.photo
+            sz = getattr(m_obj, "file_size", 0) or 0
+            alb_tracker.file_progress[i] = (0, sz)
+
+        tasks = [download_album_item(working_client, m, idx, message.from_user.id, alb_tracker) for idx, m in enumerate(media_group)]
         results = await asyncio.gather(*tasks)
 
         files_to_cleanup, thumbs_to_cleanup, input_media = [], [], []
