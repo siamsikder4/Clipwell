@@ -2,6 +2,7 @@ import os
 import re
 import time
 import json
+import shutil
 import asyncio
 import logging
 from aiohttp import web
@@ -78,7 +79,7 @@ mem_broadcast_settings = {
 }
 mem_broadcast_chats = {}
 
-# ----------------- PROGRESS TRACKER ----------------- #
+# ----------------- STORAGE & PROGRESS HELPERS ----------------- #
 
 def human_bytes(size: int) -> str:
     if not size:
@@ -88,6 +89,29 @@ def human_bytes(size: int) -> str:
             return f"{size:.2f} {unit}"
         size /= 1024.0
     return f"{size:.2f} PB"
+
+def get_storage_stats():
+    total, used, free = shutil.disk_usage(".")
+    percent = (used / total) * 100 if total > 0 else 0
+    
+    # Download folder size
+    dl_size = 0
+    dl_files = 0
+    if os.path.exists(DOWNLOAD_DIR):
+        for path, dirs, files in os.walk(DOWNLOAD_DIR):
+            for f in files:
+                fp = os.path.join(path, f)
+                dl_size += os.path.getsize(fp)
+                dl_files += 1
+
+    return {
+        "total": total,
+        "used": used,
+        "free": free,
+        "percent": percent,
+        "dl_size": dl_size,
+        "dl_files": dl_files
+    }
 
 class ProgressTracker:
     def __init__(self, message: Message, action_text: str):
@@ -406,7 +430,6 @@ async def auto_broadcast_worker():
                 target_chats = await asyncio.to_thread(sync_get_all_broadcast_chats)
 
                 for chat_id, c_data in list(target_chats.items()):
-                    # যদি লুপ চলাকালীন অ্যাডমিন অফ করে দেয়, সাথে সাথে থামবে
                     fresh_conf = await asyncio.to_thread(sync_get_broadcast_settings)
                     if not fresh_conf.get("is_enabled", False):
                         logger.info("Auto-broadcast was turned off. Halting transmission.")
@@ -415,7 +438,6 @@ async def auto_broadcast_worker():
                     if not c_data.get("is_active", True):
                         continue
 
-                    # আগের অটো-মেসেজ ডিলিট
                     old_msg_id = c_data.get("last_msg_id", 0)
                     if old_msg_id:
                         try:
@@ -423,7 +445,6 @@ async def auto_broadcast_worker():
                         except Exception:
                             pass
 
-                    # নতুন মেসেজ পাঠানো (ছবি অথবা টেক্সট)
                     sent = None
                     try:
                         if media_url:
@@ -444,7 +465,6 @@ async def auto_broadcast_worker():
                         if sent:
                             await asyncio.to_thread(sync_update_chat_last_msg, chat_id, sent.id)
 
-                        # ফ্লাডওয়েট প্রিভেনশন
                         await asyncio.sleep(1.5)
 
                     except FloodWait as f:
@@ -455,7 +475,6 @@ async def auto_broadcast_worker():
                         if any(x in err_str for x in ["CHAT_WRITE_FORBIDDEN", "USER_BANNED_IN_CHANNEL", "PEER_ID_INVALID", "CHAT_NOT_MODIFIED"]):
                             await asyncio.to_thread(sync_remove_broadcast_chat, chat_id)
 
-            # রেসপন্সিভ স্লিপ: প্রতি ৫ সেকেন্ড পর পর চেক করবে ইউজার বন্ধ করেছে কিনা
             total_sleep_sec = interval_mins * 60
             for _ in range(total_sleep_sec // 5):
                 await asyncio.sleep(5)
@@ -508,7 +527,7 @@ async def manual_add_chat(_, message: Message):
     except Exception as e:
         await message.reply_text(f"❌ Error: `{e}`")
 
-# ----------------- ADMIN DASHBOARDS ----------------- #
+# ----------------- ADMIN DASHBOARDS & ACTIONS ----------------- #
 
 def get_role_based_markup(user_id: int, session_count: int, is_broadcast_active: bool):
     buttons = []
@@ -527,6 +546,11 @@ def get_role_based_markup(user_id: int, session_count: int, is_broadcast_active:
         buttons.append([
             InlineKeyboardButton(f"📢 Auto-Broadcast [{b_tag}]", callback_data="btn_broadcast_panel")
         ])
+
+    buttons.append([
+        InlineKeyboardButton("💾 Disk Usage", callback_data="btn_storage_info"),
+        InlineKeyboardButton("🧹 Clean Storage", callback_data="btn_clean_storage")
+    ])
 
     if user_id == OWNER_ID:
         buttons.append([
@@ -594,6 +618,62 @@ async def admin_callback_handler(_, query: CallbackQuery):
         )
         await query.message.edit_text(text, reply_markup=get_role_based_markup(user_id, len(sessions), config.get("is_enabled", False)))
         await query.answer("Refreshed 🔄")
+
+    elif data == "btn_storage_info":
+        st = get_storage_stats()
+        filled = int(st["percent"] / 10)
+        bar = "▓" * filled + "░" * (10 - filled)
+        text = (
+            "┏━━━━━━ 💾 **DISK STORAGE INFO** ━━━━━━┓\n\n"
+            f"  📊 **Disk Full:** `[{bar}] {st['percent']:.1f}%`\n"
+            f"  📦 **Used Space:** `{human_bytes(st['used'])}`\n"
+            f"  🟢 **Free Space:** `{human_bytes(st['free'])}`\n"
+            f"  🗂️ **Total Disk:** `{human_bytes(st['total'])}`\n\n"
+            f"  📂 **Downloads Temp:** `{human_bytes(st['dl_size'])}` ({st['dl_files']} files)\n"
+            "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+        )
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🧹 Clean Temp Files", callback_data="btn_clean_storage")],
+            [InlineKeyboardButton("🔙 Back to Dashboard", callback_data="btn_refresh_panel")]
+        ])
+        await query.message.edit_text(text, reply_markup=markup)
+        await query.answer()
+
+    elif data == "btn_clean_storage":
+        deleted_files = 0
+        freed_bytes = 0
+        if os.path.exists(DOWNLOAD_DIR):
+            for filename in os.listdir(DOWNLOAD_DIR):
+                file_path = os.path.join(DOWNLOAD_DIR, filename)
+                try:
+                    if os.path.isfile(file_path) or os.path.islink(file_path):
+                        freed_bytes += os.path.getsize(file_path)
+                        os.unlink(file_path)
+                        deleted_files += 1
+                    elif os.path.isdir(file_path):
+                        shutil.rmtree(file_path)
+                        deleted_files += 1
+                except Exception as e:
+                    logger.error(f"Failed to delete {file_path}: {e}")
+        await query.answer(f"Cleaned {deleted_files} files! Freed {human_bytes(freed_bytes)}", show_alert=True)
+        # Refresh info
+        st = get_storage_stats()
+        filled = int(st["percent"] / 10)
+        bar = "▓" * filled + "░" * (10 - filled)
+        text = (
+            "┏━━━━━━ 💾 **DISK STORAGE INFO** ━━━━━━┓\n\n"
+            f"  📊 **Disk Full:** `[{bar}] {st['percent']:.1f}%`\n"
+            f"  📦 **Used Space:** `{human_bytes(st['used'])}`\n"
+            f"  🟢 **Free Space:** `{human_bytes(st['free'])}`\n"
+            f"  🗂️ **Total Disk:** `{human_bytes(st['total'])}`\n\n"
+            f"  📂 **Downloads Temp:** `{human_bytes(st['dl_size'])}` ({st['dl_files']} files)\n"
+            "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+        )
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🧹 Clean Temp Files", callback_data="btn_clean_storage")],
+            [InlineKeyboardButton("🔙 Back to Dashboard", callback_data="btn_refresh_panel")]
+        ])
+        await query.message.edit_text(text, reply_markup=markup)
 
     elif data == "btn_broadcast_panel":
         if not has_perm(user_id, "broadcast"):
@@ -1050,7 +1130,7 @@ async def download_album_item(client, media_msg, idx, user_id, tracker: AlbumPro
 
         return path, media_msg, idx, thumb_path
 
-@bot.on_message(filters.private & ~filters.command(["start", "help", "admin", "panel", "ping", "addchat"]))
+@bot.on_message(filters.private & ~filters.command(["start", "help", "admin", "panel", "ping", "addchat", "storage", "clean"]))
 async def telegram_media_fetcher(_, message: Message):
     text_str = (message.text or message.caption or "").strip()
     p_match = re.search(r"t\.me/c/(\d+)/(\d+)", text_str)
@@ -1291,14 +1371,215 @@ async def ping_handler(_, message: Message):
     msg = await message.reply_text("⚡ Ping...")
     await msg.edit_text(f"🚀 **Latency:** `{(time.time() - t0) * 1000:.1f}ms`")
 
-# ----------------- WEB SERVER & STARTUP ----------------- #
+@bot.on_message(filters.command("storage") & filters.private)
+async def storage_cmd_handler(_, message: Message):
+    if not is_any_admin(message.from_user.id):
+        return await message.reply_text("⛔ Access Denied.")
+    st = get_storage_stats()
+    filled = int(st["percent"] / 10)
+    bar = "▓" * filled + "░" * (10 - filled)
+    text = (
+        "┏━━━━━━ 💾 **DISK STORAGE INFO** ━━━━━━┓\n\n"
+        f"  📊 **Disk Full:** `[{bar}] {st['percent']:.1f}%`\n"
+        f"  📦 **Used Space:** `{human_bytes(st['used'])}`\n"
+        f"  🟢 **Free Space:** `{human_bytes(st['free'])}`\n"
+        f"  🗂️ **Total Disk:** `{human_bytes(st['total'])}`\n\n"
+        f"  📂 **Downloads Temp:** `{human_bytes(st['dl_size'])}` ({st['dl_files']} files)\n"
+        "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+    )
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🧹 Clean Temp Files", callback_data="btn_clean_storage")]
+    ])
+    await message.reply_text(text, reply_markup=markup)
+
+@bot.on_message(filters.command("clean") & filters.private)
+async def clean_cmd_handler(_, message: Message):
+    if not is_any_admin(message.from_user.id):
+        return await message.reply_text("⛔ Access Denied.")
+
+    msg = await message.reply_text("🧹 Cleaning temp files...")
+    deleted_files = 0
+    freed_bytes = 0
+
+    if os.path.exists(DOWNLOAD_DIR):
+        for filename in os.listdir(DOWNLOAD_DIR):
+            file_path = os.path.join(DOWNLOAD_DIR, filename)
+            try:
+                if os.path.isfile(file_path) or os.path.islink(file_path):
+                    freed_bytes += os.path.getsize(file_path)
+                    os.unlink(file_path)
+                    deleted_files += 1
+                elif os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
+                    deleted_files += 1
+            except Exception as e:
+                logger.error(f"Failed to delete {file_path}: {e}")
+
+    await msg.edit_text(
+        f"✅ **Storage Cleaned Successfully!**\n\n"
+        f"🗑️ Files Removed: `{deleted_files}`\n"
+        f"💾 Space Freed: `{human_bytes(freed_bytes)}`"
+    )
+
+# ----------------- WEB DASHBOARD (LIVE UI) ----------------- #
+
+HTML_DASHBOARD = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Clipwell Bot Server Status</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+        body { background: #0f172a; color: #f8fafc; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }
+        .card { background: #1e293b; border: 1px solid #334155; border-radius: 16px; padding: 24px; width: 100%; max-width: 440px; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5); }
+        .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+        .title { font-size: 20px; font-weight: 700; color: #38bdf8; display: flex; align-items: center; gap: 8px; }
+        .status-badge { background: #064e3b; color: #34d399; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 6px; }
+        .status-dot { width: 8px; height: 8px; background: #10b981; border-radius: 50%; animation: pulse 2s infinite; }
+        .storage-box { background: #0f172a; border-radius: 12px; padding: 16px; margin-bottom: 20px; border: 1px solid #1e293b; }
+        .storage-title { font-size: 13px; color: #94a3b8; margin-bottom: 8px; display: flex; justify-content: space-between; }
+        .storage-val { font-size: 26px; font-weight: 800; color: #f8fafc; margin-bottom: 12px; }
+        .progress-bar-bg { width: 100%; height: 12px; background: #334155; border-radius: 6px; overflow: hidden; }
+        .progress-bar-fill { height: 100%; border-radius: 6px; transition: width 0.5s ease; }
+        .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
+        .stat-item { background: #1e293b; border: 1px solid #334155; padding: 12px; border-radius: 10px; }
+        .stat-label { font-size: 11px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
+        .stat-num { font-size: 15px; font-weight: 600; color: #f1f5f9; margin-top: 4px; }
+        .btn-clean { display: block; width: 100%; margin-top: 16px; padding: 12px; background: #ef4444; color: white; border: none; border-radius: 10px; font-weight: 600; cursor: pointer; text-align: center; text-decoration: none; transition: 0.2s; }
+        .btn-clean:hover { background: #dc2626; }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="header">
+            <div class="title">⚡ Clipwell Bot</div>
+            <div class="status-badge"><div class="status-dot"></div> ONLINE</div>
+        </div>
+
+        <div class="storage-box">
+            <div class="storage-title">
+                <span>DISK USAGE</span>
+                <span id="pct-text">--%</span>
+            </div>
+            <div class="storage-val" id="pct-big">0% Full</div>
+            <div class="progress-bar-bg">
+                <div id="prog-fill" class="progress-bar-fill" style="width: 0%; background: #10b981;"></div>
+            </div>
+
+            <div class="stat-grid">
+                <div class="stat-item">
+                    <div class="stat-label">Used Space</div>
+                    <div class="stat-num" id="stat-used">--</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Free Space</div>
+                    <div class="stat-num" id="stat-free">--</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Total Disk</div>
+                    <div class="stat-num" id="stat-total">--</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Temp Files</div>
+                    <div class="stat-num" id="stat-temp">--</div>
+                </div>
+            </div>
+        </div>
+
+        <button class="btn-clean" onclick="cleanStorage()">🧹 Clean Download Cache</button>
+    </div>
+
+    <script>
+        async function fetchStats() {
+            try {
+                const res = await fetch('/api/stats');
+                const d = await res.json();
+                document.getElementById('pct-text').innerText = d.percent.toFixed(1) + '%';
+                document.getElementById('pct-big').innerText = d.percent.toFixed(1) + '% Full';
+                
+                const fill = document.getElementById('prog-fill');
+                fill.style.width = Math.min(100, d.percent) + '%';
+                if(d.percent > 85) fill.style.background = '#ef4444';
+                else if(d.percent > 65) fill.style.background = '#f59e0b';
+                else fill.style.background = '#10b981';
+
+                document.getElementById('stat-used').innerText = d.used;
+                document.getElementById('stat-free').innerText = d.free;
+                document.getElementById('stat-total').innerText = d.total;
+                document.getElementById('stat-temp').innerText = d.dl_size + ' (' + d.dl_files + ')';
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        async function cleanStorage() {
+            if(!confirm("Are you sure you want to delete all cached download files?")) return;
+            try {
+                const res = await fetch('/api/clean', { method: 'POST' });
+                const d = await res.json();
+                alert(d.message);
+                fetchStats();
+            } catch(e) {
+                alert("Failed to clean storage.");
+            }
+        }
+
+        fetchStats();
+        setInterval(fetchStats, 5000);
+    </script>
+</body>
+</html>
+"""
+
+async def handle_root(_):
+    return web.Response(text=HTML_DASHBOARD, content_type="text/html")
+
+async def handle_stats(_):
+    st = get_storage_stats()
+    return web.json_response({
+        "percent": st["percent"],
+        "used": human_bytes(st["used"]),
+        "free": human_bytes(st["free"]),
+        "total": human_bytes(st["total"]),
+        "dl_size": human_bytes(st["dl_size"]),
+        "dl_files": st["dl_files"]
+    })
+
+async def handle_web_clean(_):
+    deleted = 0
+    freed = 0
+    if os.path.exists(DOWNLOAD_DIR):
+        for filename in os.listdir(DOWNLOAD_DIR):
+            file_path = os.path.join(DOWNLOAD_DIR, filename)
+            try:
+                if os.path.isfile(file_path) or os.path.islink(file_path):
+                    freed += os.path.getsize(file_path)
+                    os.unlink(file_path)
+                    deleted += 1
+                elif os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
+                    deleted += 1
+            except Exception:
+                pass
+    return web.json_response({
+        "status": "ok",
+        "message": f"Cleaned {deleted} files! Freed {human_bytes(freed)}"
+    })
 
 async def web_server():
     app = web.Application()
-    app.router.add_get("/", lambda _: web.Response(text="Bot is running!"))
+    app.router.add_get("/", handle_root)
+    app.router.add_get("/api/stats", handle_stats)
+    app.router.add_post("/api/clean", handle_web_clean)
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
+    logger.info(f"Storage Monitor Web UI Running on Port {PORT}")
+
+# ----------------- STARTUP ----------------- #
 
 async def main():
     await bot.start()
@@ -1306,6 +1587,8 @@ async def main():
         await bot.set_bot_commands([
             BotCommand("start", "Start the bot"),
             BotCommand("admin", "Admin Control Panel"),
+            BotCommand("storage", "Check Disk Usage %"),
+            BotCommand("clean", "Clean Temp Download Files"),
             BotCommand("ping", "Check latency"),
             BotCommand("addchat", "Add channel for broadcast")
         ])
