@@ -65,7 +65,7 @@ bot = Client(
     workers=16
 )
 
-admin_states = {}
+user_states = {}
 login_clients = {}
 loaded_user_clients = []
 loaded_admins = {}
@@ -76,7 +76,7 @@ active_tasks = {}
 # Broadcast In-Memory State
 mem_broadcast_settings = {
     "is_enabled": False,
-    "message": "🔥 Join our channel for high-speed updates!\n[Join Channel|https://t.me/telegram]",
+    "message": "🔥 Join our channel for updates!\n[Join Channel|https://t.me/telegram]",
     "media_url": "",
     "interval_minutes": 2
 }
@@ -138,7 +138,6 @@ class ProgressTracker:
         now = time.time()
         percent = (current / total) * 100 if total > 0 else 0
 
-        # Update Web UI Task State
         if self.task_id and self.task_id in active_tasks:
             time_diff = max(0.1, now - self.last_update_time)
             bytes_diff = current - active_tasks[self.task_id]["current"]
@@ -302,13 +301,14 @@ def sync_get_all_sessions():
     except Exception:
         return []
 
-def sync_add_session(session_str: str, name: str):
+def sync_add_session(session_str: str, name: str, user_id: int = None):
     if not db:
         return False, "Database disconnected"
     try:
         db.collection("telegram_sessions").add({
             "session_string": session_str,
             "account_name": name,
+            "added_by": user_id,
             "created_at": time.time()
         })
         return True, "Success"
@@ -455,7 +455,7 @@ async def silent_auto_delete(chat_id: int, message_ids: list, delay: int = AUTO_
     except Exception:
         pass
 
-# ----------------- POWERFUL BROADCAST ENGINE ----------------- #
+# ----------------- BROADCAST ENGINE ----------------- #
 
 def parse_broadcast_content(raw_text: str):
     buttons = []
@@ -491,7 +491,6 @@ async def auto_broadcast_worker():
                 for chat_id, c_data in list(target_chats.items()):
                     fresh_conf = await asyncio.to_thread(sync_get_broadcast_settings)
                     if not fresh_conf.get("is_enabled", False):
-                        logger.info("Auto-broadcast was turned off. Halting transmission.")
                         break
 
                     if not c_data.get("is_active", True):
@@ -530,7 +529,6 @@ async def auto_broadcast_worker():
                         await asyncio.sleep(f.value + 1)
                     except Exception as err:
                         err_str = str(err)
-                        logger.warning(f"Broadcast failed for {chat_id}: {err_str}")
                         if any(x in err_str for x in ["CHAT_WRITE_FORBIDDEN", "USER_BANNED_IN_CHANNEL", "PEER_ID_INVALID", "CHAT_NOT_MODIFIED"]):
                             await asyncio.to_thread(sync_remove_broadcast_chat, chat_id)
 
@@ -558,10 +556,8 @@ async def bot_join_leave_detector(_, update: ChatMemberUpdated):
             chat_title = update.chat.title or "Telegram Chat"
             if status in ["administrator", "member"]:
                 await asyncio.to_thread(sync_add_broadcast_chat, update.chat.id, chat_title)
-                logger.info(f"Registered Chat: {chat_title} ({update.chat.id})")
             elif status in ["left", "banned"]:
                 await asyncio.to_thread(sync_remove_broadcast_chat, update.chat.id)
-                logger.info(f"Removed Chat: {chat_title} ({update.chat.id})")
     except Exception as e:
         logger.error(f"Chat Update Error: {e}")
 
@@ -586,26 +582,40 @@ async def manual_add_chat(_, message: Message):
     except Exception as e:
         await message.reply_text(f"❌ Error: `{e}`")
 
-# ----------------- ADMIN DASHBOARDS & ACTIONS ----------------- #
+# ----------------- PUBLIC SELF-LOGIN HANDLER (/login) ----------------- #
+
+@bot.on_message(filters.command("login") & filters.private)
+async def public_login_cmd(_, message: Message):
+    user_id = message.from_user.id
+    user_states[user_id] = "WAIT_PHONE"
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="btn_cancel_login")]])
+    await message.reply_text(
+        "📱 **Connect Your Telegram Account**\n\n"
+        "Send your phone number with country code (e.g. `+8801700000000`):\n\n"
+        "_Your account helps the bot download restricted content._",
+        reply_markup=markup
+    )
+
+# ----------------- STREAMLINED ADMIN DASHBOARD ----------------- #
 
 def get_role_based_markup(user_id: int, session_count: int, is_broadcast_active: bool):
     buttons = []
+    
+    # Simplified Session Management
     if has_perm(user_id, "sessions"):
         buttons.append([
-            InlineKeyboardButton("➕ Add Session String", callback_data="btn_add_str"),
-            InlineKeyboardButton("📱 Phone Login (OTP)", callback_data="btn_login_phone")
-        ])
-        buttons.append([
-            InlineKeyboardButton(f"📁 Active Sessions ({session_count})", callback_data="btn_list_sessions"),
-            InlineKeyboardButton("🗑️ Delete Session", callback_data="btn_del_menu")
+            InlineKeyboardButton(f"📁 Sessions ({session_count})", callback_data="btn_list_sessions"),
+            InlineKeyboardButton("🗑️ Remove Session", callback_data="btn_del_menu")
         ])
 
+    # Broadcast
     if has_perm(user_id, "broadcast"):
         b_tag = "🟢 Active" if is_broadcast_active else "🔴 Disabled"
         buttons.append([
-            InlineKeyboardButton(f"📢 Auto-Broadcast [{b_tag}]", callback_data="btn_broadcast_panel")
+            InlineKeyboardButton(f"📢 Broadcast [{b_tag}]", callback_data="btn_broadcast_panel")
         ])
 
+    # System Utilities
     buttons.append([
         InlineKeyboardButton("💾 Disk Usage", callback_data="btn_storage_info"),
         InlineKeyboardButton("🧹 Clean Storage", callback_data="btn_clean_storage")
@@ -613,7 +623,7 @@ def get_role_based_markup(user_id: int, session_count: int, is_broadcast_active:
 
     if user_id == OWNER_ID:
         buttons.append([
-            InlineKeyboardButton("👥 Manage Admins & Permissions", callback_data="btn_manage_admins")
+            InlineKeyboardButton("👥 Manage Admins", callback_data="btn_manage_admins")
         ])
 
     buttons.append([InlineKeyboardButton("🔄 Refresh Dashboard", callback_data="btn_refresh_panel")])
@@ -621,16 +631,16 @@ def get_role_based_markup(user_id: int, session_count: int, is_broadcast_active:
 
 def get_admin_perm_markup(target_id: int):
     perms = loaded_admins.get(target_id, {})
-    s_tag = "🟢 Enabled" if perms.get("sessions") else "🔴 Disabled"
-    b_tag = "🟢 Enabled" if perms.get("broadcast") else "🔴 Disabled"
-    c_tag = "🟢 Enabled" if perms.get("chats") else "🔴 Disabled"
+    s_tag = "🟢" if perms.get("sessions") else "🔴"
+    b_tag = "🟢" if perms.get("broadcast") else "🔴"
+    c_tag = "🟢" if perms.get("chats") else "🔴"
 
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"Sessions: {s_tag}", callback_data=f"togperm_{target_id}_sessions")],
+        [InlineKeyboardButton(f"Manage Sessions: {s_tag}", callback_data=f"togperm_{target_id}_sessions")],
         [InlineKeyboardButton(f"Broadcast: {b_tag}", callback_data=f"togperm_{target_id}_broadcast")],
         [InlineKeyboardButton(f"Add Chats (/addchat): {c_tag}", callback_data=f"togperm_{target_id}_chats")],
         [InlineKeyboardButton("🗑️ Remove Admin", callback_data=f"deladmin_{target_id}")],
-        [InlineKeyboardButton("🔙 Back to Admin List", callback_data="btn_manage_admins")]
+        [InlineKeyboardButton("🔙 Back", callback_data="btn_manage_admins")]
     ])
 
 @bot.on_message(filters.command(["admin", "panel"]) & filters.private)
@@ -643,24 +653,38 @@ async def admin_panel_handler(_, message: Message):
     config = await asyncio.to_thread(sync_get_broadcast_settings)
 
     text = (
-        "┏━━━━━━ 🎛️ **ADMIN CONTROL PANEL** ━━━━━━┓\n\n"
+        "┏━━━━━━ 🎛️️ **ADMIN CONTROL PANEL** ━━━━━━┓\n\n"
         f"  👤 **Role:** `{'👑 Owner' if user_id == OWNER_ID else '🛡️ Sub-Admin'}`\n"
         f"  📊 **Database:** `{'Online 🟢' if db else 'Offline 🔴'}`\n"
         f"  👥 **Active Userbots:** `{len(sessions)}`\n"
         f"  ⏱️ **Auto-Delete Timer:** `{AUTO_DELETE_TIME}s`\n"
         f"  📢 **Auto-Broadcast:** `{'Enabled 🟢' if config.get('is_enabled') else 'Disabled 🔴'}`\n\n"
-        "  _Select an action below:_\n"
         "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
     )
     await message.reply_text(text, reply_markup=get_role_based_markup(user_id, len(sessions), config.get("is_enabled", False)))
 
 @bot.on_callback_query()
-async def admin_callback_handler(_, query: CallbackQuery):
+async def callback_handler(_, query: CallbackQuery):
     user_id = query.from_user.id
+    data = query.data
+
+    # User self-service login actions
+    if data == "btn_cancel_login":
+        session_data = login_clients.pop(user_id, None)
+        user_states.pop(user_id, None)
+        if session_data and session_data.get("cl") and session_data["cl"].is_connected:
+            await session_data["cl"].disconnect()
+        await query.message.edit_text("❌ Login cancelled.")
+        return await query.answer("Cancelled")
+
+    if data == "btn_retry_2fa":
+        user_states[user_id] = "WAIT_2FA"
+        await query.message.reply_text("🔐 Re-enter 2FA password:", reply_markup=ForceReply(selective=True))
+        return await query.answer()
+
+    # Admin verification for all remaining buttons
     if not is_any_admin(user_id):
         return await query.answer("⛔ Access Denied", show_alert=True)
-
-    data = query.data
 
     if data == "btn_refresh_panel":
         sessions = await asyncio.to_thread(sync_get_all_sessions)
@@ -672,7 +696,6 @@ async def admin_callback_handler(_, query: CallbackQuery):
             f"  👥 **Active Userbots:** `{len(sessions)}`\n"
             f"  ⏱️ **Auto-Delete Timer:** `{AUTO_DELETE_TIME}s`\n"
             f"  📢 **Auto-Broadcast:** `{'Enabled 🟢' if config.get('is_enabled') else 'Disabled 🔴'}`\n\n"
-            "  _Select an action below:_\n"
             "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
         )
         await query.message.edit_text(text, reply_markup=get_role_based_markup(user_id, len(sessions), config.get("is_enabled", False)))
@@ -693,7 +716,7 @@ async def admin_callback_handler(_, query: CallbackQuery):
         )
         markup = InlineKeyboardMarkup([
             [InlineKeyboardButton("🧹 Clean Temp Files", callback_data="btn_clean_storage")],
-            [InlineKeyboardButton("🔙 Back to Dashboard", callback_data="btn_refresh_panel")]
+            [InlineKeyboardButton("🔙 Back", callback_data="btn_refresh_panel")]
         ])
         await query.message.edit_text(text, reply_markup=markup)
         await query.answer()
@@ -714,7 +737,7 @@ async def admin_callback_handler(_, query: CallbackQuery):
                         deleted_files += 1
                 except Exception as e:
                     logger.error(f"Failed to delete {file_path}: {e}")
-        await query.answer(f"Cleaned {deleted_files} files! Freed {human_bytes(freed_bytes)}", show_alert=True)
+        await query.answer(f"Freed {human_bytes(freed_bytes)}", show_alert=True)
         st = get_storage_stats()
         filled = int(st["percent"] / 10)
         bar = "▓" * filled + "░" * (10 - filled)
@@ -729,7 +752,7 @@ async def admin_callback_handler(_, query: CallbackQuery):
         )
         markup = InlineKeyboardMarkup([
             [InlineKeyboardButton("🧹 Clean Temp Files", callback_data="btn_clean_storage")],
-            [InlineKeyboardButton("🔙 Back to Dashboard", callback_data="btn_refresh_panel")]
+            [InlineKeyboardButton("🔙 Back", callback_data="btn_refresh_panel")]
         ])
         await query.message.edit_text(text, reply_markup=markup)
 
@@ -739,27 +762,26 @@ async def admin_callback_handler(_, query: CallbackQuery):
         config = await asyncio.to_thread(sync_get_broadcast_settings)
         chats = await asyncio.to_thread(sync_get_all_broadcast_chats)
         status_text = "🟢 ACTIVE" if config.get("is_enabled") else "🔴 DISABLED"
-        toggle_text = "🔴 Turn OFF (Global)" if config.get("is_enabled") else "🟢 Turn ON (Global)"
+        toggle_text = "🔴 Turn OFF" if config.get("is_enabled") else "🟢 Turn ON"
 
         text = (
-            "┏━━━━━━ 📢 **AUTO-BROADCAST CONFIG** ━━━━━━┓\n\n"
-            f"  ⚡ **Global Status:** `{status_text}`\n"
-            f"  ⏱️ **Interval:** Every `{config.get('interval_minutes', 2)} minutes`\n"
-            f"  🎯 **Total Registered Chats:** `{len(chats)}`\n"
-            f"  🖼️ **Media URL:** `{config.get('media_url') or 'None'}`\n\n"
-            f"  📝 **Message Template:**\n  `{config.get('message', 'None')}`\n\n"
-            "  _Select an action below:_\n"
+            "┏━━━━━━ 📢 **BROADCAST CONFIG** ━━━━━━┓\n\n"
+            f"  ⚡ **Status:** `{status_text}`\n"
+            f"  ⏱️ **Interval:** Every `{config.get('interval_minutes', 2)} mins`\n"
+            f"  🎯 **Chats:** `{len(chats)}`\n"
+            f"  🖼️ **Media:** `{config.get('media_url') or 'None'}`\n\n"
+            f"  📝 **Message:**\n  `{config.get('message', 'None')}`\n"
             "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
         )
         markup = InlineKeyboardMarkup([
             [InlineKeyboardButton(toggle_text, callback_data="btn_toggle_broadcast")],
-            [InlineKeyboardButton(f"📋 Manage Chats List ({len(chats)})", callback_data="btn_manage_chats")],
+            [InlineKeyboardButton(f"📋 Chats List ({len(chats)})", callback_data="btn_manage_chats")],
             [
-                InlineKeyboardButton("✏️ Edit Message", callback_data="btn_edit_broadcast_msg"),
-                InlineKeyboardButton("🖼️ Set Media URL", callback_data="btn_set_media_url")
+                InlineKeyboardButton("✏️️ Edit Message", callback_data="btn_edit_broadcast_msg"),
+                InlineKeyboardButton("🖼️ Set Media", callback_data="btn_set_media_url")
             ],
-            [InlineKeyboardButton("⏱️ Set Interval", callback_data="btn_set_broadcast_interval")],
-            [InlineKeyboardButton("🔙 Back to Dashboard", callback_data="btn_refresh_panel")]
+            [InlineKeyboardButton("⏱️️ Set Interval", callback_data="btn_set_broadcast_interval")],
+            [InlineKeyboardButton("🔙 Back", callback_data="btn_refresh_panel")]
         ])
         await query.message.edit_text(text, reply_markup=markup)
         await query.answer()
@@ -771,37 +793,36 @@ async def admin_callback_handler(_, query: CallbackQuery):
         new_state = not config.get("is_enabled", False)
         config["is_enabled"] = new_state
         await asyncio.to_thread(sync_save_broadcast_settings, config)
-        await query.answer(f"Global Broadcast {'Enabled' if new_state else 'Disabled'}")
+        await query.answer(f"Broadcast {'Enabled' if new_state else 'Disabled'}")
 
         chats = await asyncio.to_thread(sync_get_all_broadcast_chats)
         status_text = "🟢 ACTIVE" if new_state else "🔴 DISABLED"
-        toggle_text = "🔴 Turn OFF (Global)" if new_state else "🟢 Turn ON (Global)"
+        toggle_text = "🔴 Turn OFF" if new_state else "🟢 Turn ON"
         text = (
-            "┏━━━━━━ 📢 **AUTO-BROADCAST CONFIG** ━━━━━━┓\n\n"
-            f"  ⚡ **Global Status:** `{status_text}`\n"
-            f"  ⏱️ **Interval:** Every `{config.get('interval_minutes', 2)} minutes`\n"
-            f"  🎯 **Total Registered Chats:** `{len(chats)}`\n"
-            f"  🖼️ **Media URL:** `{config.get('media_url') or 'None'}`\n\n"
-            f"  📝 **Message Template:**\n  `{config.get('message', 'None')}`\n\n"
-            "  _Select an action below:_\n"
+            "┏━━━━━━ 📢 **BROADCAST CONFIG** ━━━━━━┓\n\n"
+            f"  ⚡ **Status:** `{status_text}`\n"
+            f"  ⏱️ **Interval:** Every `{config.get('interval_minutes', 2)} mins`\n"
+            f"  🎯 **Chats:** `{len(chats)}`\n"
+            f"  🖼️ **Media:** `{config.get('media_url') or 'None'}`\n\n"
+            f"  📝 **Message:**\n  `{config.get('message', 'None')}`\n"
             "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
         )
         markup = InlineKeyboardMarkup([
             [InlineKeyboardButton(toggle_text, callback_data="btn_toggle_broadcast")],
-            [InlineKeyboardButton(f"📋 Manage Chats List ({len(chats)})", callback_data="btn_manage_chats")],
+            [InlineKeyboardButton(f"📋 Chats List ({len(chats)})", callback_data="btn_manage_chats")],
             [
                 InlineKeyboardButton("✏️ Edit Message", callback_data="btn_edit_broadcast_msg"),
-                InlineKeyboardButton("🖼️ Set Media URL", callback_data="btn_set_media_url")
+                InlineKeyboardButton("🖼️ Set Media", callback_data="btn_set_media_url")
             ],
             [InlineKeyboardButton("⏱️ Set Interval", callback_data="btn_set_broadcast_interval")],
-            [InlineKeyboardButton("🔙 Back to Dashboard", callback_data="btn_refresh_panel")]
+            [InlineKeyboardButton("🔙 Back", callback_data="btn_refresh_panel")]
         ])
         await query.message.edit_text(text, reply_markup=markup)
 
     elif data == "btn_set_media_url":
         if not has_perm(user_id, "broadcast"):
             return await query.answer("Permission Denied", show_alert=True)
-        admin_states[user_id] = "WAIT_MEDIA_URL"
+        user_states[user_id] = "WAIT_MEDIA_URL"
         await query.message.reply_text("🖼️ Send direct image link (e.g. `https://example.com/banner.jpg`) or send `none` to remove:", reply_markup=ForceReply(selective=True))
         await query.answer()
 
@@ -816,17 +837,11 @@ async def admin_callback_handler(_, query: CallbackQuery):
         buttons = []
         for cid, cinfo in chats.items():
             st = "🟢" if cinfo.get("is_active", True) else "🔴"
-            title = cinfo.get("title", f"Chat {cid}")[:22]
+            title = cinfo.get("title", f"Chat {cid}")[:20]
             buttons.append([InlineKeyboardButton(f"{st} {title}", callback_data=f"viewchat_{cid}")])
 
-        buttons.append([InlineKeyboardButton("🔙 Back to Broadcast", callback_data="btn_broadcast_panel")])
-        await query.message.edit_text(
-            "📋 **Chat Auto-Broadcast Settings**\n\n"
-            "🟢 = Auto-message active\n"
-            "🔴 = Auto-message disabled\n\n"
-            "Select any chat to toggle:",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
+        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="btn_broadcast_panel")])
+        await query.message.edit_text("Select any chat to toggle active status:", reply_markup=InlineKeyboardMarkup(buttons))
         await query.answer()
 
     elif data.startswith("viewchat_"):
@@ -840,15 +855,14 @@ async def admin_callback_handler(_, query: CallbackQuery):
         tog_btn = "🔴 Disable Auto-Message" if is_active else "🟢 Enable Auto-Message"
 
         text = (
-            f"📌 **Chat Details:** `{cinfo.get('title')}`\n"
-            f"🆔 **Chat ID:** `{cid}`\n"
-            f"⚡ **Status:** `{'🟢 Active' if is_active else '🔴 Disabled'}`\n\n"
-            "Select an action:"
+            f"📌 **Chat:** `{cinfo.get('title')}`\n"
+            f"🆔 **ID:** `{cid}`\n"
+            f"⚡ **Status:** `{'🟢 Active' if is_active else '🔴 Disabled'}`"
         )
         markup = InlineKeyboardMarkup([
             [InlineKeyboardButton(tog_btn, callback_data=f"togchat_{cid}")],
-            [InlineKeyboardButton("🗑️ Remove from Broadcast", callback_data=f"delchat_{cid}")],
-            [InlineKeyboardButton("🔙 Back to Chat List", callback_data="btn_manage_chats")]
+            [InlineKeyboardButton("🗑️ Remove", callback_data=f"delchat_{cid}")],
+            [InlineKeyboardButton("🔙 Back", callback_data="btn_manage_chats")]
         ])
         await query.message.edit_text(text, reply_markup=markup)
         await query.answer()
@@ -858,21 +872,20 @@ async def admin_callback_handler(_, query: CallbackQuery):
             return await query.answer("Permission Denied", show_alert=True)
         cid = int(data.split("_")[1])
         new_state = await asyncio.to_thread(sync_toggle_chat_active, cid)
-        await query.answer(f"Auto-message {'Enabled' if new_state else 'Disabled'} for this chat!")
+        await query.answer(f"Status changed to {'Active' if new_state else 'Disabled'}")
 
         chats = await asyncio.to_thread(sync_get_all_broadcast_chats)
         cinfo = chats.get(cid, {"title": "Chat", "is_active": new_state})
         tog_btn = "🔴 Disable Auto-Message" if new_state else "🟢 Enable Auto-Message"
         text = (
-            f"📌 **Chat Details:** `{cinfo.get('title')}`\n"
-            f"🆔 **Chat ID:** `{cid}`\n"
-            f"⚡ **Status:** `{'🟢 Active' if new_state else '🔴 Disabled'}`\n\n"
-            "Select an action:"
+            f"📌 **Chat:** `{cinfo.get('title')}`\n"
+            f"🆔 **ID:** `{cid}`\n"
+            f"⚡ **Status:** `{'🟢 Active' if new_state else '🔴 Disabled'}`"
         )
         markup = InlineKeyboardMarkup([
             [InlineKeyboardButton(tog_btn, callback_data=f"togchat_{cid}")],
-            [InlineKeyboardButton("🗑️ Remove from Broadcast", callback_data=f"delchat_{cid}")],
-            [InlineKeyboardButton("🔙 Back to Chat List", callback_data="btn_manage_chats")]
+            [InlineKeyboardButton("🗑️ Remove", callback_data=f"delchat_{cid}")],
+            [InlineKeyboardButton("🔙 Back", callback_data="btn_manage_chats")]
         ])
         await query.message.edit_text(text, reply_markup=markup)
 
@@ -881,27 +894,26 @@ async def admin_callback_handler(_, query: CallbackQuery):
             return await query.answer("Permission Denied", show_alert=True)
         cid = int(data.split("_")[1])
         await asyncio.to_thread(sync_remove_broadcast_chat, cid)
-        await query.answer("Chat removed completely!", show_alert=True)
+        await query.answer("Chat removed!", show_alert=True)
 
         chats = await asyncio.to_thread(sync_get_all_broadcast_chats)
         buttons = []
         for c, cinfo in chats.items():
             st = "🟢" if cinfo.get("is_active", True) else "🔴"
-            title = cinfo.get("title", f"Chat {c}")[:22]
+            title = cinfo.get("title", f"Chat {c}")[:20]
             buttons.append([InlineKeyboardButton(f"{st} {title}", callback_data=f"viewchat_{c}")])
-        buttons.append([InlineKeyboardButton("🔙 Back to Broadcast", callback_data="btn_broadcast_panel")])
+        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="btn_broadcast_panel")])
         await query.message.edit_text("Chat list updated:", reply_markup=InlineKeyboardMarkup(buttons))
 
     elif data == "btn_edit_broadcast_msg":
         if not has_perm(user_id, "broadcast"):
             return await query.answer("Permission Denied", show_alert=True)
-        admin_states[user_id] = "WAIT_BROADCAST_MSG"
+        user_states[user_id] = "WAIT_BROADCAST_MSG"
         await query.message.reply_text(
-            "📝 Send new broadcast text.\n\n"
-            "💡 **Button Example:**\n"
+            "📝 Send new broadcast template:\n\n"
+            "Example with buttons:\n"
             "Hello World!\n"
-            "`[Join Channel|https://t.me/channel]`\n"
-            "`[Website|https://google.com]`",
+            "`[Join Channel|https://t.me/channel]`",
             reply_markup=ForceReply(selective=True)
         )
         await query.answer()
@@ -909,22 +921,8 @@ async def admin_callback_handler(_, query: CallbackQuery):
     elif data == "btn_set_broadcast_interval":
         if not has_perm(user_id, "broadcast"):
             return await query.answer("Permission Denied", show_alert=True)
-        admin_states[user_id] = "WAIT_BROADCAST_INTERVAL"
-        await query.message.reply_text("⏱️ Enter interval in minutes (e.g. 2, 5, 30):", reply_markup=ForceReply(selective=True))
-        await query.answer()
-
-    elif data == "btn_add_str":
-        if not has_perm(user_id, "sessions"):
-            return await query.answer("Permission Denied", show_alert=True)
-        admin_states[user_id] = "WAIT_STRING"
-        await query.message.reply_text("📝 Send Hydrogram / Pyrogram Session String:", reply_markup=ForceReply(selective=True))
-        await query.answer()
-
-    elif data == "btn_login_phone":
-        if not has_perm(user_id, "sessions"):
-            return await query.answer("Permission Denied", show_alert=True)
-        admin_states[user_id] = "WAIT_PHONE"
-        await query.message.reply_text("📱 Send phone number (+880...):", reply_markup=ForceReply(selective=True))
+        user_states[user_id] = "WAIT_BROADCAST_INTERVAL"
+        await query.message.reply_text("⏱️ Enter interval in minutes (e.g. 5):", reply_markup=ForceReply(selective=True))
         await query.answer()
 
     elif data == "btn_list_sessions":
@@ -964,13 +962,13 @@ async def admin_callback_handler(_, query: CallbackQuery):
             buttons.append([InlineKeyboardButton(f"🛡️ Admin `{aid}`", callback_data=f"viewadmin_{aid}")])
         buttons.append([InlineKeyboardButton("➕ Add New Admin", callback_data="btn_add_new_admin")])
         buttons.append([InlineKeyboardButton("🔙 Back", callback_data="btn_refresh_panel")])
-        await query.message.edit_text("Select an admin to customize permissions:", reply_markup=InlineKeyboardMarkup(buttons))
+        await query.message.edit_text("Manage sub-admins and rights:", reply_markup=InlineKeyboardMarkup(buttons))
         await query.answer()
 
     elif data == "btn_add_new_admin":
         if user_id != OWNER_ID:
             return await query.answer("Owner Only", show_alert=True)
-        admin_states[user_id] = "WAIT_ADMIN_ID"
+        user_states[user_id] = "WAIT_ADMIN_ID"
         await query.message.reply_text("🆔 Send Telegram User ID of new admin:", reply_markup=ForceReply(selective=True))
         await query.answer()
 
@@ -979,8 +977,7 @@ async def admin_callback_handler(_, query: CallbackQuery):
             return await query.answer("Owner Only", show_alert=True)
         target_uid = int(data.split("_")[1])
         await query.message.edit_text(
-            f"⚙️ **Permission Settings for Admin:** `{target_uid}`\n\n"
-            "Toggle specific abilities below:",
+            f"⚙️ **Permissions for Admin:** `{target_uid}`",
             reply_markup=get_admin_perm_markup(target_uid)
         )
         await query.answer()
@@ -993,7 +990,7 @@ async def admin_callback_handler(_, query: CallbackQuery):
         curr = loaded_admins.get(target_uid, {}).get(p_key, False)
         await asyncio.to_thread(sync_update_admin_perm, target_uid, p_key, not curr)
         await query.message.edit_reply_markup(reply_markup=get_admin_perm_markup(target_uid))
-        await query.answer("Permission Updated")
+        await query.answer("Updated")
 
     elif data.startswith("deladmin_"):
         if user_id != OWNER_ID:
@@ -1006,101 +1003,37 @@ async def admin_callback_handler(_, query: CallbackQuery):
         buttons.append([InlineKeyboardButton("🔙 Back", callback_data="btn_refresh_panel")])
         await query.message.edit_text("Admin list updated:", reply_markup=InlineKeyboardMarkup(buttons))
 
-    elif data == "btn_retry_2fa":
-        admin_states[user_id] = "WAIT_2FA"
-        await query.message.reply_text("🔐 Re-enter 2FA password:", reply_markup=ForceReply(selective=True))
-        await query.answer()
+# ----------------- INPUT PROMPT HANDLER (USERS & ADMINS) ----------------- #
 
-    elif data == "btn_cancel_login":
-        session_data = login_clients.pop(user_id, None)
-        admin_states.pop(user_id, None)
-        if session_data and session_data.get("cl") and session_data["cl"].is_connected:
-            await session_data["cl"].disconnect()
-        await query.message.edit_text("❌ Login cancelled.")
-        await query.answer("Cancelled")
-
-# ----------------- ADMIN INPUT PROMPTS ----------------- #
-
-@bot.on_message(filters.reply & filters.private)
-async def admin_reply_processor(_, message: Message):
+@bot.on_message(filters.private & ~filters.command(["start", "help", "admin", "panel", "ping", "addchat", "storage", "clean", "login"]))
+async def message_input_router(_, message: Message):
     user_id = message.from_user.id
-    if not is_any_admin(user_id):
-        return
+    state = user_states.get(user_id)
+    text_input = (message.text or message.caption or "").strip()
 
-    state = admin_states.get(user_id)
-    if not state:
-        return
-
-    text_input = (message.text or "").strip()
-
-    if state == "WAIT_ADMIN_ID" and user_id == OWNER_ID:
-        admin_states.pop(user_id, None)
-        if not text_input.isdigit():
-            return await message.reply_text("❌ User ID must be numeric.")
-        t_id = int(text_input)
-        await asyncio.to_thread(sync_add_admin, t_id)
-        await message.reply_text(
-            f"✅ Added Admin `{t_id}`.\nNow click `/admin` -> **Manage Admins** to select permissions."
-        )
-
-    elif state == "WAIT_BROADCAST_MSG" and has_perm(user_id, "broadcast"):
-        admin_states.pop(user_id, None)
-        config = await asyncio.to_thread(sync_get_broadcast_settings)
-        config["message"] = text_input
-        await asyncio.to_thread(sync_save_broadcast_settings, config)
-        await message.reply_text("✅ Broadcast template saved!")
-
-    elif state == "WAIT_MEDIA_URL" and has_perm(user_id, "broadcast"):
-        admin_states.pop(user_id, None)
-        val = "" if text_input.lower() == "none" else text_input
-        config = await asyncio.to_thread(sync_get_broadcast_settings)
-        config["media_url"] = val
-        await asyncio.to_thread(sync_save_broadcast_settings, config)
-        await message.reply_text("✅ Media URL updated successfully!")
-
-    elif state == "WAIT_BROADCAST_INTERVAL" and has_perm(user_id, "broadcast"):
-        admin_states.pop(user_id, None)
-        if not text_input.isdigit() or int(text_input) < 1:
-            return await message.reply_text("❌ Enter a valid positive number.")
-        mins = int(text_input)
-        config = await asyncio.to_thread(sync_get_broadcast_settings)
-        config["interval_minutes"] = mins
-        await asyncio.to_thread(sync_save_broadcast_settings, config)
-        await message.reply_text(f"✅ Interval set to {mins} minutes.")
-
-    elif state == "WAIT_STRING" and has_perm(user_id, "sessions"):
-        admin_states.pop(user_id, None)
-        status = await message.reply_text("🔄 Verifying string...")
-        cl = Client(f"test_{int(time.time())}", api_id=API_ID, api_hash=API_HASH, session_string=text_input, in_memory=True)
-        try:
-            await cl.start()
-            me = await cl.get_me()
-            acc = f"{me.first_name} (@{me.username})" if me.username else me.first_name
-            await cl.stop()
-            await asyncio.to_thread(sync_add_session, text_input, acc)
-            asyncio.create_task(init_session_pool())
-            await status.edit_text(f"✅ Connected: `{acc}`")
-        except Exception as e:
-            await status.edit_text(f"❌ Error: {e}")
-
-    elif state == "WAIT_PHONE" and has_perm(user_id, "sessions"):
-        admin_states.pop(user_id, None)
+    # Public Login Steps
+    if state == "WAIT_PHONE":
+        user_states.pop(user_id, None)
         phone = text_input.replace(" ", "")
         cl = Client(f"log_{int(time.time())}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
         try:
             await cl.connect()
             c = await cl.send_code(phone)
             login_clients[user_id] = {"cl": cl, "phone": phone, "hash": c.phone_code_hash}
-            admin_states[user_id] = "WAIT_OTP"
-            await message.reply_text("📩 Enter OTP (e.g. `1 2 3 4 5`):", reply_markup=ForceReply(selective=True))
+            user_states[user_id] = "WAIT_OTP"
+            await message.reply_text(
+                "📩 Enter the Telegram OTP code you received (separate numbers with spaces, e.g. `1 2 3 4 5`):",
+                reply_markup=ForceReply(selective=True)
+            )
         except Exception as e:
-            await message.reply_text(f"❌ Error: {e}")
+            await message.reply_text(f"❌ Failed to send code: `{e}`")
+        return
 
-    elif state == "WAIT_OTP" and has_perm(user_id, "sessions"):
+    elif state == "WAIT_OTP":
         otp = text_input.replace(" ", "").replace("-", "")
         data = login_clients.get(user_id)
         if not data:
-            admin_states.pop(user_id, None)
+            user_states.pop(user_id, None)
             return
         cl = data["cl"]
         try:
@@ -1110,23 +1043,25 @@ async def admin_reply_processor(_, message: Message):
             acc = f"{me.first_name} (@{me.username})" if me.username else me.first_name
             await cl.disconnect()
             login_clients.pop(user_id, None)
-            admin_states.pop(user_id, None)
-            await asyncio.to_thread(sync_add_session, s_str, acc)
+            user_states.pop(user_id, None)
+            
+            await asyncio.to_thread(sync_add_session, s_str, acc, user_id)
             asyncio.create_task(init_session_pool())
-            await message.reply_text(f"✅ Logged in: `{acc}`")
+            await message.reply_text(f"✅ **Account Connected Successfully!**\nWelcome, `{acc}`. Your session is now aiding the bot.")
         except SessionPasswordNeeded:
-            admin_states[user_id] = "WAIT_2FA"
-            await message.reply_text("🔐 Enter 2FA Password:", reply_markup=ForceReply(selective=True))
+            user_states[user_id] = "WAIT_2FA"
+            await message.reply_text("🔐 Account has Two-Step Verification. Enter your password:", reply_markup=ForceReply(selective=True))
         except Exception as e:
             await cl.disconnect()
             login_clients.pop(user_id, None)
-            admin_states.pop(user_id, None)
-            await message.reply_text(f"❌ Failed: {e}")
+            user_states.pop(user_id, None)
+            await message.reply_text(f"❌ Login failed: `{e}`")
+        return
 
-    elif state == "WAIT_2FA" and has_perm(user_id, "sessions"):
+    elif state == "WAIT_2FA":
         data = login_clients.get(user_id)
         if not data:
-            admin_states.pop(user_id, None)
+            user_states.pop(user_id, None)
             return
         cl = data["cl"]
         try:
@@ -1136,63 +1071,63 @@ async def admin_reply_processor(_, message: Message):
             acc = f"{me.first_name} (@{me.username})" if me.username else me.first_name
             await cl.disconnect()
             login_clients.pop(user_id, None)
-            admin_states.pop(user_id, None)
-            await asyncio.to_thread(sync_add_session, s_str, acc)
+            user_states.pop(user_id, None)
+            
+            await asyncio.to_thread(sync_add_session, s_str, acc, user_id)
             asyncio.create_task(init_session_pool())
-            await message.reply_text(f"✅ Logged in: `{acc}`")
+            await message.reply_text(f"✅ **Account Connected Successfully!**\nWelcome, `{acc}`.")
         except Exception as e:
             await message.reply_text(
-                f"❌ Wrong 2FA: `{e}`",
+                f"❌ Incorrect 2FA Password: `{e}`",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔄 Retry", callback_data="btn_retry_2fa"),
                      InlineKeyboardButton("❌ Cancel", callback_data="btn_cancel_login")]
                 ])
             )
+        return
 
-# ----------------- ROBUST TELEGRAM DOWNLOADER ----------------- #
+    # Admin Management Prompts
+    if is_any_admin(user_id) and state:
+        if state == "WAIT_ADMIN_ID" and user_id == OWNER_ID:
+            user_states.pop(user_id, None)
+            if not text_input.isdigit():
+                return await message.reply_text("❌ User ID must be numeric.")
+            t_id = int(text_input)
+            await asyncio.to_thread(sync_add_admin, t_id)
+            await message.reply_text(f"✅ Added Admin `{t_id}`. Configure permissions via `/admin`.")
+            return
 
-sem = asyncio.Semaphore(2)
+        elif state == "WAIT_BROADCAST_MSG" and has_perm(user_id, "broadcast"):
+            user_states.pop(user_id, None)
+            config = await asyncio.to_thread(sync_get_broadcast_settings)
+            config["message"] = text_input
+            await asyncio.to_thread(sync_save_broadcast_settings, config)
+            await message.reply_text("✅ Broadcast message updated!")
+            return
 
-async def download_album_item(client, media_msg, idx, user_id, tracker: AlbumProgressTracker = None):
-    async with sem:
-        ext = ".mp4" if media_msg.video else ".jpg" if media_msg.photo else ".mp3" if media_msg.audio else ""
-        if not ext and media_msg.document:
-            ext = os.path.splitext(media_msg.document.file_name or "")[1] or ".bin"
-        dest = os.path.join(DOWNLOAD_DIR, f"alb_{user_id}_{int(time.time())}_{idx}{ext}")
+        elif state == "WAIT_MEDIA_URL" and has_perm(user_id, "broadcast"):
+            user_states.pop(user_id, None)
+            val = "" if text_input.lower() == "none" else text_input
+            config = await asyncio.to_thread(sync_get_broadcast_settings)
+            config["media_url"] = val
+            await asyncio.to_thread(sync_save_broadcast_settings, config)
+            await message.reply_text("✅ Media URL updated!")
+            return
 
-        async def _item_progress(current, total):
-            if tracker:
-                await tracker.progress(current, total, idx)
+        elif state == "WAIT_BROADCAST_INTERVAL" and has_perm(user_id, "broadcast"):
+            user_states.pop(user_id, None)
+            if not text_input.isdigit() or int(text_input) < 1:
+                return await message.reply_text("❌ Enter a valid number.")
+            mins = int(text_input)
+            config = await asyncio.to_thread(sync_get_broadcast_settings)
+            config["interval_minutes"] = mins
+            await asyncio.to_thread(sync_save_broadcast_settings, config)
+            await message.reply_text(f"✅ Interval set to {mins} minutes.")
+            return
 
-        path = None
-        for attempt in range(2):
-            try:
-                path = await client.download_media(
-                    media_msg,
-                    file_name=dest,
-                    progress=_item_progress if tracker else None
-                )
-                if path and os.path.exists(path) and os.path.getsize(path) > 0:
-                    break
-            except Exception as e:
-                logger.warning(f"Album item {idx} attempt {attempt+1} failed: {e}")
-                await asyncio.sleep(2)
-
-        thumb_path = None
-        if path and media_msg.video and media_msg.video.thumbs:
-            try:
-                thumb_dest = os.path.join(DOWNLOAD_DIR, f"alb_thumb_{user_id}_{int(time.time())}_{idx}.jpg")
-                thumb_path = await client.download_media(media_msg.video.thumbs[0].file_id, file_name=thumb_dest)
-            except Exception:
-                pass
-
-        return path, media_msg, idx, thumb_path
-
-@bot.on_message(filters.private & ~filters.command(["start", "help", "admin", "panel", "ping", "addchat", "storage", "clean"]))
-async def telegram_media_fetcher(_, message: Message):
-    text_str = (message.text or message.caption or "").strip()
-    p_match = re.search(r"t\.me/c/(\d+)/(\d+)", text_str)
-    pub_match = re.search(r"t\.me/([a-zA-Z0-9_]+)/(\d+)", text_str)
+    # ----------------- TELEGRAM POST DOWNLOAD ROUTINE ----------------- #
+    p_match = re.search(r"t\.me/c/(\d+)/(\d+)", text_input)
+    pub_match = re.search(r"t\.me/([a-zA-Z0-9_]+)/(\d+)", text_input)
 
     if not (p_match or pub_match):
         return
@@ -1209,7 +1144,7 @@ async def telegram_media_fetcher(_, message: Message):
         chat_id = pub_match.group(1)
         msg_id = int(pub_match.group(2))
 
-    # Fast Server-Side Copy
+    # Fast Server Copy
     try:
         copied = await bot.copy_message(chat_id=message.chat.id, from_chat_id=chat_id, message_id=msg_id)
         if copied:
@@ -1222,7 +1157,7 @@ async def telegram_media_fetcher(_, message: Message):
         await init_session_pool()
 
     if not loaded_user_clients:
-        return await message.reply_text("❌ No active sessions found. Add via `/admin`.")
+        return await message.reply_text("❌ No active sessions found. Connect an account using `/login`.")
 
     target_msg, working_client = None, None
     for _, _, u_client in loaded_user_clients:
@@ -1235,9 +1170,9 @@ async def telegram_media_fetcher(_, message: Message):
             continue
 
     if not target_msg or target_msg.empty:
-        return await message.reply_text("❌ Post unavailable or channel not joined.")
+        return await message.reply_text("❌ Post unavailable or channel not joined by any active account.")
 
-    # Fast Direct Forward Bypass
+    # Direct Forward Bypass
     try:
         fwd = await working_client.forward_messages(message.chat.id, chat_id, msg_id)
         if fwd:
@@ -1257,10 +1192,10 @@ async def telegram_media_fetcher(_, message: Message):
         except Exception:
             pass
 
-    status = await message.reply_text("⚡ **Preparing download...**")
+    status = await message.reply_text("⚡ **Preparing transfer...**")
     task_id = f"task_{message.from_user.id}_{int(time.time())}"
 
-    # ----------------- ALBUM PROCESSING ----------------- #
+    # Album Processing
     if len(media_group) > 1:
         alb_tracker = AlbumProgressTracker(status, len(media_group), "Downloading album...", task_id=task_id)
         for i, m in enumerate(media_group):
@@ -1306,7 +1241,7 @@ async def telegram_media_fetcher(_, message: Message):
             await status.delete()
             asyncio.create_task(silent_auto_delete(message.chat.id, [m.id for m in sent_msgs] + [message.id]))
         else:
-            await status.edit_text("❌ Album processing failed. Some files were unavailable.")
+            await status.edit_text("❌ Album processing failed.")
 
         for f in files_to_cleanup + thumbs_to_cleanup:
             try:
@@ -1316,7 +1251,7 @@ async def telegram_media_fetcher(_, message: Message):
                 pass
         return
 
-    # ----------------- SINGLE MEDIA PROCESSING ----------------- #
+    # Single Media Processing
     if not (target_msg.media or target_msg.video or target_msg.photo or target_msg.document or target_msg.audio or target_msg.voice):
         if target_msg.text:
             return await status.edit_text(f"📝 **Text:**\n\n{target_msg.text}")
@@ -1339,32 +1274,26 @@ async def telegram_media_fetcher(_, message: Message):
             )
             if file_path and os.path.exists(file_path) and os.path.getsize(file_path) > 0:
                 break
-        except Exception as e:
-            logger.warning(f"Download attempt {attempt+1} failed: {e}")
+        except Exception:
             if attempt == 0:
-                await status.edit_text("⚠️ Retrying download connection...")
                 await asyncio.sleep(2)
 
     dl_tracker.finish()
 
     if not file_path or not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-        return await status.edit_text("❌ **Download failed after retry.** File might be restricted or connection timed out.")
+        return await status.edit_text("❌ **Download failed.**")
 
     thumb_path = None
-    duration = 0
-    width = 0
-    height = 0
+    duration = target_msg.video.duration or 0 if target_msg.video else 0
+    width = target_msg.video.width or 0 if target_msg.video else 0
+    height = target_msg.video.height or 0 if target_msg.video else 0
 
-    if target_msg.video:
-        duration = target_msg.video.duration or 0
-        width = target_msg.video.width or 0
-        height = target_msg.video.height or 0
-        if target_msg.video.thumbs:
-            try:
-                thumb_dest = os.path.join(DOWNLOAD_DIR, f"thumb_{message.from_user.id}_{int(time.time())}.jpg")
-                thumb_path = await working_client.download_media(target_msg.video.thumbs[0].file_id, file_name=thumb_dest)
-            except Exception as err:
-                logger.warning(f"Thumbnail download failed: {err}")
+    if target_msg.video and target_msg.video.thumbs:
+        try:
+            thumb_dest = os.path.join(DOWNLOAD_DIR, f"thumb_{message.from_user.id}_{int(time.time())}.jpg")
+            thumb_path = await working_client.download_media(target_msg.video.thumbs[0].file_id, file_name=thumb_dest)
+        except Exception:
+            pass
 
     up_tracker = ProgressTracker(status, "Uploading media...", task_id=f"up_{task_id}", task_type="upload")
     cap = target_msg.caption or ""
@@ -1421,13 +1350,52 @@ async def telegram_media_fetcher(_, message: Message):
             except Exception:
                 pass
 
+# ----------------- ALBUM ITEM DOWNLOAD HELPER ----------------- #
+
+sem = asyncio.Semaphore(2)
+
+async def download_album_item(client, media_msg, idx, user_id, tracker: AlbumProgressTracker = None):
+    async with sem:
+        ext = ".mp4" if media_msg.video else ".jpg" if media_msg.photo else ".mp3" if media_msg.audio else ""
+        if not ext and media_msg.document:
+            ext = os.path.splitext(media_msg.document.file_name or "")[1] or ".bin"
+        dest = os.path.join(DOWNLOAD_DIR, f"alb_{user_id}_{int(time.time())}_{idx}{ext}")
+
+        async def _item_progress(current, total):
+            if tracker:
+                await tracker.progress(current, total, idx)
+
+        path = None
+        for attempt in range(2):
+            try:
+                path = await client.download_media(
+                    media_msg,
+                    file_name=dest,
+                    progress=_item_progress if tracker else None
+                )
+                if path and os.path.exists(path) and os.path.getsize(path) > 0:
+                    break
+            except Exception:
+                await asyncio.sleep(2)
+
+        thumb_path = None
+        if path and media_msg.video and media_msg.video.thumbs:
+            try:
+                thumb_dest = os.path.join(DOWNLOAD_DIR, f"alb_thumb_{user_id}_{int(time.time())}_{idx}.jpg")
+                thumb_path = await client.download_media(media_msg.video.thumbs[0].file_id, file_name=thumb_dest)
+            except Exception:
+                pass
+
+        return path, media_msg, idx, thumb_path
+
 # ----------------- BASE COMMANDS ----------------- #
 
 @bot.on_message(filters.command("start") & filters.private)
 async def start_handler(_, message: Message):
     await message.reply_text(
-        f"👋 **Welcome, {message.from_user.first_name}!**\n\n"
-        "⚡ Send any public or private Telegram post / album link to download."
+        f"👋 **স্বাগতম, {message.from_user.first_name}!**\n\n"
+        "⚡ যে কোনো পাবলিক বা প্রাইভেট পোস্টের লিঙ্ক পাঠান ডাউনলোড করার জন্য।\n\n"
+        "🔐 আপনার নিজস্ব অ্যাকাউন্ট যুক্ত করতে `/login` ব্যবহার করুন।"
     )
 
 @bot.on_message(filters.command("ping") & filters.private)
@@ -1481,12 +1449,12 @@ async def clean_cmd_handler(_, message: Message):
                 logger.error(f"Failed to delete {file_path}: {e}")
 
     await msg.edit_text(
-        f"✅ **Storage Cleaned Successfully!**\n\n"
+        f"✅ **Storage Cleaned!**\n\n"
         f"🗑️ Files Removed: `{deleted_files}`\n"
         f"💾 Space Freed: `{human_bytes(freed_bytes)}`"
     )
 
-# ----------------- WEB DASHBOARD (LIVE DOWNLOAD/UPLOAD UI) ----------------- #
+# ----------------- WEB DASHBOARD ----------------- #
 
 HTML_DASHBOARD = """
 <!DOCTYPE html>
@@ -1516,7 +1484,6 @@ HTML_DASHBOARD = """
         .stat-label { font-size: 11px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
         .stat-num { font-size: 14px; font-weight: 600; color: #f1f5f9; margin-top: 2px; }
 
-        /* Real-Time Live Tasks */
         .live-box { background: #0f172a; border-radius: 12px; padding: 16px; margin-bottom: 16px; border: 1px solid #1e293b; min-height: 110px; }
         .empty-tasks { color: #64748b; font-size: 13px; text-align: center; padding: 24px 0; }
         .task-card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 12px; margin-bottom: 10px; }
@@ -1684,7 +1651,6 @@ async def handle_stats(_):
     })
 
 async def handle_tasks(_):
-    # Auto-clean any stale tasks older than 45 seconds
     now = time.time()
     stale_keys = [k for k, v in active_tasks.items() if now - v.get("updated_at", 0) > 45]
     for k in stale_keys:
@@ -1721,7 +1687,7 @@ async def web_server():
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
-    logger.info(f"Storage Monitor & Live Transfer UI Running on Port {PORT}")
+    logger.info(f"Monitor Server active on port {PORT}")
 
 # ----------------- STARTUP ----------------- #
 
@@ -1730,9 +1696,10 @@ async def main():
     try:
         await bot.set_bot_commands([
             BotCommand("start", "Start the bot"),
+            BotCommand("login", "Connect your account to the bot pool"),
             BotCommand("admin", "Admin Control Panel"),
-            BotCommand("storage", "Check Disk Usage %"),
-            BotCommand("clean", "Clean Temp Download Files"),
+            BotCommand("storage", "Check Disk Usage"),
+            BotCommand("clean", "Clean Temp Storage"),
             BotCommand("ping", "Check latency"),
             BotCommand("addchat", "Add channel for broadcast")
         ])
@@ -1741,7 +1708,7 @@ async def main():
     await init_session_pool()
     await web_server()
     asyncio.create_task(auto_broadcast_worker())
-    logger.info("Bot Online with Full Responsive Broadcast Engine!")
+    logger.info("Bot Online with User-Facing Self-Login Enabled!")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
