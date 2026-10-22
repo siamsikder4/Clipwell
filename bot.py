@@ -145,7 +145,7 @@ active_tasks = {}
 # ----------------- BOTTOM KEYBOARD BUILDER ----------------- #
 
 def get_bottom_keyboard(user_id: int):
-    """Persistent bottom keyboard: বাটন কখনো নিচে লুকাবে না (persistent=True)"""
+    """Hydrogram compatible bottom keyboard (persistent argument removed)."""
     if is_any_admin(user_id):
         return ReplyKeyboardMarkup(
             [
@@ -153,16 +153,14 @@ def get_bottom_keyboard(user_id: int):
                 [KeyboardButton(f"{FALLBACK_SYMBOLS['disk']} Storage"), KeyboardButton(f"{FALLBACK_SYMBOLS['broom']} Clean Cache")],
                 [KeyboardButton(f"{FALLBACK_SYMBOLS['phone']} Connect Account"), KeyboardButton(f"{FALLBACK_SYMBOLS['rocket']} Latency")]
             ],
-            resize_keyboard=True,
-            persistent=True
+            resize_keyboard=True
         )
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton(f"{FALLBACK_SYMBOLS['phone']} Connect Account"), KeyboardButton(f"{FALLBACK_SYMBOLS['rocket']} Latency")],
             [KeyboardButton("ℹ️ How To Use")]
         ],
-        resize_keyboard=True,
-        persistent=True
+        resize_keyboard=True
     )
 
 # ----------------- STORAGE & PROGRESS HELPERS ----------------- #
@@ -1528,7 +1526,7 @@ async def handle_web_clean(_):
                 elif os.path.isdir(file_path):
                     shutil.rmtree(file_path)
                     deleted += 1
-            except Exception:
+            except Exception as e:
                 pass
     return web.json_response({
         "status": "ok",
