@@ -2297,4 +2297,144 @@ HTML_DASHBOARD = """
                 fill.style.width = Math.min(100, d.percent) + '%';
                 if(d.percent > 85) fill.style.background = '#ef4444';
                 else if(d.percent > 65) fill.style.background = '#f59e0b';
-                el
+                else fill.style.background = '#10b981';
+
+                document.getElementById('stat-used').innerText = humanBytes(d.used);
+                document.getElementById('stat-free').innerText = humanBytes(d.free);
+                document.getElementById('stat-total').innerText = humanBytes(d.total);
+                document.getElementById('stat-temp').innerText = humanBytes(d.dl_size) + ' (' + d.dl_files + ' files)';
+
+                const box = document.getElementById('tasks-container');
+                if (!d.tasks || d.tasks.length === 0) {
+                    box.innerHTML = '<div class="empty-tasks">No active transfers running.</div>';
+                } else {
+                    box.innerHTML = d.tasks.map(function (t) {
+                        var tag = 'tag-' + (t.type || 'download');
+                        return '<div class="task-card">' +
+                            '<div class="task-header">' +
+                            '<span class="task-name">' + esc(t.name) + '</span>' +
+                            '<span class="task-tag ' + tag + '">' + esc(t.type) + '</span>' +
+                            '</div>' +
+                            '<div class="progress-bar-bg"><div class="progress-bar-fill" style="width:' +
+                            Math.min(100, t.percent || 0) + '%; background:#38bdf8;"></div></div>' +
+                            '<div class="task-meta"><span>' + (t.percent || 0) + '%</span>' +
+                            '<span>' + humanBytes(t.current) + ' / ' + humanBytes(t.total) + '</span>' +
+                            '<span>' + esc(t.speed) + '</span></div>' +
+                            '</div>';
+                    }).join('');
+                }
+            } catch (e) {}
+        }
+
+        function esc(s) {
+            var d = document.createElement('div');
+            d.textContent = (s === undefined || s === null) ? '' : String(s);
+            return d.innerHTML;
+        }
+
+        async function cleanStorage() {
+            if (!confirm('Delete all temporary download files?')) return;
+            try {
+                const res = await fetch('/api/clean', { method: 'POST' });
+                const d = await res.json();
+                alert('Cleaned ' + humanBytes(d.freed));
+                fetchStats();
+            } catch (e) {
+                alert('Failed to clean cache');
+            }
+        }
+
+        fetchStats();
+        setInterval(fetchStats, 3000);
+    </script>
+</body>
+</html>
+"""
+
+# ----------------- WEB SERVER HANDLERS ----------------- #
+
+def clean_download_dir() -> int:
+    freed = 0
+    if os.path.exists(DOWNLOAD_DIR):
+        for filename in os.listdir(DOWNLOAD_DIR):
+            fp = os.path.join(DOWNLOAD_DIR, filename)
+            try:
+                if os.path.isfile(fp) or os.path.islink(fp):
+                    freed += os.path.getsize(fp)
+                    os.unlink(fp)
+                elif os.path.isdir(fp):
+                    shutil.rmtree(fp)
+            except Exception as e:
+                logger.error(f"Failed to delete {fp}: {e}")
+    return freed
+
+async def web_index(request):
+    return web.Response(text=HTML_DASHBOARD, content_type="text/html")
+
+async def web_health(request):
+    return web.Response(text="OK")
+
+async def api_stats(request):
+    st = await asyncio.to_thread(get_storage_stats)
+    tasks = []
+    for _, t in list(active_tasks.items()):
+        tasks.append({
+            "name": t.get("name", ""),
+            "type": t.get("type", "download"),
+            "current": t.get("current", 0),
+            "total": t.get("total", 0),
+            "percent": t.get("percent", 0),
+            "speed": t.get("speed", "--"),
+        })
+    st["tasks"] = tasks
+    return web.json_response(st)
+
+async def api_clean(request):
+    freed = await asyncio.to_thread(clean_download_dir)
+    return web.json_response({"freed": freed})
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", web_index)
+    app.router.add_get("/health", web_health)
+    app.router.add_get("/api/stats", api_stats)
+    app.router.add_post("/api/clean", api_clean)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logger.info(f"Web dashboard running on port {PORT}")
+
+# ----------------- MAIN ----------------- #
+
+async def main():
+    global BOT_USERNAME
+
+    await asyncio.to_thread(sync_load_settings)
+    await start_web_server()
+
+    await bot.start()
+    me = await bot.get_me()
+    BOT_USERNAME = me.username or ""
+    logger.info(f"Bot started as @{BOT_USERNAME}")
+
+    try:
+        await bot.set_bot_commands([
+            BotCommand("start", "Start the bot"),
+            BotCommand("login", "Connect your Telegram account"),
+            BotCommand("profile", "My profile & credits"),
+            BotCommand("ping", "Check latency"),
+            BotCommand("cancel", "Cancel current operation"),
+        ])
+    except Exception as e:
+        logger.warning(f"set_bot_commands failed: {e}")
+
+    await init_session_pool()
+
+    from hydrogram import idle
+    await idle()
+
+    await bot.stop()
+
+if __name__ == "__main__":
+    bot.run(main())
