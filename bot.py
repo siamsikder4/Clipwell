@@ -89,6 +89,18 @@ def ce(name: str) -> str:
         return f'<emoji id="{emoji_id}">{fallback}</emoji>'
     return fallback
 
+def btn_custom(text: str, callback_data: str, emoji_name: str = None) -> InlineKeyboardButton:
+    """Custom Animated Emoji যুক্ত ইনলাইন বাটন প্রস্তুতকারক।"""
+    emoji_id = UI_EMOJIS.get(emoji_name) if emoji_name else None
+    try:
+        if emoji_id:
+            return InlineKeyboardButton(text=text, callback_data=callback_data, icon_custom_emoji_id=str(emoji_id))
+    except Exception:
+        pass
+    fallback = FALLBACK_SYMBOLS.get(emoji_name, "")
+    label = f"{fallback} {text}" if fallback else text
+    return InlineKeyboardButton(text=label, callback_data=callback_data)
+
 # Logging Configuration
 logging.basicConfig(
     level=logging.INFO,
@@ -145,7 +157,7 @@ active_tasks = {}
 # ----------------- BOTTOM KEYBOARD BUILDER ----------------- #
 
 def get_bottom_keyboard(user_id: int):
-    """Hydrogram compatible bottom keyboard (persistent argument removed)."""
+    """Bottom persistent-friendly ReplyKeyboardMarkup"""
     if is_any_admin(user_id):
         return ReplyKeyboardMarkup(
             [
@@ -519,29 +531,30 @@ async def broadcast_to_all_users(source_message: Message, admin_id: int):
 # ----------------- ADMIN DASHBOARD MARKUPS ----------------- #
 
 def get_role_based_markup(user_id: int, session_count: int, total_users: int):
+    """কাস্টম ইমোজি আইডি সহ সুন্দর ইনলাইন বাটন প্যানেল"""
     buttons = [
         [
-            InlineKeyboardButton(f"{FALLBACK_SYMBOLS['broadcast']} Broadcast to Users ({total_users})", callback_data="btn_start_broadcast")
+            btn_custom(f"Broadcast to Users ({total_users})", "btn_start_broadcast", "broadcast")
         ],
         [
-            InlineKeyboardButton(f"{FALLBACK_SYMBOLS['folder']} Sessions ({session_count})", callback_data="btn_list_sessions"),
-            InlineKeyboardButton(f"{FALLBACK_SYMBOLS['trash']} Remove Session", callback_data="btn_del_menu")
+            btn_custom(f"Sessions ({session_count})", "btn_list_sessions", "folder"),
+            btn_custom("Remove Session", "btn_del_menu", "trash")
         ],
         [
-            InlineKeyboardButton(f"{FALLBACK_SYMBOLS['disk']} Storage Info", callback_data="btn_storage_info"),
-            InlineKeyboardButton(f"{FALLBACK_SYMBOLS['broom']} Clean Cache", callback_data="btn_clean_storage")
+            btn_custom("Storage Info", "btn_storage_info", "disk"),
+            btn_custom("Clean Cache", "btn_clean_storage", "broom")
         ]
     ]
 
     if user_id == OWNER_ID:
         buttons.append([
-            InlineKeyboardButton(f"{FALLBACK_SYMBOLS['users']} Manage Sub-Admins", callback_data="btn_manage_admins")
+            btn_custom("Manage Sub-Admins", "btn_manage_admins", "users")
         ])
 
-    buttons.append([InlineKeyboardButton(f"{FALLBACK_SYMBOLS['refresh']} Refresh Dashboard", callback_data="btn_refresh_panel")])
+    buttons.append([btn_custom("Refresh Dashboard", "btn_refresh_panel", "refresh")])
     return InlineKeyboardMarkup(buttons)
 
-@bot.on_message(filters.command(["admin", "panel"]) & filters.private)
+@bot.on_message(filters.command(["admin", "panel"]) & filters.private & filters.incoming)
 async def admin_panel_handler(_, message: Message):
     user_id = message.from_user.id
     if not is_any_admin(user_id):
@@ -643,8 +656,8 @@ async def callback_handler(_, query: CallbackQuery):
             f"└ {ce('folder')} <b>Temp Downloads:</b> <code>{human_bytes(st['dl_size'])}</code> ({st['dl_files']} files)"
         )
         markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"{FALLBACK_SYMBOLS['broom']} Clean Temp Files", callback_data="btn_clean_storage")],
-            [InlineKeyboardButton(f"{FALLBACK_SYMBOLS['back']} Back to Dashboard", callback_data="btn_refresh_panel")]
+            [btn_custom("Clean Temp Files", "btn_clean_storage", "broom")],
+            [btn_custom("Back to Dashboard", "btn_refresh_panel", "back")]
         ])
         await query.message.edit_text(text, reply_markup=markup)
         await query.answer()
@@ -677,8 +690,8 @@ async def callback_handler(_, query: CallbackQuery):
             f"└ {ce('folder')} <b>Temp Downloads:</b> <code>{human_bytes(st['dl_size'])}</code> ({st['dl_files']} files)"
         )
         markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"{FALLBACK_SYMBOLS['broom']} Clean Temp Files", callback_data="btn_clean_storage")],
-            [InlineKeyboardButton(f"{FALLBACK_SYMBOLS['back']} Back to Dashboard", callback_data="btn_refresh_panel")]
+            [btn_custom("Clean Temp Files", "btn_clean_storage", "broom")],
+            [btn_custom("Back to Dashboard", "btn_refresh_panel", "back")]
         ])
         await query.message.edit_text(text, reply_markup=markup)
 
@@ -693,7 +706,7 @@ async def callback_handler(_, query: CallbackQuery):
             for idx, s in enumerate(sessions, 1):
                 text += f"├ <b>{idx}.</b> <code>{s.get('account_name', 'Unknown')}</code>\n"
             text += "│\n└─ <i>Sessions handle private restricted downloads.</i>"
-        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{FALLBACK_SYMBOLS['back']} Back", callback_data="btn_refresh_panel")]]))
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[btn_custom("Back", "btn_refresh_panel", "back")]]))
         await query.answer()
 
     elif data == "btn_del_menu":
@@ -702,8 +715,8 @@ async def callback_handler(_, query: CallbackQuery):
         sessions = await asyncio.to_thread(sync_get_all_sessions)
         if not sessions:
             return await query.answer("No sessions to delete", show_alert=True)
-        buttons = [[InlineKeyboardButton(f"{FALLBACK_SYMBOLS['cross']} {s.get('account_name', 'Session')}", callback_data=f"del_{s['doc_id']}")] for s in sessions]
-        buttons.append([InlineKeyboardButton(f"{FALLBACK_SYMBOLS['back']} Back", callback_data="btn_refresh_panel")])
+        buttons = [[btn_custom(s.get('account_name', 'Session'), f"del_{s['doc_id']}", "cross")] for s in sessions]
+        buttons.append([btn_custom("Back", "btn_refresh_panel", "back")])
         await query.message.edit_text("<b>Select a userbot session to disconnect:</b>", reply_markup=InlineKeyboardMarkup(buttons))
         await query.answer()
 
@@ -721,9 +734,9 @@ async def callback_handler(_, query: CallbackQuery):
             return await query.answer("Owner Only", show_alert=True)
         buttons = []
         for aid in loaded_admins:
-            buttons.append([InlineKeyboardButton(f"{FALLBACK_SYMBOLS['shield']} Admin: {aid}", callback_data=f"viewadmin_{aid}")])
-        buttons.append([InlineKeyboardButton("➕ Add Sub-Admin", callback_data="btn_add_new_admin")])
-        buttons.append([InlineKeyboardButton(f"{FALLBACK_SYMBOLS['back']} Back", callback_data="btn_refresh_panel")])
+            buttons.append([btn_custom(f"Admin: {aid}", f"viewadmin_{aid}", "shield")])
+        buttons.append([btn_custom("Add Sub-Admin", "btn_add_new_admin", "user")])
+        buttons.append([btn_custom("Back", "btn_refresh_panel", "back")])
         await query.message.edit_text("<b>Manage Sub-Admins and Delegated Rights:</b>", reply_markup=InlineKeyboardMarkup(buttons))
         await query.answer()
 
@@ -745,8 +758,8 @@ async def callback_handler(_, query: CallbackQuery):
         markup = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"Manage Sessions: {s_tag}", callback_data=f"togperm_{target_uid}_sessions")],
             [InlineKeyboardButton(f"Send Broadcast: {b_tag}", callback_data=f"togperm_{target_uid}_broadcast")],
-            [InlineKeyboardButton(f"{FALLBACK_SYMBOLS['trash']} Remove Admin", callback_data=f"deladmin_{target_uid}")],
-            [InlineKeyboardButton(f"{FALLBACK_SYMBOLS['back']} Back", callback_data="btn_manage_admins")]
+            [btn_custom("Remove Admin", f"deladmin_{target_uid}", "trash")],
+            [btn_custom("Back", "btn_manage_admins", "back")]
         ])
         await query.message.edit_text(f"⚙️ <b>Permissions for Admin:</b> <code>{target_uid}</code>", reply_markup=markup)
         await query.answer()
@@ -768,8 +781,8 @@ async def callback_handler(_, query: CallbackQuery):
         markup = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"Manage Sessions: {s_tag}", callback_data=f"togperm_{target_uid}_sessions")],
             [InlineKeyboardButton(f"Send Broadcast: {b_tag}", callback_data=f"togperm_{target_uid}_broadcast")],
-            [InlineKeyboardButton(f"{FALLBACK_SYMBOLS['trash']} Remove Admin", callback_data=f"deladmin_{target_uid}")],
-            [InlineKeyboardButton(f"{FALLBACK_SYMBOLS['back']} Back", callback_data="btn_manage_admins")]
+            [btn_custom("Remove Admin", f"deladmin_{target_uid}", "trash")],
+            [btn_custom("Back", "btn_manage_admins", "back")]
         ])
         await query.message.edit_reply_markup(reply_markup=markup)
 
@@ -779,14 +792,14 @@ async def callback_handler(_, query: CallbackQuery):
         target_uid = int(data.split("_")[1])
         await asyncio.to_thread(sync_delete_admin, target_uid)
         await query.answer(f"Admin {target_uid} removed", show_alert=True)
-        buttons = [[InlineKeyboardButton(f"{FALLBACK_SYMBOLS['shield']} Admin: {aid}", callback_data=f"viewadmin_{aid}")] for aid in loaded_admins]
-        buttons.append([InlineKeyboardButton("➕ Add Sub-Admin", callback_data="btn_add_new_admin")])
-        buttons.append([InlineKeyboardButton(f"{FALLBACK_SYMBOLS['back']} Back", callback_data="btn_refresh_panel")])
+        buttons = [[btn_custom(f"Admin: {aid}", f"viewadmin_{aid}", "shield")] for aid in loaded_admins]
+        buttons.append([btn_custom("Add Sub-Admin", "btn_add_new_admin", "user")])
+        buttons.append([btn_custom("Back", "btn_refresh_panel", "back")])
         await query.message.edit_text("<b>Updated Admin List:</b>", reply_markup=InlineKeyboardMarkup(buttons))
 
 # ----------------- MESSAGE ROUTER & BROADCAST INTAKE ----------------- #
 
-@bot.on_message(filters.private & ~filters.command(["start", "help", "admin", "panel", "ping", "storage", "clean", "login", "cancel"]))
+@bot.on_message(filters.private & filters.incoming & ~filters.command(["start", "help", "admin", "panel", "ping", "storage", "clean", "login", "cancel"]))
 async def message_input_router(_, message: Message):
     user_id = message.from_user.id
     asyncio.to_thread(sync_register_user, user_id)
@@ -935,8 +948,8 @@ async def message_input_router(_, message: Message):
             await message.reply_text(
                 f"{ce('cross')} <b>Incorrect 2FA Password:</b> <code>{e}</code>",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"{FALLBACK_SYMBOLS['refresh']} Retry", callback_data="btn_retry_2fa"),
-                     InlineKeyboardButton(f"{FALLBACK_SYMBOLS['cross']} Cancel", callback_data="btn_cancel_login")]
+                    [btn_custom("Retry", "btn_retry_2fa", "refresh"),
+                     btn_custom("Cancel", "btn_cancel_login", "cross")]
                 ])
             )
         return
@@ -945,11 +958,14 @@ async def message_input_router(_, message: Message):
     p_match = re.search(r"t\.me/c/(\d+)/(\d+)", text_input)
     pub_match = re.search(r"t\.me/([a-zA-Z0-9_]+)/(\d+)", text_input)
 
+    # যদি লিঙ্ক না হয় এবং সাধারণ টেক্সট পাঠানো হয়, তাহলে বার বার স্প্যাম না করে মাত্র একবার সতর্কবার্তা দিবে
     if not (p_match or pub_match):
-        return await message.reply_text(
-            f"{ce('warning')} <b>Please send a valid Telegram post link.</b>",
-            reply_markup=get_bottom_keyboard(user_id)
-        )
+        if len(text_input) > 2 and ("t.me/" in text_input or "telegram.me/" in text_input):
+            return await message.reply_text(
+                f"{ce('warning')} <b>Invalid post link format.</b>\n<i>Example: <code>https://t.me/channel/123</code></i>",
+                reply_markup=get_bottom_keyboard(user_id)
+            )
+        return
 
     try:
         await message.react("🫡")
@@ -1215,7 +1231,7 @@ async def download_album_item(client, media_msg, idx, user_id, tracker: AlbumPro
 
 # ----------------- BASE COMMANDS ----------------- #
 
-@bot.on_message(filters.command("start") & filters.private)
+@bot.on_message(filters.command("start") & filters.private & filters.incoming)
 async def start_handler(_, message: Message):
     user_id = message.from_user.id
     asyncio.to_thread(sync_register_user, user_id)
@@ -1229,11 +1245,11 @@ async def start_handler(_, message: Message):
         reply_markup=get_bottom_keyboard(user_id)
     )
 
-@bot.on_message(filters.command("login") & filters.private)
+@bot.on_message(filters.command("login") & filters.private & filters.incoming)
 async def public_login_cmd(_, message: Message):
     user_id = message.from_user.id
     user_states[user_id] = "WAIT_PHONE"
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton(f"{FALLBACK_SYMBOLS['cross']} Cancel", callback_data="btn_cancel_login")]])
+    markup = InlineKeyboardMarkup([[btn_custom("Cancel", "btn_cancel_login", "cross")]])
     await message.reply_text(
         f"┌── {ce('phone')} <b>CONNECT YOUR TELEGRAM ACCOUNT</b>\n"
         f"│\n"
@@ -1244,20 +1260,20 @@ async def public_login_cmd(_, message: Message):
         reply_markup=markup
     )
 
-@bot.on_message(filters.command("cancel") & filters.private)
+@bot.on_message(filters.command("cancel") & filters.private & filters.incoming)
 async def cancel_handler(_, message: Message):
     user_id = message.from_user.id
     user_states.pop(user_id, None)
     login_clients.pop(user_id, None)
     await message.reply_text(f"{ce('check')} <b>Current operation cancelled.</b>", reply_markup=get_bottom_keyboard(user_id))
 
-@bot.on_message(filters.command("ping") & filters.private)
+@bot.on_message(filters.command("ping") & filters.private & filters.incoming)
 async def ping_handler(_, message: Message):
     t0 = time.time()
     msg = await message.reply_text(f"{ce('spark')} <i>Measuring round-trip latency...</i>")
     await msg.edit_text(f"{ce('rocket')} <b>Server Latency:</b> <code>{(time.time() - t0) * 1000:.1f}ms</code>")
 
-@bot.on_message(filters.command("storage") & filters.private)
+@bot.on_message(filters.command("storage") & filters.private & filters.incoming)
 async def storage_cmd_handler(_, message: Message):
     if not is_any_admin(message.from_user.id):
         return await message.reply_text(f"{ce('cross')} <b>Access Denied.</b>", reply_markup=get_bottom_keyboard(message.from_user.id))
@@ -1275,11 +1291,11 @@ async def storage_cmd_handler(_, message: Message):
         f"└ {ce('folder')} <b>Temp Downloads:</b> <code>{human_bytes(st['dl_size'])}</code> ({st['dl_files']} files)"
     )
     markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{FALLBACK_SYMBOLS['broom']} Clean Temp Files", callback_data="btn_clean_storage")]
+        [btn_custom("Clean Temp Files", "btn_clean_storage", "broom")]
     ])
     await message.reply_text(text, reply_markup=markup)
 
-@bot.on_message(filters.command("clean") & filters.private)
+@bot.on_message(filters.command("clean") & filters.private & filters.incoming)
 async def clean_cmd_handler(_, message: Message):
     if not is_any_admin(message.from_user.id):
         return await message.reply_text(f"{ce('cross')} <b>Access Denied.</b>", reply_markup=get_bottom_keyboard(message.from_user.id))
