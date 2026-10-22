@@ -7,6 +7,7 @@ import asyncio
 import logging
 import html
 import aiohttp
+from urllib.parse import quote
 from aiohttp import web
 from hydrogram import Client, filters
 from hydrogram.enums import ParseMode, ChatMemberStatus
@@ -97,6 +98,10 @@ UI_EMOJIS = {
     "wave": "5199885118214255386",        # 👋 Welcome
     "note": "5395444784611480792",        # 📝 Text Content
     "gear": "5341715473882955310",        # ⚙️ Permissions
+
+    # 🎁 Referral & 🎨 Colors — চাইলে নিজের Custom Emoji ID বসান (ফাঁকা = সাধারণ ইমোজি)
+    "gift": "",
+    "palette": "",
 }
 
 FALLBACK_SYMBOLS = {
@@ -110,7 +115,8 @@ FALLBACK_SYMBOLS = {
     "bar_fill": "▰", "bar_empty": "▱",
     "hourglass": "⏳", "chart": "📊", "box": "📦", "cabinet": "🗂️", "antenna": "📡",
     "chat": "💬", "mic": "🎙️", "bulb": "💡", "info": "ℹ️", "wave": "👋",
-    "note": "📝", "gear": "⚙️"
+    "note": "📝", "gear": "⚙️",
+    "gift": "🎁", "palette": "🎨"
 }
 
 def ce(name: str) -> str:
@@ -125,6 +131,7 @@ def ce(name: str) -> str:
 # ⌨️ BOTTOM (REPLY) KEYBOARD BUTTONS CONFIG
 # 👉 "emoji_id" = বাটনের Custom Emoji ID (ফাঁকা রাখলে আইকন ছাড়া দেখাবে)
 # 👉 "style" হবে: "primary" (নীল) | "success" (সবুজ) | "danger" (লাল) | "" (ডিফল্ট)
+# 👉 এখানের style হলো ডিফল্ট; Admin Panel > Button Colors থেকে বদলালে সেটাই প্রাধান্য পাবে
 # =====================================================================
 KB_BUTTONS = {
     "admin":     {"text": "Admin Panel",     "emoji_id": "6314576556278685829", "style": "primary", "legacy": FALLBACK_SYMBOLS["panel"]},
@@ -280,6 +287,7 @@ AUTO_DELETE_TIME = int(os.environ.get("AUTO_DELETE_TIME", "120"))  # Seconds
 
 DAILY_CREDITS = int(os.environ.get("DAILY_CREDITS", "30"))
 BOT_START = time.time()
+BOT_USERNAME = ""  # স্টার্টআপে অটো সেট হবে (রেফার লিংকের জন্য)
 
 # Force Subscribe: @username অথবা -100xxxxxxxxxx (বট ঐ চ্যানেলে Admin হতে হবে)
 _fs_raw = os.environ.get("FORCE_SUB_CHANNEL", "").strip()
@@ -303,6 +311,35 @@ if FIREBASE_KEY_RAW:
         logger.info("Firebase: Connected successfully.")
     except Exception as e:
         logger.error(f"Firebase Init Error: {e}")
+
+# =====================================================================
+# ⚙️ DYNAMIC SETTINGS (Admin Panel থেকে বদলানো যায়, Firebase এ সেভ হয়)
+#   ref_reward → প্রতিটা সফল রেফারে রেফারার কত ক্রেডিট পাবে (0 = বন্ধ)
+#   btn_styles → নিচের কিবোর্ডের বাটনের কালার ওভাররাইড
+# =====================================================================
+SETTINGS = {"ref_reward": 10, "btn_styles": {}}
+STYLE_CYCLE = ["primary", "success", "danger", ""]
+STYLE_DOT = {"primary": "🔵", "success": "🟢", "danger": "🔴", "": "⚪"}
+
+def sync_load_settings():
+    if not db:
+        return
+    try:
+        d = db.collection("bot_config").document("settings").get()
+        if d.exists:
+            data = d.to_dict()
+            SETTINGS["ref_reward"] = int(data.get("ref_reward", 10))
+            SETTINGS["btn_styles"] = dict(data.get("btn_styles", {}))
+    except Exception as e:
+        logger.error(f"Load settings error: {e}")
+
+def sync_save_settings():
+    if not db:
+        return
+    try:
+        db.collection("bot_config").document("settings").set(SETTINGS)
+    except Exception as e:
+        logger.error(f"Save settings error: {e}")
 
 bot = Client(
     "tg_vault_bot_session",
@@ -331,8 +368,9 @@ def _kb_btn(key: str) -> dict:
     out = {"text": b["text"]}
     if b.get("emoji_id"):
         out["icon_custom_emoji_id"] = str(b["emoji_id"])
-    if b.get("style"):
-        out["style"] = b["style"]
+    style = SETTINGS["btn_styles"].get(key, b.get("style", ""))
+    if style:
+        out["style"] = style
     return out
 
 def get_bottom_keyboard(user_id: int):
@@ -341,6 +379,24 @@ def get_bottom_keyboard(user_id: int):
     rows = [[_kb_btn(k) for k in row if k in KB_BUTTONS] for row in layout]
     rows = [r for r in rows if r]
     return RawMarkup({"keyboard": rows, "resize_keyboard": True})
+
+def colors_markup() -> RawMarkup:
+    """Admin Panel > Button Colors: প্রতিটা বাটন চাপলে কালার ঘুরবে (🔵→🟢→🔴→⚪)"""
+    rows = []
+    for k, b in KB_BUTTONS.items():
+        cur = SETTINGS["btn_styles"].get(k, b.get("style", ""))
+        rows.append([{
+            "text": f"{b['text']}: {STYLE_DOT.get(cur, '⚪')}",
+            "callback_data": f"colcyc_{k}",
+            "style": cur
+        }])
+    rows.append([
+        {"text": "Apply to my keyboard", "callback_data": "btn_col_apply", "style": "success"},
+        {"text": "Reset", "callback_data": "btn_col_reset", "style": "danger"},
+    ])
+    rows.append([{"text": "Back", "callback_data": "btn_refresh_panel",
+                  "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "primary"}])
+    return create_custom_inline_markup(rows)
 
 # ----------------- STORAGE & PROGRESS HELPERS ----------------- #
 
@@ -550,11 +606,14 @@ def sync_get_user(user_id: int) -> dict:
                 if d.exists:
                     found = True
                     data = d.to_dict()
-                    for k in ("credits", "last_reset", "banned", "joined", "downloads"):
+                    for k in ("credits", "last_reset", "banned", "joined", "downloads",
+                              "referred_by", "referrals", "fresh"):
                         if k in data:
                             u[k] = data[k]
             except Exception:
                 pass
+        if not found:
+            u["fresh"] = True  # একদম নতুন ইউজার (রেফার রিওয়ার্ডের জন্য)
         user_cache[user_id] = u
         needs_save = not found
     if u["last_reset"] != today_str():
@@ -585,6 +644,49 @@ def sync_register_user(user_id: int):
         }, merge=True)
     except Exception:
         pass
+
+# ----------------- REFERRAL SYSTEM ----------------- #
+
+def sync_reward_referrer(ref_id: int, reward: int):
+    """রেফারারকে ক্রেডিট দেয়। রেফারার না থাকলে বা ব্যান থাকলে None রিটার্ন করে"""
+    exists = ref_id in user_cache
+    if not exists and db:
+        try:
+            exists = db.collection("registered_users").document(str(ref_id)).get().exists
+        except Exception:
+            pass
+    if not exists:
+        return None
+    r = sync_get_user(ref_id)
+    if r.get("banned"):
+        return None
+    r["credits"] += reward
+    r["referrals"] = r.get("referrals", 0) + 1
+    sync_save_user(ref_id)
+    return r
+
+async def process_referral(message: Message, user_id: int):
+    """/start ref_<id> পেলে, শুধু একদম নতুন ইউজারের ক্ষেত্রে রেফারারকে ক্রেডিট দেয়"""
+    u = await asyncio.to_thread(sync_get_user, user_id)
+    if not u.get("fresh"):
+        return
+    u["fresh"] = False
+    payload = message.command[1] if len(message.command) > 1 else ""
+    ref_id = int(payload[4:]) if payload.startswith("ref_") and payload[4:].isdigit() else 0
+    reward = SETTINGS["ref_reward"]
+    if ref_id and ref_id != user_id and reward > 0 and not is_any_admin(user_id):
+        r = await asyncio.to_thread(sync_reward_referrer, ref_id, reward)
+        if r:
+            u["referred_by"] = ref_id
+            try:
+                await bot.send_message(
+                    ref_id,
+                    f"{ce('gift')} <b>New referral!</b> +<code>{reward}</code> credits. "
+                    f"Now: <code>{r['credits']}</code>"
+                )
+            except Exception:
+                pass
+    await asyncio.to_thread(sync_save_user, user_id)
 
 def sync_get_stats() -> dict:
     users = []
@@ -883,12 +985,14 @@ def build_profile(user_id: int, first_name: str):
         f"├ {ce('spark')} <b>Credits Today:</b> <code>{credits}</code>\n"
         f"├ {ce('timer')} <b>Reset In:</b> <code>{left // 3600}h {(left % 3600) // 60}m</code>\n"
         f"├ {ce('download')} <b>Total Downloads:</b> <code>{u.get('downloads', 0)}</code>\n"
+        f"├ {ce('gift')} <b>Referrals:</b> <code>{u.get('referrals', 0)}</code>\n"
         f"├ {ce('phone')} <b>Account:</b> <code>{acc}</code>\n"
         f"└ {ce('refresh')} <b>Active Transfers:</b> <code>{len(bases)}</code>"
     )
     rows = [[{"text": f"Cancel Download #{i}", "callback_data": f"cancel_{b}",
               "icon_custom_emoji_id": UI_EMOJIS["cross"], "style": "danger"}]
             for i, b in enumerate(bases, 1)]
+    rows.append([{"text": "Refer & Earn", "callback_data": "btn_refer", "style": "primary"}])
     rows.append([{"text": "Refresh", "callback_data": "btn_profile_refresh",
                   "icon_custom_emoji_id": UI_EMOJIS["refresh"], "style": "success"}])
     return text, create_custom_inline_markup(rows)
@@ -909,6 +1013,7 @@ def user_card_text(uid: int, u: dict) -> str:
         f"├ <b>ID:</b> <code>{uid}</code>\n"
         f"├ <b>Status:</b> {status}\n"
         f"├ {ce('spark')} <b>Credits:</b> <code>{u['credits']}</code>\n"
+        f"├ {ce('gift')} <b>Referrals:</b> <code>{u.get('referrals', 0)}</code>\n"
         f"└ {ce('download')} <b>Downloads:</b> <code>{u.get('downloads', 0)}</code>"
     )
 
@@ -1015,6 +1120,18 @@ def get_role_based_markup(user_id: int, session_count: int, total_users: int):
                 "icon_custom_emoji_id": UI_EMOJIS["user"],
                 "style": "primary"
             }
+        ],
+        [
+            {
+                "text": f"Referral Reward ({SETTINGS['ref_reward']})",
+                "callback_data": "btn_ref_reward",
+                "style": "primary"
+            },
+            {
+                "text": "Button Colors",
+                "callback_data": "btn_colors",
+                "style": "primary"
+            }
         ]
     ]
 
@@ -1075,6 +1192,7 @@ async def admin_panel_handler(_, message: Message):
         f"├ {ce('users')} <b>Total Registered:</b> <code>{len(all_users)} Users</code>\n"
         f"├ {ce('folder')} <b>Userbot Session Pool:</b> <code>{len(sessions)} Active</code>\n"
         f"├ {ce('timer')} <b>Auto-Delete Delay:</b> <code>{AUTO_DELETE_TIME}s</code>\n"
+        f"├ {ce('gift')} <b>Referral Reward:</b> <code>{SETTINGS['ref_reward']} credits</code>\n"
         f"│\n"
         f"└─ {ce('spark')} <i>Manage operations via the buttons below:</i>"
     )
@@ -1111,6 +1229,26 @@ async def callback_handler(_, query: CallbackQuery):
         await query.message.edit_text(text, reply_markup=markup)
         return await query.answer("Refreshed")
 
+    if data == "btn_refer":
+        u = await asyncio.to_thread(sync_get_user, user_id)
+        link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
+        text = (
+            f"┌── {ce('gift')} <b>REFER & EARN</b>\n"
+            f"│\n"
+            f"├ Earn <code>{SETTINGS['ref_reward']}</code> credits for every new user who joins with your link.\n"
+            f"├ <b>Your referrals:</b> <code>{u.get('referrals', 0)}</code>\n"
+            f"│\n"
+            f"└─ <b>Your link:</b>\n<code>{link}</code>"
+        )
+        markup = create_custom_inline_markup([
+            [{"text": "Share Link", "style": "success",
+              "url": f"https://t.me/share/url?url={quote(link)}&text={quote('Download Telegram media with this bot!')}"}],
+            [{"text": "Back", "callback_data": "btn_profile_refresh",
+              "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "primary"}]
+        ])
+        await query.message.edit_text(text, reply_markup=markup)
+        return await query.answer()
+
     if data.startswith("cancel_"):
         key = data[len("cancel_"):]  # task_<uid>_<time>
         parts = key.split("_")
@@ -1137,6 +1275,7 @@ async def callback_handler(_, query: CallbackQuery):
             f"├ {ce('users')} <b>Total Registered:</b> <code>{len(all_users)} Users</code>\n"
             f"├ {ce('folder')} <b>Userbot Session Pool:</b> <code>{len(sessions)} Active</code>\n"
             f"├ {ce('timer')} <b>Auto-Delete Delay:</b> <code>{AUTO_DELETE_TIME}s</code>\n"
+            f"├ {ce('gift')} <b>Referral Reward:</b> <code>{SETTINGS['ref_reward']} credits</code>\n"
             f"│\n"
             f"└─ {ce('spark')} <i>Dashboard Refreshed.</i>"
         )
@@ -1359,6 +1498,52 @@ async def callback_handler(_, query: CallbackQuery):
         raw_buttons.append([{"text": "Back", "callback_data": "btn_refresh_panel", "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "danger"}])
         await query.message.edit_text("<b>Updated Admin List:</b>", reply_markup=create_custom_inline_markup(raw_buttons))
 
+    # ---------- 🎨 Button Colors ---------- #
+    elif data == "btn_colors":
+        await query.message.edit_text(
+            f"{ce('palette')} <b>BUTTON COLORS</b>\n\n"
+            f"Tap a button to cycle its color:\n🔵 Blue → 🟢 Green → 🔴 Red → ⚪ Default\n\n"
+            f"<i>Users see the new colors when they next receive the keyboard (e.g. after /start).</i>",
+            reply_markup=colors_markup()
+        )
+        await query.answer()
+
+    elif data.startswith("colcyc_"):
+        key = data[len("colcyc_"):]
+        if key in KB_BUTTONS:
+            cur = SETTINGS["btn_styles"].get(key, KB_BUTTONS[key].get("style", ""))
+            nxt = STYLE_CYCLE[(STYLE_CYCLE.index(cur) + 1) % len(STYLE_CYCLE)] if cur in STYLE_CYCLE else "primary"
+            SETTINGS["btn_styles"][key] = nxt
+            await asyncio.to_thread(sync_save_settings)
+        await query.answer("Updated")
+        await query.message.edit_reply_markup(reply_markup=colors_markup())
+
+    elif data == "btn_col_reset":
+        SETTINGS["btn_styles"] = {}
+        await asyncio.to_thread(sync_save_settings)
+        await query.answer("Reset to default")
+        await query.message.edit_reply_markup(reply_markup=colors_markup())
+
+    elif data == "btn_col_apply":
+        await bot.send_message(
+            user_id,
+            f"{ce('check')} <b>Keyboard updated.</b>",
+            reply_markup=get_bottom_keyboard(user_id)
+        )
+        await query.answer()
+
+    # ---------- 🎁 Referral Reward ---------- #
+    elif data == "btn_ref_reward":
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        user_states[user_id] = "WAIT_REF_REWARD"
+        await query.message.reply_text(
+            f"{ce('gift')} <b>Send new referral reward</b> "
+            f"(current: <code>{SETTINGS['ref_reward']}</code>, <code>0</code> = off):",
+            reply_markup=ForceReply(selective=True)
+        )
+        await query.answer()
+
 # ----------------- MESSAGE ROUTER & BROADCAST INTAKE ----------------- #
 
 @bot.on_message(filters.private & filters.incoming & ~filters.command(["start", "help", "admin", "panel", "ping", "storage", "clean", "login", "cancel", "profile", "ban", "unban", "addcredit"]))
@@ -1404,6 +1589,7 @@ async def message_input_router(_, message: Message):
             f"├ <b>2.</b> Connect your Telegram account via <code>/login</code> for private channels.\n"
             f"├ <b>3.</b> Each download costs 1 credit ({DAILY_CREDITS} free credits daily).\n"
             f"├ <b>4.</b> Delivered files automatically purge in <code>{AUTO_DELETE_TIME}s</code>.\n"
+            f"├ <b>5.</b> Invite friends from <b>Profile → Refer & Earn</b> to get bonus credits.\n"
             f"│\n"
             f"└─ {ce('spark')} <i>Fast, persistent and cloud-integrated.</i>",
             reply_markup=get_bottom_keyboard(user_id)
@@ -1414,6 +1600,18 @@ async def message_input_router(_, message: Message):
         user_states.pop(user_id, None)
         asyncio.create_task(broadcast_to_all_users(message, user_id))
         return
+
+    # Referral Reward Amount (Admin Panel)
+    if state == "WAIT_REF_REWARD" and has_perm(user_id, "users"):
+        user_states.pop(user_id, None)
+        if not text_input.isdigit():
+            return await message.reply_text(f"{ce('cross')} <b>Send a valid number.</b>", reply_markup=get_bottom_keyboard(user_id))
+        SETTINGS["ref_reward"] = int(text_input)
+        await asyncio.to_thread(sync_save_settings)
+        return await message.reply_text(
+            f"{ce('check')} <b>Referral reward set to <code>{SETTINGS['ref_reward']}</code> credits.</b>",
+            reply_markup=get_bottom_keyboard(user_id)
+        )
 
     # Add Admin Prompt
     if state == "WAIT_ADMIN_ID" and user_id == OWNER_ID:
@@ -1565,7 +1763,8 @@ async def message_input_router(_, message: Message):
             return await message.reply_text(
                 f"┌── {ce('warning')} <b>NO CREDITS LEFT</b>\n"
                 f"│\n"
-                f"└─ Your daily <code>{DAILY_CREDITS}</code> credits are used up. They reset at 00:00 UTC.",
+                f"├ Your daily <code>{DAILY_CREDITS}</code> credits are used up. They reset at 00:00 UTC.\n"
+                f"└─ {ce('gift')} <i>Want more? Refer friends from Profile → Refer & Earn.</i>",
                 reply_markup=get_bottom_keyboard(user_id)
             )
 
@@ -1876,12 +2075,14 @@ async def download_album_item(client, media_msg, idx, user_id, tracker: AlbumPro
 async def start_handler(_, message: Message):
     user_id = message.from_user.id
     await asyncio.to_thread(sync_register_user, user_id)
+    await process_referral(message, user_id)
     await message.reply_text(
         f"┌── {ce('wave')} <b>WELCOME, {html.escape(message.from_user.first_name.upper())}!</b>\n"
         f"│\n"
         f"├ {ce('spark')} Send any public or private Telegram link to download media.\n"
         f"├ {ce('lock')} Use <code>/login</code> or the button below to link your account.\n"
         f"├ {ce('user')} Daily free credits: <code>{DAILY_CREDITS}</code> (check <code>/profile</code>)\n"
+        f"├ {ce('gift')} Invite friends from your profile to earn bonus credits.\n"
         f"│\n"
         f"└─ <i>All downloads will automatically self-delete after {AUTO_DELETE_TIME}s.</i>",
         reply_markup=get_bottom_keyboard(user_id)
@@ -2096,159 +2297,4 @@ HTML_DASHBOARD = """
                 fill.style.width = Math.min(100, d.percent) + '%';
                 if(d.percent > 85) fill.style.background = '#ef4444';
                 else if(d.percent > 65) fill.style.background = '#f59e0b';
-                else fill.style.background = '#10b981';
-
-                document.getElementById('stat-used').innerText = d.used;
-                document.getElementById('stat-free').innerText = d.free;
-                document.getElementById('stat-total').innerText = d.total;
-                document.getElementById('stat-temp').innerText = d.dl_size + ' (' + d.dl_files + ')';
-            } catch (e) {
-                console.error(e);
-            }
-        }
-
-        async function fetchTasks() {
-            try {
-                const res = await fetch('/api/tasks');
-                const tasks = await res.json();
-                const container = document.getElementById('tasks-container');
-
-                const keys = Object.keys(tasks);
-                if (keys.length === 0) {
-                    container.innerHTML = '<div class="empty-tasks">No active transfers running.</div>';
-                    return;
-                }
-
-                let html = '';
-                keys.forEach(k => {
-                    const t = tasks[k];
-                    const tagClass = t.type === 'download' ? 'tag-download' : (t.type === 'upload' ? 'tag-upload' : 'tag-album');
-                    const barColor = t.type === 'upload' ? '#8b5cf6' : '#38bdf8';
-                    html += `
-                        <div class="task-card">
-                            <div class="task-header">
-                                <span class="task-name">${t.name}</span>
-                                <span class="task-tag ${tagClass}">${t.type}</span>
-                            </div>
-                            <div class="progress-bar-bg">
-                                <div class="progress-bar-fill" style="width: ${t.percent}%; background: ${barColor};"></div>
-                            </div>
-                            <div class="task-meta">
-                                <span>${humanBytes(t.current)} / ${humanBytes(t.total)} (${t.percent}%)</span>
-                                <span>⚡ ${t.speed || '--'}</span>
-                            </div>
-                        </div>
-                    `;
-                });
-                container.innerHTML = html;
-            } catch (e) {
-                console.error(e);
-            }
-        }
-
-        async function cleanStorage() {
-            if(!confirm("Are you sure you want to delete all cached download files?")) return;
-            try {
-                const res = await fetch('/api/clean', { method: 'POST' });
-                const d = await res.json();
-                alert(d.message);
-                fetchStats();
-            } catch(e) {
-                alert("Failed to clean storage.");
-            }
-        }
-
-        fetchStats();
-        fetchTasks();
-        setInterval(fetchStats, 5000);
-        setInterval(fetchTasks, 1500);
-    </script>
-</body>
-</html>
-"""
-
-async def handle_root(_):
-    return web.Response(text=HTML_DASHBOARD, content_type="text/html")
-
-async def handle_stats(_):
-    st = get_storage_stats()
-    return web.json_response({
-        "percent": st["percent"],
-        "used": human_bytes(st["used"]),
-        "free": human_bytes(st["free"]),
-        "total": human_bytes(st["total"]),
-        "dl_size": human_bytes(st["dl_size"]),
-        "dl_files": st["dl_files"]
-    })
-
-async def handle_tasks(_):
-    now = time.time()
-    stale_keys = [k for k, v in active_tasks.items() if now - v.get("updated_at", 0) > 45]
-    for k in stale_keys:
-        active_tasks.pop(k, None)
-    return web.json_response(active_tasks)
-
-async def handle_web_clean(_):
-    deleted = 0
-    freed = 0
-    if os.path.exists(DOWNLOAD_DIR):
-        for filename in os.listdir(DOWNLOAD_DIR):
-            file_path = os.path.join(DOWNLOAD_DIR, filename)
-            try:
-                if os.path.isfile(file_path) or os.path.islink(file_path):
-                    freed += os.path.getsize(file_path)
-                    os.unlink(file_path)
-                    deleted += 1
-                elif os.path.isdir(file_path):
-                    shutil.rmtree(file_path)
-                    deleted += 1
-            except Exception:
-                pass
-    return web.json_response({
-        "status": "ok",
-        "message": f"Cleaned {deleted} files! Freed {human_bytes(freed)}"
-    })
-
-async def web_server():
-    app = web.Application()
-    app.router.add_get("/", handle_root)
-    app.router.add_get("/api/stats", handle_stats)
-    app.router.add_get("/api/tasks", handle_tasks)
-    app.router.add_post("/api/clean", handle_web_clean)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", PORT).start()
-    logger.info(f"Monitor Server active on port {PORT}")
-
-# ----------------- STARTUP ----------------- #
-
-async def main():
-    while True:
-        try:
-            await bot.start()
-            break
-        except FloodWait as e:
-            logger.warning(f"FloodWait hit! Waiting for {e.value} seconds...")
-            await asyncio.sleep(e.value + 2)
-
-    try:
-        await bot.set_bot_commands([
-            BotCommand("start", "Start the bot"),
-            BotCommand("profile", "My profile and credits"),
-            BotCommand("login", "Connect an account to userbot pool"),
-            BotCommand("admin", "Admin Control Panel"),
-            BotCommand("storage", "Check Disk Usage"),
-            BotCommand("clean", "Clean Temp Storage"),
-            BotCommand("ping", "Check latency"),
-            BotCommand("cancel", "Cancel current operation")
-        ])
-    except Exception:
-        pass
-    await init_session_pool()
-    await web_server()
-    logger.info("Bot Online with Profile, Credits, Force Sub and Custom Emojis!")
-    await asyncio.Event().wait()
-
-if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(main())
+                el
