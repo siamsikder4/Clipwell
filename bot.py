@@ -85,7 +85,7 @@ FALLBACK_SYMBOLS = {
 }
 
 def ce(name: str) -> str:
-    """টেলিগ্রাম কাস্টম ইমোজি রেন্ডারার"""
+    """টেলিগ্রাম কাস্টম ইমোজি রেন্ডারার (HTML ফরম্যাটে)"""
     eid = str(UI_EMOJIS.get(name, "")).strip()
     fallback = FALLBACK_SYMBOLS.get(name, "✨")
     if eid and eid.isdigit():
@@ -99,7 +99,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Environment Configuration with Safe Stripping
+# Environment Configuration with Safe Sanitization
 raw_api_id = os.environ.get("API_ID", "35039821").strip().replace('"', '').replace("'", "")
 API_ID = int(raw_api_id) if raw_api_id.isdigit() else 35039821
 
@@ -110,7 +110,7 @@ FIREBASE_KEY_RAW = os.environ.get("FIREBASE_KEY", "").strip()
 # Master Admin ID
 OWNER_ID = 8271633124
 PORT = int(os.environ.get("PORT", "8080"))
-AUTO_DELETE_TIME = int(os.environ.get("AUTO_DELETE_TIME", "120"))
+AUTO_DELETE_TIME = int(os.environ.get("AUTO_DELETE_TIME", "120"))  # Seconds
 
 # Local Storage Directory
 DOWNLOAD_DIR = "downloads"
@@ -157,7 +157,7 @@ active_tasks = {}
 # ----------------- ALWAYS PERSISTENT BOTTOM KEYBOARDS ----------------- #
 
 def get_bottom_keyboard(user_id: int):
-    """persistent=True রাখা হয়েছে যাতে লিঙ্ক পাঠালেও বাটন ফিক্সড থাকে"""
+    """persistent=True দিয়ে বাটন স্ক্রিনে স্থায়ী রাখা হয়েছে"""
     if is_any_admin(user_id):
         return ReplyKeyboardMarkup(
             [
@@ -434,31 +434,45 @@ def sync_delete_session(doc_id: str):
     except Exception:
         return False
 
+# ----------------- SAFER SESSION POOL INIT ----------------- #
+
 async def init_session_pool():
     global loaded_user_clients, loaded_admins
-    loaded_admins = await asyncio.to_thread(sync_get_all_admins)
+    try:
+        loaded_admins = await asyncio.to_thread(sync_get_all_admins)
+    except Exception as e:
+        logger.error(f"Admin load error: {e}")
+
     if not db:
         return
+
     sessions = await asyncio.to_thread(sync_get_all_sessions)
     new_pool = []
     for s in sessions:
+        s_str = s.get("session_string")
+        if not s_str:
+            continue
         try:
             cl = Client(
                 f"pool_{s['doc_id']}",
                 api_id=API_ID,
                 api_hash=API_HASH,
-                session_string=s['session_string'],
+                session_string=s_str,
                 in_memory=True
             )
-            await cl.start()
+            await asyncio.wait_for(cl.start(), timeout=10)
             new_pool.append((s['doc_id'], s.get('account_name', 'Userbot'), cl))
         except Exception as e:
-            logger.warning(f"Failed session {s['doc_id']}: {e}")
+            logger.warning(f"Failed session {s.get('doc_id')}: {e}")
+            if any(err in str(e) for err in ["AUTH_KEY_DUPLICATED", "USER_DEACTIVATED", "SESSION_REVOKED"]):
+                asyncio.to_thread(sync_delete_session, s["doc_id"])
+
     for _, _, old_cl in loaded_user_clients:
         try:
             await old_cl.stop()
         except Exception:
             pass
+
     loaded_user_clients = new_pool
     logger.info(f"Session Pool Ready: {len(loaded_user_clients)} active userbots.")
 
@@ -1007,7 +1021,6 @@ async def message_input_router(_, message: Message):
         except Exception:
             pass
 
-    # বাটন ধরে রাখার জন্য স্ট্যাটাস মেসেজেও get_bottom_keyboard পাস করা হলো
     status = await message.reply_text(f"{ce('spark')} <b>Preparing transfer...</b>", reply_markup=get_bottom_keyboard(user_id))
     task_id = f"task_{message.from_user.id}_{int(time.time())}"
 
@@ -1532,7 +1545,7 @@ async def web_server():
 async def main():
     await bot.start()
     try:
-        # মেনু অপশনে শুধুমাত্র /start কমান্ড রাখা হলো
+        # শুধুমাত্র /start কমান্ড রাখা হলো
         await bot.set_bot_commands([
             BotCommand("start", "Start the bot")
         ])
