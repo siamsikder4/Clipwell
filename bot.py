@@ -72,22 +72,24 @@ UI_EMOJIS = {
 }
 
 FALLBACK_SYMBOLS = {
-    "spark": "6052879414339837562", "rocket": "6260478625687018336", "online": "6235405113419109550", "offline": "6235612354181080084",
-    "refresh": "6053323501073341449", "cross": "6052869226677410910", "check": "6336628528989083013", "warning": "6206174450765796040",
-    "back": "6246844312135407824", "panel": "6084757039567868626", "crown": "6338946058982267602", "shield": "6339280615459789282",
-    "user": "👤", "users": "👥", "lock": "6052869252447215120", "phone": "📱",
-    "disk": "💾", "broom": "🧹", "folder": "6053193097276298985", "trash": "6053400522721859262",
-    "broadcast": "6053120894581086446", "timer": "6336809269802833182", "target": "6052991826518873591", "media": "6052909083973918987",
-    "pencil": "6206378324273403309", "list": "6206366384264320881", "download": "6053117952528493140", "upload": "6052973985224728368",
-    "bar_fill": "▰", "bar_empty": "▱"
+    "spark": "⚡", "rocket": "🚀", "online": "🟢", "offline": "🔴",
+    "refresh": "🔄", "cross": "❌", "check": "✅", "warning": "⚠️",
+    "back": "🔙", "panel": "🎛️", "crown": "👑", "shield": "🛡️",
+    "user": "👤", "users": "👥", "lock": "🔐", "phone": "📱",
+    "disk": "💾", "broom": "🧹", "folder": "📂", "trash": "🗑️",
+    "broadcast": "📢", "timer": "⏱️", "target": "🎯", "media": "🖼️",
+    "pencil": "✏️", "list": "📋", "download": "📥", "upload": "📤",
+    "bar_fill": "▰", "bar_empty": "▱", "reaction": "🫡",
+    "voice": "🎙️", "chat": "💬", "video": "📹", "info": "ℹ️",
+    "hand": "👋", "chart": "📊", "pin": "📌", "bulb": "💡", "box": "📦"
 }
 
 def ce(name: str) -> str:
-    """Renders Telegram Custom Emoji tag in HTML mode."""
-    emoji_id = UI_EMOJIS.get(name, "")
+    """টেলিগ্রাম কাস্টম ইমোজি রেন্ডারার"""
+    eid = str(UI_EMOJIS.get(name, "")).strip()
     fallback = FALLBACK_SYMBOLS.get(name, "✨")
-    if emoji_id:
-        return f'<emoji id="{emoji_id}">{fallback}</emoji>'
+    if eid and eid.isdigit():
+        return f'<emoji id="{eid}">{fallback}</emoji>'
     return fallback
 
 # Logging Configuration
@@ -97,27 +99,36 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Environment Configuration
-API_ID = int(os.environ.get("API_ID", "35039821"))
-API_HASH = os.environ.get("API_HASH", "77df805f1700eeefec861de6c93ee2ae").strip()
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8952918726:AAGnKZm-S8hmBaWzltPfrdWRcyVHGVx44d0").strip()
+# Environment Configuration with Safe Stripping
+raw_api_id = os.environ.get("API_ID", "35039821").strip().replace('"', '').replace("'", "")
+API_ID = int(raw_api_id) if raw_api_id.isdigit() else 35039821
+
+API_HASH = os.environ.get("API_HASH", "77df805f1700eeefec861de6c93ee2ae").strip().replace('"', '').replace("'", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8952918726:AAGnKZm-S8hmBaWzltPfrdWRcyVHGVx44d0").strip().replace('"', '').replace("'", "")
 FIREBASE_KEY_RAW = os.environ.get("FIREBASE_KEY", "").strip()
 
+# Master Admin ID
 OWNER_ID = 8271633124
 PORT = int(os.environ.get("PORT", "8080"))
-AUTO_DELETE_TIME = int(os.environ.get("AUTO_DELETE_TIME", "120"))  # Seconds
+AUTO_DELETE_TIME = int(os.environ.get("AUTO_DELETE_TIME", "120"))
 
 # Local Storage Directory
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# Firebase Setup
+# Firebase Safe Init
 db = None
 if FIREBASE_KEY_RAW:
     try:
         import firebase_admin
         from firebase_admin import credentials, firestore
-        cred = credentials.Certificate(json.loads(FIREBASE_KEY_RAW))
+        clean_key = FIREBASE_KEY_RAW.strip()
+        if clean_key.startswith("'") and clean_key.endswith("'"):
+            clean_key = clean_key[1:-1]
+        elif clean_key.startswith('"') and clean_key.endswith('"'):
+            clean_key = clean_key[1:-1]
+        key_dict = json.loads(clean_key)
+        cred = credentials.Certificate(key_dict)
         firebase_admin.initialize_app(cred)
         db = firestore.client()
         logger.info("Firebase: Connected successfully.")
@@ -143,25 +154,28 @@ mem_bot_users = set()
 # Live Web UI Progress Tracking Pool
 active_tasks = {}
 
-# ----------------- BOTTOM KEYBOARD BUILDER ----------------- #
+# ----------------- ALWAYS PERSISTENT BOTTOM KEYBOARDS ----------------- #
 
 def get_bottom_keyboard(user_id: int):
-    """Persistent bottom keyboard for users and admins."""
+    """persistent=True রাখা হয়েছে যাতে লিঙ্ক পাঠালেও বাটন ফিক্সড থাকে"""
     if is_any_admin(user_id):
         return ReplyKeyboardMarkup(
             [
-                [KeyboardButton(f"{FALLBACK_SYMBOLS['panel']} Admin Panel"), KeyboardButton(f"{FALLBACK_SYMBOLS['broadcast']} Broadcast")],
-                [KeyboardButton(f"{FALLBACK_SYMBOLS['disk']} Storage"), KeyboardButton(f"{FALLBACK_SYMBOLS['broom']} Clean Cache")],
-                [KeyboardButton(f"{FALLBACK_SYMBOLS['phone']} Connect Account"), KeyboardButton(f"{FALLBACK_SYMBOLS['rocket']} Latency")]
+                [KeyboardButton(f"{FALLBACK_SYMBOLS['broadcast']} Broadcast to Users")],
+                [KeyboardButton(f"{FALLBACK_SYMBOLS['panel']} Admin Panel"), KeyboardButton(f"{FALLBACK_SYMBOLS['disk']} Storage")],
+                [KeyboardButton(f"{FALLBACK_SYMBOLS['broom']} Clean Storage"), KeyboardButton(f"{FALLBACK_SYMBOLS['phone']} Connect Account")],
+                [KeyboardButton(f"{FALLBACK_SYMBOLS['rocket']} Latency"), KeyboardButton(f"{FALLBACK_SYMBOLS['info']} How To Use")]
             ],
-            resize_keyboard=True
+            resize_keyboard=True,
+            persistent=True
         )
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(f"{FALLBACK_SYMBOLS['phone']} Connect Account"), KeyboardButton(f"{FALLBACK_SYMBOLS['rocket']} Latency")],
-            [KeyboardButton("ℹ️ How To Use")]
+            [KeyboardButton(f"{FALLBACK_SYMBOLS['phone']} Connect Account")],
+            [KeyboardButton(f"{FALLBACK_SYMBOLS['rocket']} Latency"), KeyboardButton(f"{FALLBACK_SYMBOLS['info']} How To Use")]
         ],
-        resize_keyboard=True
+        resize_keyboard=True,
+        persistent=True
     )
 
 # ----------------- STORAGE & PROGRESS HELPERS ----------------- #
@@ -465,13 +479,14 @@ async def silent_auto_delete(chat_id: int, message_ids: list, delay: int = AUTO_
 async def broadcast_to_all_users(source_message: Message, admin_id: int):
     all_users = await asyncio.to_thread(sync_get_all_bot_users)
     if not all_users:
-        return await bot.send_message(admin_id, f"{ce('cross')} <b>No registered users found.</b>")
+        return await bot.send_message(admin_id, f"{ce('cross')} <b>No registered users found.</b>", reply_markup=get_bottom_keyboard(admin_id))
 
     status_msg = await bot.send_message(
         admin_id,
         f"{ce('broadcast')} <b>Broadcasting started...</b>\n"
-        f"🎯 Target Audience: <code>{len(all_users)}</code> users\n"
-        f"⏳ Dispatching payload..."
+        f"{ce('target')} Target Audience: <code>{len(all_users)}</code> users\n"
+        f"{ce('timer')} Dispatching payload...",
+        reply_markup=get_bottom_keyboard(admin_id)
     )
 
     success, blocked, failed = 0, 0, 0
@@ -496,7 +511,7 @@ async def broadcast_to_all_users(source_message: Message, admin_id: int):
             try:
                 await status_msg.edit_text(
                     f"{ce('broadcast')} <b>Broadcast in progress...</b>\n\n"
-                    f"📊 <b>Progress:</b> <code>{idx}/{len(all_users)}</code>\n"
+                    f"{ce('chart')} <b>Progress:</b> <code>{idx}/{len(all_users)}</code>\n"
                     f"{ce('check')} <b>Delivered:</b> <code>{success}</code>\n"
                     f"{ce('offline')} <b>Blocked:</b> <code>{blocked}</code>\n"
                     f"{ce('cross')} <b>Failed:</b> <code>{failed}</code>"
@@ -507,7 +522,7 @@ async def broadcast_to_all_users(source_message: Message, admin_id: int):
 
     await status_msg.edit_text(
         f"┏━━━━━━ {ce('check')} <b>BROADCAST REPORT</b> ━━━━━━┓\n\n"
-        f"  🎯 <b>Total Users:</b> <code>{len(all_users)}</code>\n"
+        f"  {ce('target')} <b>Total Users:</b> <code>{len(all_users)}</code>\n"
         f"  {ce('online')} <b>Delivered:</b> <code>{success}</code>\n"
         f"  {ce('offline')} <b>Blocked:</b> <code>{blocked}</code>\n"
         f"  {ce('cross')} <b>Failed:</b> <code>{failed}</code>\n\n"
@@ -543,7 +558,7 @@ def get_role_based_markup(user_id: int, session_count: int, total_users: int):
 async def admin_panel_handler(_, message: Message):
     user_id = message.from_user.id
     if not is_any_admin(user_id):
-        return await message.reply_text(f"{ce('cross')} <b>Access Denied.</b>")
+        return await message.reply_text(f"{ce('cross')} <b>Access Denied.</b>", reply_markup=get_bottom_keyboard(user_id))
 
     sessions = await asyncio.to_thread(sync_get_all_sessions)
     all_users = await asyncio.to_thread(sync_get_all_bot_users)
@@ -554,7 +569,7 @@ async def admin_panel_handler(_, message: Message):
     text = (
         f"┏━━━━━━ {ce('panel')} <b>ADMIN CONTROL PANEL</b> ━━━━━━┓\n\n"
         f"  {ce('user')} <b>Account Role:</b> {role_str}\n"
-        f"  📊 <b>Database:</b> {db_str}\n"
+        f"  {ce('chart')} <b>Database:</b> {db_str}\n"
         f"  {ce('users')} <b>Total Users:</b> <code>{len(all_users)}</code>\n"
         f"  {ce('folder')} <b>Active Userbots:</b> <code>{len(sessions)}</code>\n"
         f"  {ce('timer')} <b>Auto-Delete Delay:</b> <code>{AUTO_DELETE_TIME}s</code>\n\n"
@@ -569,7 +584,6 @@ async def callback_handler(_, query: CallbackQuery):
     user_id = query.from_user.id
     data = query.data
 
-    # User self-service login actions
     if data == "btn_cancel_login":
         session_data = login_clients.pop(user_id, None)
         user_states.pop(user_id, None)
@@ -583,9 +597,8 @@ async def callback_handler(_, query: CallbackQuery):
         await query.message.reply_text(f"{ce('lock')} Please send your 2FA password:", reply_markup=ForceReply(selective=True))
         return await query.answer()
 
-    # Admin access verification
     if not is_any_admin(user_id):
-        return await query.answer(f"Access Denied", show_alert=True)
+        return await query.answer("Access Denied", show_alert=True)
 
     if data == "btn_refresh_panel":
         sessions = await asyncio.to_thread(sync_get_all_sessions)
@@ -596,7 +609,7 @@ async def callback_handler(_, query: CallbackQuery):
         text = (
             f"┏━━━━━━ {ce('panel')} <b>ADMIN CONTROL PANEL</b> ━━━━━━┓\n\n"
             f"  {ce('user')} <b>Account Role:</b> {role_str}\n"
-            f"  📊 <b>Database:</b> {db_str}\n"
+            f"  {ce('chart')} <b>Database:</b> {db_str}\n"
             f"  {ce('users')} <b>Total Users:</b> <code>{len(all_users)}</code>\n"
             f"  {ce('folder')} <b>Active Userbots:</b> <code>{len(sessions)}</code>\n"
             f"  {ce('timer')} <b>Auto-Delete Delay:</b> <code>{AUTO_DELETE_TIME}s</code>\n\n"
@@ -611,9 +624,9 @@ async def callback_handler(_, query: CallbackQuery):
         user_states[user_id] = "WAIT_BROADCAST_PAYLOAD"
         await query.message.reply_text(
             f"{ce('broadcast')} <b>Send the message or media to broadcast:</b>\n\n"
-            f"• 💬 Text Message\n"
-            f"• 🎙️ Voice / Audio\n"
-            f"• {ce('media')} Photo / Video with Caption\n\n"
+            f"• {ce('chat')} Text Message\n"
+            f"• {ce('voice')} Voice / Audio Note\n"
+            f"• {ce('media')} Photo / {ce('video')} Video with Caption\n\n"
             f"<i>Send <code>/cancel</code> to abort.</i>",
             reply_markup=ForceReply(selective=True)
         )
@@ -625,10 +638,10 @@ async def callback_handler(_, query: CallbackQuery):
         bar = ce("bar_fill") * filled + ce("bar_empty") * (10 - filled)
         text = (
             f"┏━━━━━━ {ce('disk')} <b>DISK STORAGE INFO</b> ━━━━━━┓\n\n"
-            f"  📊 <b>Disk Full:</b> ⌠{bar}⌡ <code>{st['percent']:.1f}%</code>\n"
-            f"  📦 <b>Used Space:</b> <code>{human_bytes(st['used'])}</code>\n"
+            f"  {ce('chart')} <b>Disk Full:</b> ⌠{bar}⌡ <code>{st['percent']:.1f}%</code>\n"
+            f"  {ce('box')} <b>Used Space:</b> <code>{human_bytes(st['used'])}</code>\n"
             f"  {ce('online')} <b>Free Space:</b> <code>{human_bytes(st['free'])}</code>\n"
-            f"  🗂️ <b>Total Space:</b> <code>{human_bytes(st['total'])}</code>\n\n"
+            f"  {ce('disk')} <b>Total Space:</b> <code>{human_bytes(st['total'])}</code>\n\n"
             f"  {ce('folder')} <b>Temp Downloads:</b> <code>{human_bytes(st['dl_size'])}</code> ({st['dl_files']} files)\n"
             f"┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
         )
@@ -658,10 +671,10 @@ async def callback_handler(_, query: CallbackQuery):
         bar = ce("bar_fill") * filled + ce("bar_empty") * (10 - filled)
         text = (
             f"┏━━━━━━ {ce('disk')} <b>DISK STORAGE INFO</b> ━━━━━━┓\n\n"
-            f"  📊 <b>Disk Full:</b> ⌠{bar}⌡ <code>{st['percent']:.1f}%</code>\n"
-            f"  📦 <b>Used Space:</b> <code>{human_bytes(st['used'])}</code>\n"
+            f"  {ce('chart')} <b>Disk Full:</b> ⌠{bar}⌡ <code>{st['percent']:.1f}%</code>\n"
+            f"  {ce('box')} <b>Used Space:</b> <code>{human_bytes(st['used'])}</code>\n"
             f"  {ce('online')} <b>Free Space:</b> <code>{human_bytes(st['free'])}</code>\n"
-            f"  🗂️ <b>Total Space:</b> <code>{human_bytes(st['total'])}</code>\n\n"
+            f"  {ce('disk')} <b>Total Space:</b> <code>{human_bytes(st['total'])}</code>\n\n"
             f"  {ce('folder')} <b>Temp Downloads:</b> <code>{human_bytes(st['dl_size'])}</code> ({st['dl_files']} files)\n"
             f"┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
         )
@@ -780,32 +793,37 @@ async def message_input_router(_, message: Message):
     state = user_states.get(user_id)
     text_input = (message.text or message.caption or "").strip()
 
-    # Reply Keyboard Router
-    if text_input == f"{FALLBACK_SYMBOLS['phone']} Connect Account":
+    if "Connect Account" in text_input:
         return await public_login_cmd(_, message)
-    elif text_input == f"{FALLBACK_SYMBOLS['rocket']} Latency":
+
+    elif "Check Latency" in text_input or "Latency" in text_input:
         return await ping_handler(_, message)
-    elif text_input == f"{FALLBACK_SYMBOLS['panel']} Admin Panel":
+
+    elif "Admin Panel" in text_input:
         return await admin_panel_handler(_, message)
-    elif text_input == f"{FALLBACK_SYMBOLS['broadcast']} Broadcast":
+
+    elif "Broadcast to Users" in text_input or "Broadcast" in text_input:
         if not has_perm(user_id, "broadcast"):
-            return await message.reply_text(f"{ce('cross')} <b>Permission Denied.</b>")
+            return await message.reply_text(f"{ce('cross')} <b>Permission Denied.</b>", reply_markup=get_bottom_keyboard(user_id))
         user_states[user_id] = "WAIT_BROADCAST_PAYLOAD"
         return await message.reply_text(
             f"{ce('broadcast')} <b>Forward or send your Broadcast payload now:</b>\n\n"
-            f"• 💬 Text Message\n"
-            f"• 🎙️ Voice Note / Audio\n"
-            f"• {ce('media')} Photo / Video\n\n"
+            f"• {ce('chat')} Text Message\n"
+            f"• {ce('voice')} Voice Note / Audio\n"
+            f"• {ce('media')} Photo / {ce('video')} Video with Caption\n\n"
             f"<i>Send <code>/cancel</code> to abort.</i>",
             reply_markup=ForceReply(selective=True)
         )
-    elif text_input == f"{FALLBACK_SYMBOLS['disk']} Storage":
+
+    elif "Disk Storage" in text_input or "Storage" in text_input:
         return await storage_cmd_handler(_, message)
-    elif text_input == f"{FALLBACK_SYMBOLS['broom']} Clean Cache":
+
+    elif "Clean Storage" in text_input or "Clean Cache" in text_input:
         return await clean_cmd_handler(_, message)
-    elif text_input == "ℹ️ How To Use":
+
+    elif "How To Use" in text_input:
         return await message.reply_text(
-            f"┏━━━━━━ ℹ️ <b>HOW TO USE</b> ━━━━━━┓\n\n"
+            f"┏━━━━━━ {ce('info')} <b>HOW TO USE</b> ━━━━━━┓\n\n"
             f"  1. Send any public or private Telegram link to download media.\n"
             f"  2. Connect your account via <code>/login</code> to access restricted private channels.\n"
             f"  3. Delivered media automatically self-deletes in <code>{AUTO_DELETE_TIME}s</code>.\n\n"
@@ -813,25 +831,22 @@ async def message_input_router(_, message: Message):
             reply_markup=get_bottom_keyboard(user_id)
         )
 
-    # Broadcast Payload Receiver
     if state == "WAIT_BROADCAST_PAYLOAD" and has_perm(user_id, "broadcast"):
         user_states.pop(user_id, None)
         asyncio.create_task(broadcast_to_all_users(message, user_id))
         return
 
-    # Add Admin Prompt
     if state == "WAIT_ADMIN_ID" and user_id == OWNER_ID:
         user_states.pop(user_id, None)
         if not text_input.isdigit():
-            return await message.reply_text(f"{ce('cross')} <b>User ID must contain only digits.</b>")
+            return await message.reply_text(f"{ce('cross')} <b>User ID must contain only digits.</b>", reply_markup=get_bottom_keyboard(user_id))
         t_id = int(text_input)
         await asyncio.to_thread(sync_add_admin, t_id)
-        return await message.reply_text(f"{ce('check')} <b>Admin <code>{t_id}</code> added successfully!</b>")
+        return await message.reply_text(f"{ce('check')} <b>Admin <code>{t_id}</code> added successfully!</b>", reply_markup=get_bottom_keyboard(user_id))
 
-    # Multi-step Interactive Login Flow
     if state == "WAIT_PHONE":
         user_states.pop(user_id, None)
-        phone = text_input.replace(" ", "")
+        phone = re.sub(r"[^\d+]", "", text_input)
         cl = Client(f"log_{int(time.time())}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
         try:
             await cl.connect()
@@ -840,20 +855,22 @@ async def message_input_router(_, message: Message):
             user_states[user_id] = "WAIT_OTP"
             await message.reply_text(
                 f"{ce('phone')} <b>Telegram Verification Code</b>\n\n"
-                f"Enter the OTP received from Telegram.\n"
-                f"💡 <i>Tip: Add spaces between digits (e.g. <code>1 2 3 4 5</code>)</i>:",
+                f"Enter the OTP received from Telegram.\n\n"
+                f"{ce('warning')} <b>Important:</b> To prevent Telegram from auto-expiring the code, "
+                f"separate digits with spaces or dashes (e.g. <code>1-2-3-4-5</code>):",
                 reply_markup=ForceReply(selective=True)
             )
         except Exception as e:
-            await message.reply_text(f"{ce('cross')} Failed to send code: <code>{e}</code>")
+            await message.reply_text(f"{ce('cross')} Failed to send code: <code>{e}</code>", reply_markup=get_bottom_keyboard(user_id))
         return
 
     elif state == "WAIT_OTP":
-        otp = text_input.replace(" ", "").replace("-", "")
+        otp = "".join(re.findall(r"\d", text_input))
         data = login_clients.get(user_id)
         if not data:
             user_states.pop(user_id, None)
-            return
+            return await message.reply_text(f"{ce('cross')} Session expired. Please send /login again.", reply_markup=get_bottom_keyboard(user_id))
+
         cl = data["cl"]
         try:
             await cl.sign_in(data["phone"], data["hash"], otp)
@@ -879,10 +896,16 @@ async def message_input_router(_, message: Message):
                 reply_markup=ForceReply(selective=True)
             )
         except Exception as e:
+            err = str(e)
+            if "PHONE_CODE_EXPIRED" in err:
+                err_msg = "The code expired or Telegram blocked it. Please request a new code via /login and format it with dashes (e.g. 1-2-3-4-5)."
+            else:
+                err_msg = err
+
             await cl.disconnect()
             login_clients.pop(user_id, None)
             user_states.pop(user_id, None)
-            await message.reply_text(f"{ce('cross')} Login failed: <code>{e}</code>")
+            await message.reply_text(f"{ce('cross')} <b>Login failed:</b> <code>{err_msg}</code>", reply_markup=get_bottom_keyboard(user_id))
         return
 
     elif state == "WAIT_2FA":
@@ -925,7 +948,7 @@ async def message_input_router(_, message: Message):
         return
 
     try:
-        await message.react("🫡")
+        await message.react(FALLBACK_SYMBOLS["reaction"])
     except Exception:
         pass
 
@@ -949,7 +972,7 @@ async def message_input_router(_, message: Message):
         await init_session_pool()
 
     if not loaded_user_clients:
-        return await message.reply_text(f"{ce('cross')} No active sessions found. Connect an account using <code>/login</code>.")
+        return await message.reply_text(f"{ce('cross')} No active sessions found. Connect an account using <code>/login</code>.", reply_markup=get_bottom_keyboard(user_id))
 
     target_msg, working_client = None, None
     for _, _, u_client in loaded_user_clients:
@@ -962,7 +985,7 @@ async def message_input_router(_, message: Message):
             continue
 
     if not target_msg or target_msg.empty:
-        return await message.reply_text(f"{ce('cross')} Post unavailable or channel not joined by any active account.")
+        return await message.reply_text(f"{ce('cross')} Post unavailable or channel not joined by any active account.", reply_markup=get_bottom_keyboard(user_id))
 
     # Direct Forward Bypass
     try:
@@ -984,7 +1007,8 @@ async def message_input_router(_, message: Message):
         except Exception:
             pass
 
-    status = await message.reply_text(f"{ce('spark')} <b>Preparing transfer...</b>")
+    # বাটন ধরে রাখার জন্য স্ট্যাটাস মেসেজেও get_bottom_keyboard পাস করা হলো
+    status = await message.reply_text(f"{ce('spark')} <b>Preparing transfer...</b>", reply_markup=get_bottom_keyboard(user_id))
     task_id = f"task_{message.from_user.id}_{int(time.time())}"
 
     # Album Processing
@@ -1187,7 +1211,7 @@ async def start_handler(_, message: Message):
     user_id = message.from_user.id
     asyncio.to_thread(sync_register_user, user_id)
     await message.reply_text(
-        f"👋 <b>Welcome, {message.from_user.first_name}!</b>\n\n"
+        f"{ce('hand')} <b>Welcome, {message.from_user.first_name}!</b>\n\n"
         f"{ce('spark')} Send any public or private Telegram link to download media.\n\n"
         f"{ce('lock')} Use <code>/login</code> or the button below to link your account.",
         reply_markup=get_bottom_keyboard(user_id)
@@ -1221,16 +1245,16 @@ async def ping_handler(_, message: Message):
 @bot.on_message(filters.command("storage") & filters.private)
 async def storage_cmd_handler(_, message: Message):
     if not is_any_admin(message.from_user.id):
-        return await message.reply_text(f"{ce('cross')} Access Denied.")
+        return await message.reply_text(f"{ce('cross')} Access Denied.", reply_markup=get_bottom_keyboard(message.from_user.id))
     st = get_storage_stats()
     filled = int(st["percent"] / 10)
     bar = ce("bar_fill") * filled + ce("bar_empty") * (10 - filled)
     text = (
         f"┏━━━━━━ {ce('disk')} <b>DISK STORAGE INFO</b> ━━━━━━┓\n\n"
-        f"  📊 <b>Disk Full:</b> ⌠{bar}⌡ <code>{st['percent']:.1f}%</code>\n"
-        f"  📦 <b>Used Space:</b> <code>{human_bytes(st['used'])}</code>\n"
+        f"  {ce('chart')} <b>Disk Full:</b> ⌠{bar}⌡ <code>{st['percent']:.1f}%</code>\n"
+        f"  {ce('box')} <b>Used Space:</b> <code>{human_bytes(st['used'])}</code>\n"
         f"  {ce('online')} <b>Free Space:</b> <code>{human_bytes(st['free'])}</code>\n"
-        f"  🗂️ <b>Total Space:</b> <code>{human_bytes(st['total'])}</code>\n\n"
+        f"  {ce('disk')} <b>Total Space:</b> <code>{human_bytes(st['total'])}</code>\n\n"
         f"  {ce('folder')} <b>Temp Downloads:</b> <code>{human_bytes(st['dl_size'])}</code> ({st['dl_files']} files)\n"
         f"┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
     )
@@ -1508,20 +1532,15 @@ async def web_server():
 async def main():
     await bot.start()
     try:
+        # মেনু অপশনে শুধুমাত্র /start কমান্ড রাখা হলো
         await bot.set_bot_commands([
-            BotCommand("start", "Start the bot"),
-            BotCommand("login", "Connect an account to userbot pool"),
-            BotCommand("admin", "Admin Control Panel"),
-            BotCommand("storage", "Check Disk Usage"),
-            BotCommand("clean", "Clean Temp Storage"),
-            BotCommand("ping", "Check latency"),
-            BotCommand("cancel", "Cancel current operation")
+            BotCommand("start", "Start the bot")
         ])
     except Exception:
         pass
     await init_session_pool()
     await web_server()
-    logger.info("Bot Online with User-Facing Self-Login and Custom Emojis!")
+    logger.info("Bot Online with Persistent Bottom Keyboard and /start menu!")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
