@@ -85,18 +85,18 @@ UI_EMOJIS = {
 
     # 🆕 নতুন ইমোজি — নিচের ID গুলো ফাঁকা, আপনার Custom Emoji ID বসান
     # (ফাঁকা থাকলে অটো সাধারণ ইমোজি দেখাবে, কোনো এরর হবে না)
-    "hourglass": "",   # ⏳ Dispatching payload
-    "chart": "",       # 📊 Progress / Disk Usage
-    "box": "",         # 📦 Used Space
-    "cabinet": "",     # 🗂️ Total Capacity
-    "antenna": "",     # 📡 Database
-    "chat": "",        # 💬 Send Text Message
-    "mic": "",         # 🎙️ Send Voice / Audio
-    "bulb": "",        # 💡 Tip
-    "info": "",        # ℹ️ How To Operate
-    "wave": "",        # 👋 Welcome
-    "note": "",        # 📝 Text Content
-    "gear": "",        # ⚙️ Permissions
+    "hourglass": "5371058888017715839",   # ⏳ Dispatching payload
+    "chart": "5451882707875276247",       # 📊 Progress / Disk Usage
+    "box": "5193085063998224234",         # 📦 Used Space
+    "cabinet": "5352721946054268944",     # 🗂️ Total Capacity
+    "antenna": "5424972470023104089",     # 📡 Database
+    "chat": "5253742260054409879",        # 💬 Send Text Message
+    "mic": "5224736245665511429",         # 🎙️ Send Voice / Audio
+    "bulb": "5422439311196834318",        # 💡 Tip
+    "info": "5352597830089347330",        # ℹ️ How To Operate
+    "wave": "5199885118214255386",        # 👋 Welcome
+    "note": "5395444784611480792",        # 📝 Text Content
+    "gear": "5341715473882955310",        # ⚙️ Permissions
 }
 
 FALLBACK_SYMBOLS = {
