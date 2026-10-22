@@ -85,11 +85,11 @@ FALLBACK_SYMBOLS = {
 }
 
 def ce(name: str) -> str:
-    """টেলিগ্রাম কাস্টম ইমোজি রেন্ডারার (HTML ফরম্যাটে)"""
+    """টেলিগ্রামের অফিশিয়াল tg-emoji ট্যাগ যাতে কোনো এরর না আসে"""
     eid = str(UI_EMOJIS.get(name, "")).strip()
     fallback = FALLBACK_SYMBOLS.get(name, "✨")
     if eid and eid.isdigit():
-        return f'<emoji id="{eid}">{fallback}</emoji>'
+        return f'<tg-emoji emoji-id="{eid}">{fallback}</tg-emoji>'
     return fallback
 
 # Logging Configuration
@@ -99,7 +99,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Environment Configuration with Safe Sanitization
+# Environment Configuration
 raw_api_id = os.environ.get("API_ID", "35039821").strip().replace('"', '').replace("'", "")
 API_ID = int(raw_api_id) if raw_api_id.isdigit() else 35039821
 
@@ -107,10 +107,9 @@ API_HASH = os.environ.get("API_HASH", "77df805f1700eeefec861de6c93ee2ae").strip(
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8952918726:AAGnKZm-S8hmBaWzltPfrdWRcyVHGVx44d0").strip().replace('"', '').replace("'", "")
 FIREBASE_KEY_RAW = os.environ.get("FIREBASE_KEY", "").strip()
 
-# Master Admin ID
 OWNER_ID = 8271633124
 PORT = int(os.environ.get("PORT", "8080"))
-AUTO_DELETE_TIME = int(os.environ.get("AUTO_DELETE_TIME", "120"))  # Seconds
+AUTO_DELETE_TIME = int(os.environ.get("AUTO_DELETE_TIME", "120"))
 
 # Local Storage Directory
 DOWNLOAD_DIR = "downloads"
@@ -157,7 +156,7 @@ active_tasks = {}
 # ----------------- ALWAYS PERSISTENT BOTTOM KEYBOARDS ----------------- #
 
 def get_bottom_keyboard(user_id: int):
-    """persistent=True দিয়ে বাটন স্ক্রিনে স্থায়ী রাখা হয়েছে"""
+    """is_persistent=True প্যারামিটার ব্যবহার করে বাটন স্থায়ী রাখা হয়েছে"""
     if is_any_admin(user_id):
         return ReplyKeyboardMarkup(
             [
@@ -167,7 +166,7 @@ def get_bottom_keyboard(user_id: int):
                 [KeyboardButton(f"{FALLBACK_SYMBOLS['rocket']} Latency"), KeyboardButton(f"{FALLBACK_SYMBOLS['info']} How To Use")]
             ],
             resize_keyboard=True,
-            persistent=True
+            is_persistent=True
         )
     return ReplyKeyboardMarkup(
         [
@@ -175,7 +174,7 @@ def get_bottom_keyboard(user_id: int):
             [KeyboardButton(f"{FALLBACK_SYMBOLS['rocket']} Latency"), KeyboardButton(f"{FALLBACK_SYMBOLS['info']} How To Use")]
         ],
         resize_keyboard=True,
-        persistent=True
+        is_persistent=True
     )
 
 # ----------------- STORAGE & PROGRESS HELPERS ----------------- #
@@ -463,9 +462,9 @@ async def init_session_pool():
             await asyncio.wait_for(cl.start(), timeout=10)
             new_pool.append((s['doc_id'], s.get('account_name', 'Userbot'), cl))
         except Exception as e:
-            logger.warning(f"Failed session {s.get('doc_id')}: {e}")
+            logger.warning(f"Skipping broken session {s.get('doc_id')}: {e}")
             if any(err in str(e) for err in ["AUTH_KEY_DUPLICATED", "USER_DEACTIVATED", "SESSION_REVOKED"]):
-                asyncio.to_thread(sync_delete_session, s["doc_id"])
+                asyncio.create_task(asyncio.to_thread(sync_delete_session, s["doc_id"]))
 
     for _, _, old_cl in loaded_user_clients:
         try:
@@ -802,7 +801,7 @@ async def callback_handler(_, query: CallbackQuery):
 @bot.on_message(filters.private & ~filters.command(["start", "help", "admin", "panel", "ping", "storage", "clean", "login", "cancel"]))
 async def message_input_router(_, message: Message):
     user_id = message.from_user.id
-    asyncio.to_thread(sync_register_user, user_id)
+    asyncio.create_task(asyncio.to_thread(sync_register_user, user_id))
 
     state = user_states.get(user_id)
     text_input = (message.text or message.caption or "").strip()
@@ -1222,7 +1221,7 @@ async def download_album_item(client, media_msg, idx, user_id, tracker: AlbumPro
 @bot.on_message(filters.command("start") & filters.private)
 async def start_handler(_, message: Message):
     user_id = message.from_user.id
-    asyncio.to_thread(sync_register_user, user_id)
+    asyncio.create_task(asyncio.to_thread(sync_register_user, user_id))
     await message.reply_text(
         f"{ce('hand')} <b>Welcome, {message.from_user.first_name}!</b>\n\n"
         f"{ce('spark')} Send any public or private Telegram link to download media.\n\n"
@@ -1545,7 +1544,6 @@ async def web_server():
 async def main():
     await bot.start()
     try:
-        # শুধুমাত্র /start কমান্ড রাখা হলো
         await bot.set_bot_commands([
             BotCommand("start", "Start the bot")
         ])
