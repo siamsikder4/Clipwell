@@ -85,18 +85,18 @@ UI_EMOJIS = {
 
     # 🆕 নতুন ইমোজি — নিচের ID গুলো ফাঁকা, আপনার Custom Emoji ID বসান
     # (ফাঁকা থাকলে অটো সাধারণ ইমোজি দেখাবে, কোনো এরর হবে না)
-    "hourglass": "6339280615459789282",   # ⏳ Dispatching payload
-    "chart": "6338890095558400290",       # 📊 Progress / Disk Usage
+    "hourglass": "",   # ⏳ Dispatching payload
+    "chart": "",       # 📊 Progress / Disk Usage
     "box": "",         # 📦 Used Space
-    "cabinet": "5352721946054268944",     # 🗂️ Total Capacity
-    "antenna": "6314269247073687881",     # 📡 Database
-    "chat": "5253742260054409879",        # 💬 Send Text Message
-    "mic": "6314260236232301573",         # 🎙️ Send Voice / Audio
-    "bulb": "5422439311196834318",        # 💡 Tip
-    "info": "5350619413533958825",        # ℹ️ How To Operate
-    "wave": "5199885118214255386",        # 👋 Welcome
+    "cabinet": "",     # 🗂️ Total Capacity
+    "antenna": "",     # 📡 Database
+    "chat": "",        # 💬 Send Text Message
+    "mic": "",         # 🎙️ Send Voice / Audio
+    "bulb": "",        # 💡 Tip
+    "info": "",        # ℹ️ How To Operate
+    "wave": "",        # 👋 Welcome
     "note": "",        # 📝 Text Content
-    "gear": "5341715473882955310",        # ⚙️ Permissions
+    "gear": "",        # ⚙️ Permissions
 }
 
 FALLBACK_SYMBOLS = {
@@ -130,11 +130,11 @@ KB_BUTTONS = {
     "admin":     {"text": "Admin Panel",     "emoji_id": "6314576556278685829", "style": "primary", "legacy": FALLBACK_SYMBOLS["panel"]},
     "broadcast": {"text": "Broadcast",       "emoji_id": "6311947409228307310", "style": "primary", "legacy": FALLBACK_SYMBOLS["broadcast"]},
     "storage":   {"text": "Storage",         "emoji_id": "6314438073648158907", "style": "success", "legacy": FALLBACK_SYMBOLS["disk"]},
-    "clean":     {"text": "Clean Cache",     "emoji_id": "6314192620562161224", "style": "succes",  "legacy": FALLBACK_SYMBOLS["broom"]},
-    "connect":   {"text": "Connect Account", "emoji_id": "6314537472076291328", "style": "danger", "legacy": FALLBACK_SYMBOLS["phone"]},
-    "latency":   {"text": "Latency",         "emoji_id": "6052973985224728368", "style": "danger", "legacy": FALLBACK_SYMBOLS["rocket"]},
+    "clean":     {"text": "Clean Cache",     "emoji_id": "6314192620562161224", "style": "danger",  "legacy": FALLBACK_SYMBOLS["broom"]},
+    "connect":   {"text": "Connect Account", "emoji_id": "6314537472076291328", "style": "success", "legacy": FALLBACK_SYMBOLS["phone"]},
+    "latency":   {"text": "Latency",         "emoji_id": "6052973985224728368", "style": "primary", "legacy": FALLBACK_SYMBOLS["rocket"]},
     "howto":     {"text": "How To Use",      "emoji_id": "6314162714704878982", "style": "primary", "legacy": "ℹ️"},
-    "profile":   {"text": "Profile",         "emoji_id": UI_EMOJIS["user"],     "style": "success", "legacy": FALLBACK_SYMBOLS["user"]},
+    "profile":   {"text": "Profile",         "emoji_id": UI_EMOJIS["user"],     "style": "primary", "legacy": FALLBACK_SYMBOLS["user"]},
 }
 
 # ---------------------------------------------------------------------
