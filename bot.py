@@ -89,17 +89,25 @@ def ce(name: str) -> str:
         return f'<emoji id="{emoji_id}">{fallback}</emoji>'
     return fallback
 
-def make_btn(text: str, callback_data: str, emoji_name: str = None) -> InlineKeyboardButton:
-    """টেলিগ্রামের icon_custom_emoji_id সহ ইনলাইন বাটন প্রস্তুতকারক।"""
-    eid = UI_EMOJIS.get(emoji_name) if emoji_name else None
-    try:
-        if eid:
-            return InlineKeyboardButton(text=text, callback_data=callback_data, icon_custom_emoji_id=str(eid))
-    except TypeError:
-        pass
-    fallback = FALLBACK_SYMBOLS.get(emoji_name, "")
-    label = f"{fallback} {text}" if fallback else text
-    return InlineKeyboardButton(text=label, callback_data=callback_data)
+# =====================================================================
+# 🛠️ RAW DICT TO HYDROGRAM INLINE BUTTON CONVERTER
+# (আপনার স্ক্রিপ্টের মতো icon_custom_emoji_id ও style সাপোর্ট নিশ্চিত করতে)
+# =====================================================================
+def create_custom_inline_markup(rows: list) -> InlineKeyboardMarkup:
+    """Raw Dictionary থেকে Hydrogram InlineKeyboardMarkup বানানোর ফাংশন"""
+    converted_rows = []
+    for row in rows:
+        converted_row = []
+        for btn in row:
+            b = InlineKeyboardButton(text=btn["text"], callback_data=btn.get("callback_data"))
+            # আপনার স্ক্রিপ্টের মতো কাঁচা এট্রিবিউট বাইন্ড করা
+            if "icon_custom_emoji_id" in btn:
+                setattr(b, "icon_custom_emoji_id", str(btn["icon_custom_emoji_id"]))
+            if "style" in btn:
+                setattr(b, "style", str(btn["style"]))
+            converted_row.append(b)
+        converted_rows.append(converted_row)
+    return InlineKeyboardMarkup(converted_rows)
 
 # Logging Configuration
 logging.basicConfig(
@@ -118,7 +126,6 @@ OWNER_ID = 8271633124
 PORT = int(os.environ.get("PORT", "8080"))
 AUTO_DELETE_TIME = int(os.environ.get("AUTO_DELETE_TIME", "120"))  # Seconds
 
-# Local Storage Directory
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
@@ -135,7 +142,6 @@ if FIREBASE_KEY_RAW:
     except Exception as e:
         logger.error(f"Firebase Init Error: {e}")
 
-# সেশন ফাইল ব্যবহারের জন্য in_memory বাদ দিয়ে লোকাল ফাইল পাথ দেওয়া হয়েছে
 bot = Client(
     "tg_vault_bot_session",
     api_id=API_ID,
@@ -151,13 +157,12 @@ loaded_user_clients = []
 loaded_admins = {}
 mem_bot_users = set()
 
-# Live Web UI Progress Tracking Pool
 active_tasks = {}
 
 # ----------------- BOTTOM KEYBOARD BUILDER ----------------- #
 
 def get_bottom_keyboard(user_id: int):
-    """Hydrogram compatible ReplyKeyboardMarkup"""
+    """কিবোর্ডের বাটন সেটআপ"""
     if is_any_admin(user_id):
         return ReplyKeyboardMarkup(
             [
@@ -528,31 +533,69 @@ async def broadcast_to_all_users(source_message: Message, admin_id: int):
         f"└ {ce('cross')} <b>Failed:</b> <code>{failed}</code>"
     )
 
-# ----------------- ADMIN DASHBOARD MARKUPS ----------------- #
+# ----------------- ADMIN DASHBOARD MARKUPS (হুবহু ঐ স্ট্রাকচার অনুযায়ী) ----------------- #
 
 def get_role_based_markup(user_id: int, session_count: int, total_users: int):
-    """কাস্টম ইমোজি আইডি সহ সুন্দর ইনলাইন বাটন প্যানেল"""
-    buttons = [
+    """আপনার দেখানো কোডের মতো icon_custom_emoji_id এবং style প্যারামিটার ব্যবহার করে বাটন তৈরি"""
+    raw_buttons = [
         [
-            make_btn(f"Broadcast to Users ({total_users})", "btn_start_broadcast", "broadcast")
+            {
+                "text": f"Broadcast to Users ({total_users})",
+                "callback_data": "btn_start_broadcast",
+                "icon_custom_emoji_id": UI_EMOJIS["broadcast"],
+                "style": "primary"
+            }
         ],
         [
-            make_btn(f"Sessions ({session_count})", "btn_list_sessions", "folder"),
-            make_btn("Remove Session", "btn_del_menu", "trash")
+            {
+                "text": f"Sessions ({session_count})",
+                "callback_data": "btn_list_sessions",
+                "icon_custom_emoji_id": UI_EMOJIS["folder"],
+                "style": "primary"
+            },
+            {
+                "text": "Remove Session",
+                "callback_data": "btn_del_menu",
+                "icon_custom_emoji_id": UI_EMOJIS["trash"],
+                "style": "danger"
+            }
         ],
         [
-            make_btn("Storage Info", "btn_storage_info", "disk"),
-            make_btn("Clean Cache", "btn_clean_storage", "broom")
+            {
+                "text": "Storage Info",
+                "callback_data": "btn_storage_info",
+                "icon_custom_emoji_id": UI_EMOJIS["disk"],
+                "style": "success"
+            },
+            {
+                "text": "Clean Cache",
+                "callback_data": "btn_clean_storage",
+                "icon_custom_emoji_id": UI_EMOJIS["broom"],
+                "style": "danger"
+            }
         ]
     ]
 
     if user_id == OWNER_ID:
-        buttons.append([
-            make_btn("Manage Sub-Admins", "btn_manage_admins", "users")
+        raw_buttons.append([
+            {
+                "text": "Manage Sub-Admins",
+                "callback_data": "btn_manage_admins",
+                "icon_custom_emoji_id": UI_EMOJIS["users"],
+                "style": "primary"
+            }
         ])
 
-    buttons.append([make_btn("Refresh Dashboard", "btn_refresh_panel", "refresh")])
-    return InlineKeyboardMarkup(buttons)
+    raw_buttons.append([
+        {
+            "text": "Refresh Dashboard",
+            "callback_data": "btn_refresh_panel",
+            "icon_custom_emoji_id": UI_EMOJIS["refresh"],
+            "style": "success"
+        }
+    ])
+    
+    return create_custom_inline_markup(raw_buttons)
 
 @bot.on_message(filters.command(["admin", "panel"]) & filters.private & filters.incoming)
 async def admin_panel_handler(_, message: Message):
@@ -655,9 +698,9 @@ async def callback_handler(_, query: CallbackQuery):
             f"│\n"
             f"└ {ce('folder')} <b>Temp Downloads:</b> <code>{human_bytes(st['dl_size'])}</code> ({st['dl_files']} files)"
         )
-        markup = InlineKeyboardMarkup([
-            [make_btn("Clean Temp Files", "btn_clean_storage", "broom")],
-            [make_btn("Back to Dashboard", "btn_refresh_panel", "back")]
+        markup = create_custom_inline_markup([
+            [{"text": "Clean Temp Files", "callback_data": "btn_clean_storage", "icon_custom_emoji_id": UI_EMOJIS["broom"], "style": "danger"}],
+            [{"text": "Back to Dashboard", "callback_data": "btn_refresh_panel", "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "primary"}]
         ])
         await query.message.edit_text(text, reply_markup=markup)
         await query.answer()
@@ -689,9 +732,9 @@ async def callback_handler(_, query: CallbackQuery):
             f"│\n"
             f"└ {ce('folder')} <b>Temp Downloads:</b> <code>{human_bytes(st['dl_size'])}</code> ({st['dl_files']} files)"
         )
-        markup = InlineKeyboardMarkup([
-            [make_btn("Clean Temp Files", "btn_clean_storage", "broom")],
-            [make_btn("Back to Dashboard", "btn_refresh_panel", "back")]
+        markup = create_custom_inline_markup([
+            [{"text": "Clean Temp Files", "callback_data": "btn_clean_storage", "icon_custom_emoji_id": UI_EMOJIS["broom"], "style": "danger"}],
+            [{"text": "Back to Dashboard", "callback_data": "btn_refresh_panel", "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "primary"}]
         ])
         await query.message.edit_text(text, reply_markup=markup)
 
@@ -706,7 +749,8 @@ async def callback_handler(_, query: CallbackQuery):
             for idx, s in enumerate(sessions, 1):
                 text += f"├ <b>{idx}.</b> <code>{s.get('account_name', 'Unknown')}</code>\n"
             text += "│\n└─ <i>Sessions handle private restricted downloads.</i>"
-        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[make_btn("Back", "btn_refresh_panel", "back")]]))
+        markup = create_custom_inline_markup([[{"text": "Back", "callback_data": "btn_refresh_panel", "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "primary"}]])
+        await query.message.edit_text(text, reply_markup=markup)
         await query.answer()
 
     elif data == "btn_del_menu":
@@ -715,9 +759,9 @@ async def callback_handler(_, query: CallbackQuery):
         sessions = await asyncio.to_thread(sync_get_all_sessions)
         if not sessions:
             return await query.answer("No sessions to delete", show_alert=True)
-        buttons = [[make_btn(s.get('account_name', 'Session'), f"del_{s['doc_id']}", "cross")] for s in sessions]
-        buttons.append([make_btn("Back", "btn_refresh_panel", "back")])
-        await query.message.edit_text("<b>Select a userbot session to disconnect:</b>", reply_markup=InlineKeyboardMarkup(buttons))
+        raw_buttons = [[{"text": s.get('account_name', 'Session'), "callback_data": f"del_{s['doc_id']}", "icon_custom_emoji_id": UI_EMOJIS["cross"], "style": "danger"}] for s in sessions]
+        raw_buttons.append([{"text": "Back", "callback_data": "btn_refresh_panel", "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "primary"}])
+        await query.message.edit_text("<b>Select a userbot session to disconnect:</b>", reply_markup=create_custom_inline_markup(raw_buttons))
         await query.answer()
 
     elif data.startswith("del_"):
@@ -732,12 +776,12 @@ async def callback_handler(_, query: CallbackQuery):
     elif data == "btn_manage_admins":
         if user_id != OWNER_ID:
             return await query.answer("Owner Only", show_alert=True)
-        buttons = []
+        raw_buttons = []
         for aid in loaded_admins:
-            buttons.append([make_btn(f"Admin: {aid}", f"viewadmin_{aid}", "shield")])
-        buttons.append([make_btn("Add Sub-Admin", "btn_add_new_admin", "user")])
-        buttons.append([make_btn("Back", "btn_refresh_panel", "back")])
-        await query.message.edit_text("<b>Manage Sub-Admins and Delegated Rights:</b>", reply_markup=InlineKeyboardMarkup(buttons))
+            raw_buttons.append([{"text": f"Admin: {aid}", "callback_data": f"viewadmin_{aid}", "icon_custom_emoji_id": UI_EMOJIS["shield"], "style": "primary"}])
+        raw_buttons.append([{"text": "Add Sub-Admin", "callback_data": "btn_add_new_admin", "icon_custom_emoji_id": UI_EMOJIS["user"], "style": "success"}])
+        raw_buttons.append([{"text": "Back", "callback_data": "btn_refresh_panel", "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "danger"}])
+        await query.message.edit_text("<b>Manage Sub-Admins and Delegated Rights:</b>", reply_markup=create_custom_inline_markup(raw_buttons))
         await query.answer()
 
     elif data == "btn_add_new_admin":
@@ -755,11 +799,11 @@ async def callback_handler(_, query: CallbackQuery):
         s_tag = FALLBACK_SYMBOLS['online'] if perms.get("sessions") else FALLBACK_SYMBOLS['offline']
         b_tag = FALLBACK_SYMBOLS['online'] if perms.get("broadcast") else FALLBACK_SYMBOLS['offline']
 
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"Manage Sessions: {s_tag}", callback_data=f"togperm_{target_uid}_sessions")],
-            [InlineKeyboardButton(f"Send Broadcast: {b_tag}", callback_data=f"togperm_{target_uid}_broadcast")],
-            [make_btn("Remove Admin", f"deladmin_{target_uid}", "trash")],
-            [make_btn("Back", "btn_manage_admins", "back")]
+        markup = create_custom_inline_markup([
+            [{"text": f"Manage Sessions: {s_tag}", "callback_data": f"togperm_{target_uid}_sessions", "style": "primary"}],
+            [{"text": f"Send Broadcast: {b_tag}", "callback_data": f"togperm_{target_uid}_broadcast", "style": "primary"}],
+            [{"text": "Remove Admin", "callback_data": f"deladmin_{target_uid}", "icon_custom_emoji_id": UI_EMOJIS["trash"], "style": "danger"}],
+            [{"text": "Back", "callback_data": "btn_manage_admins", "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "danger"}]
         ])
         await query.message.edit_text(f"⚙️ <b>Permissions for Admin:</b> <code>{target_uid}</code>", reply_markup=markup)
         await query.answer()
@@ -778,11 +822,11 @@ async def callback_handler(_, query: CallbackQuery):
         perms = loaded_admins.get(target_uid, {})
         s_tag = FALLBACK_SYMBOLS['online'] if perms.get("sessions") else FALLBACK_SYMBOLS['offline']
         b_tag = FALLBACK_SYMBOLS['online'] if perms.get("broadcast") else FALLBACK_SYMBOLS['offline']
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"Manage Sessions: {s_tag}", callback_data=f"togperm_{target_uid}_sessions")],
-            [InlineKeyboardButton(f"Send Broadcast: {b_tag}", callback_data=f"togperm_{target_uid}_broadcast")],
-            [make_btn("Remove Admin", f"deladmin_{target_uid}", "trash")],
-            [make_btn("Back", "btn_manage_admins", "back")]
+        markup = create_custom_inline_markup([
+            [{"text": f"Manage Sessions: {s_tag}", "callback_data": f"togperm_{target_uid}_sessions", "style": "primary"}],
+            [{"text": f"Send Broadcast: {b_tag}", "callback_data": f"togperm_{target_uid}_broadcast", "style": "primary"}],
+            [{"text": "Remove Admin", "callback_data": f"deladmin_{target_uid}", "icon_custom_emoji_id": UI_EMOJIS["trash"], "style": "danger"}],
+            [{"text": "Back", "callback_data": "btn_manage_admins", "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "danger"}]
         ])
         await query.message.edit_reply_markup(reply_markup=markup)
 
@@ -792,10 +836,10 @@ async def callback_handler(_, query: CallbackQuery):
         target_uid = int(data.split("_")[1])
         await asyncio.to_thread(sync_delete_admin, target_uid)
         await query.answer(f"Admin {target_uid} removed", show_alert=True)
-        buttons = [[make_btn(f"Admin: {aid}", f"viewadmin_{aid}", "shield")] for aid in loaded_admins]
-        buttons.append([make_btn("Add Sub-Admin", "btn_add_new_admin", "user")])
-        buttons.append([make_btn("Back", "btn_refresh_panel", "back")])
-        await query.message.edit_text("<b>Updated Admin List:</b>", reply_markup=InlineKeyboardMarkup(buttons))
+        raw_buttons = [[{"text": f"Admin: {aid}", "callback_data": f"viewadmin_{aid}", "icon_custom_emoji_id": UI_EMOJIS["shield"], "style": "primary"}] for aid in loaded_admins]
+        raw_buttons.append([{"text": "Add Sub-Admin", "callback_data": "btn_add_new_admin", "icon_custom_emoji_id": UI_EMOJIS["user"], "style": "success"}])
+        raw_buttons.append([{"text": "Back", "callback_data": "btn_refresh_panel", "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "danger"}])
+        await query.message.edit_text("<b>Updated Admin List:</b>", reply_markup=create_custom_inline_markup(raw_buttons))
 
 # ----------------- MESSAGE ROUTER & BROADCAST INTAKE ----------------- #
 
@@ -945,13 +989,11 @@ async def message_input_router(_, message: Message):
                 reply_markup=get_bottom_keyboard(user_id)
             )
         except Exception as e:
-            await message.reply_text(
-                f"{ce('cross')} <b>Incorrect 2FA Password:</b> <code>{e}</code>",
-                reply_markup=InlineKeyboardMarkup([
-                    [make_btn("Retry", "btn_retry_2fa", "refresh"),
-                     make_btn("Cancel", "btn_cancel_login", "cross")]
-                ])
-            )
+            markup = create_custom_inline_markup([
+                [{"text": "Retry", "callback_data": "btn_retry_2fa", "icon_custom_emoji_id": UI_EMOJIS["refresh"], "style": "primary"},
+                 {"text": "Cancel", "callback_data": "btn_cancel_login", "icon_custom_emoji_id": UI_EMOJIS["cross"], "style": "danger"}]
+            ])
+            await message.reply_text(f"{ce('cross')} <b>Incorrect 2FA Password:</b> <code>{e}</code>", reply_markup=markup)
         return
 
     # ----------------- TELEGRAM POST DOWNLOAD ROUTINE ----------------- #
@@ -1248,7 +1290,9 @@ async def start_handler(_, message: Message):
 async def public_login_cmd(_, message: Message):
     user_id = message.from_user.id
     user_states[user_id] = "WAIT_PHONE"
-    markup = InlineKeyboardMarkup([[make_btn("Cancel", "btn_cancel_login", "cross")]])
+    markup = create_custom_inline_markup([
+        [{"text": "Cancel", "callback_data": "btn_cancel_login", "icon_custom_emoji_id": UI_EMOJIS["cross"], "style": "danger"}]
+    ])
     await message.reply_text(
         f"┌── {ce('phone')} <b>CONNECT YOUR TELEGRAM ACCOUNT</b>\n"
         f"│\n"
@@ -1289,8 +1333,8 @@ async def storage_cmd_handler(_, message: Message):
         f"│\n"
         f"└ {ce('folder')} <b>Temp Downloads:</b> <code>{human_bytes(st['dl_size'])}</code> ({st['dl_files']} files)"
     )
-    markup = InlineKeyboardMarkup([
-        [make_btn("Clean Temp Files", "btn_clean_storage", "broom")]
+    markup = create_custom_inline_markup([
+        [{"text": "Clean Temp Files", "callback_data": "btn_clean_storage", "icon_custom_emoji_id": UI_EMOJIS["broom"], "style": "danger"}]
     ])
     await message.reply_text(text, reply_markup=markup)
 
@@ -1562,13 +1606,12 @@ async def web_server():
 # ----------------- STARTUP ----------------- #
 
 async def main():
-    # FloodWait হ্যান্ডলার: রেট-লিমিট পেলেও ক্র্যাশ করবে না
     while True:
         try:
             await bot.start()
             break
         except FloodWait as e:
-            logger.warning(f"FloodWait hit during startup! Waiting for {e.value} seconds...")
+            logger.warning(f"FloodWait hit! Waiting for {e.value} seconds...")
             await asyncio.sleep(e.value + 2)
 
     try:
