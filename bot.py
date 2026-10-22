@@ -5,6 +5,7 @@ import json
 import shutil
 import asyncio
 import logging
+import html
 import aiohttp
 from aiohttp import web
 from hydrogram import Client, filters
@@ -69,6 +70,21 @@ UI_EMOJIS = {
     "bar_fill": "6053117952528493140",
     "bar_empty": "6338899694810307622",
     "reaction": "6314425974725288033",
+
+    # 🆕 নতুন ইমোজি — নিচের ID গুলো ফাঁকা, আপনার Custom Emoji ID বসান
+    # (ফাঁকা থাকলে অটো সাধারণ ইমোজি দেখাবে, কোনো এরর হবে না)
+    "hourglass": "",   # ⏳ Dispatching payload
+    "chart": "",       # 📊 Progress / Disk Usage
+    "box": "",         # 📦 Used Space
+    "cabinet": "",     # 🗂️ Total Capacity
+    "antenna": "",     # 📡 Database
+    "chat": "",        # 💬 Send Text Message
+    "mic": "",         # 🎙️ Send Voice / Audio
+    "bulb": "",        # 💡 Tip
+    "info": "",        # ℹ️ How To Operate
+    "wave": "",        # 👋 Welcome
+    "note": "",        # 📝 Text Content
+    "gear": "",        # ⚙️ Permissions
 }
 
 FALLBACK_SYMBOLS = {
@@ -79,7 +95,10 @@ FALLBACK_SYMBOLS = {
     "disk": "💾", "broom": "🧹", "folder": "📂", "trash": "🗑️",
     "broadcast": "📢", "timer": "⏱️", "target": "🎯", "media": "🖼️",
     "pencil": "✏️", "list": "📋", "download": "📥", "upload": "📤",
-    "bar_fill": "▰", "bar_empty": "▱"
+    "bar_fill": "▰", "bar_empty": "▱",
+    "hourglass": "⏳", "chart": "📊", "box": "📦", "cabinet": "🗂️", "antenna": "📡",
+    "chat": "💬", "mic": "🎙️", "bulb": "💡", "info": "ℹ️", "wave": "👋",
+    "note": "📝", "gear": "⚙️"
 }
 
 def ce(name: str) -> str:
@@ -92,7 +111,7 @@ def ce(name: str) -> str:
 
 # =====================================================================
 # ⌨️ BOTTOM (REPLY) KEYBOARD BUTTONS CONFIG
-# 👉 নিচের "emoji_id" গুলো ফাঁকা রাখা হয়েছে, আপনার Custom Emoji ID বসিয়ে নিন।
+# 👉 "emoji_id" = বাটনের Custom Emoji ID (ফাঁকা রাখলে আইকন ছাড়া দেখাবে)
 # 👉 "style" হবে: "primary" (নীল) | "success" (সবুজ) | "danger" (লাল) | "" (ডিফল্ট)
 # =====================================================================
 KB_BUTTONS = {
@@ -104,6 +123,24 @@ KB_BUTTONS = {
     "latency":   {"text": "Latency",         "emoji_id": "6052973985224728368", "style": "primary", "legacy": FALLBACK_SYMBOLS["rocket"]},
     "howto":     {"text": "How To Use",      "emoji_id": "6314162714704878982", "style": "primary", "legacy": "ℹ️"},
 }
+
+# ---------------------------------------------------------------------
+# 📐 বাটনের পজিশন (লেআউট) — প্রতিটা [ ] = একটা সারি (row)
+# একটা সারিতে ১টা দিলে বাটন ফুল-উইডথ, ২-৩টা দিলে পাশাপাশি বসবে।
+# নামগুলো উপরের KB_BUTTONS এর key: admin, broadcast, storage, clean, connect, latency, howto
+# ---------------------------------------------------------------------
+KB_LAYOUT_ADMIN = [
+    ["admin", "broadcast"],
+    ["storage", "clean"],
+    ["connect", "latency"],
+]
+KB_LAYOUT_USER = [
+    ["connect", "latency"],
+    ["howto"],
+]
+
+# True হলে Admin/Owner একাধিক একাউন্ট কানেক্ট করতে পারবে (সাধারণ ইউজার শুধু ১টা)
+ADMINS_CAN_ADD_MULTIPLE = True
 
 def is_btn(text: str, key: str) -> bool:
     """নতুন (ইমোজি ছাড়া) এবং পুরনো (ইমোজি সহ) দুই ধরনের বাটন টেক্সটই ম্যাচ করবে"""
@@ -270,17 +307,9 @@ def _kb_btn(key: str) -> dict:
 
 def get_bottom_keyboard(user_id: int):
     """কিবোর্ডের বাটন সেটআপ (Bot API: icon_custom_emoji_id + style সহ)"""
-    if is_any_admin(user_id):
-        rows = [
-            [_kb_btn("admin"), _kb_btn("broadcast")],
-            [_kb_btn("storage"), _kb_btn("clean")],
-            [_kb_btn("connect"), _kb_btn("latency")]
-        ]
-    else:
-        rows = [
-            [_kb_btn("connect"), _kb_btn("latency")],
-            [_kb_btn("howto")]
-        ]
+    layout = KB_LAYOUT_ADMIN if is_any_admin(user_id) else KB_LAYOUT_USER
+    rows = [[_kb_btn(k) for k in row if k in KB_BUTTONS] for row in layout]
+    rows = [r for r in rows if r]
     return RawMarkup({"keyboard": rows, "resize_keyboard": True})
 
 # ----------------- STORAGE & PROGRESS HELPERS ----------------- #
@@ -539,6 +568,13 @@ def sync_delete_session(doc_id: str):
     except Exception:
         return False
 
+def sync_get_user_session(user_id: int):
+    """এই ইউজার আগে কোনো একাউন্ট কানেক্ট করেছে কিনা চেক"""
+    for s in sync_get_all_sessions():
+        if s.get("added_by") == user_id:
+            return s
+    return None
+
 async def init_session_pool():
     global loaded_user_clients, loaded_admins
     loaded_admins = await asyncio.to_thread(sync_get_all_admins)
@@ -593,8 +629,8 @@ async def broadcast_to_all_users(source_message: Message, admin_id: int):
     status_msg = await bot.send_message(
         admin_id,
         f"{ce('broadcast')} <b>Broadcasting started...</b>\n"
-        f"🎯 <b>Target Audience:</b> <code>{len(all_users)}</code> users\n"
-        f"⏳ <b>Dispatching payload...</b>"
+        f"{ce('target')} <b>Target Audience:</b> <code>{len(all_users)}</code> users\n"
+        f"{ce('hourglass')} <b>Dispatching payload...</b>"
     )
 
     success, blocked, failed = 0, 0, 0
@@ -619,7 +655,7 @@ async def broadcast_to_all_users(source_message: Message, admin_id: int):
             try:
                 await status_msg.edit_text(
                     f"┌── {ce('broadcast')} <b>BROADCAST DISPATCHER</b>\n"
-                    f"├ 📊 <b>Progress:</b> <code>{idx}/{len(all_users)}</code>\n"
+                    f"├ {ce('chart')} <b>Progress:</b> <code>{idx}/{len(all_users)}</code>\n"
                     f"├ {ce('check')} <b>Delivered:</b> <code>{success}</code>\n"
                     f"├ {ce('offline')} <b>Blocked:</b> <code>{blocked}</code>\n"
                     f"└ {ce('cross')} <b>Failed:</b> <code>{failed}</code>"
@@ -630,7 +666,7 @@ async def broadcast_to_all_users(source_message: Message, admin_id: int):
 
     await status_msg.edit_text(
         f"┌── {ce('check')} <b>BROADCAST COMPLETED</b>\n"
-        f"├ 🎯 <b>Total Users:</b> <code>{len(all_users)}</code>\n"
+        f"├ {ce('target')} <b>Total Users:</b> <code>{len(all_users)}</code>\n"
         f"├ {ce('online')} <b>Delivered:</b> <code>{success}</code>\n"
         f"├ {ce('offline')} <b>Blocked:</b> <code>{blocked}</code>\n"
         f"└ {ce('cross')} <b>Failed:</b> <code>{failed}</code>"
@@ -718,8 +754,8 @@ async def admin_panel_handler(_, message: Message):
     text = (
         f"┌── {ce('panel')} <b>ADMIN CONTROL SYSTEM</b>\n"
         f"│\n"
-        f"├ 👤 <b>Account Role:</b> {role_str}\n"
-        f"├ 📡 <b>Database:</b> {db_str}\n"
+        f"├ {ce('user')} <b>Account Role:</b> {role_str}\n"
+        f"├ {ce('antenna')} <b>Database:</b> {db_str}\n"
         f"├ {ce('users')} <b>Total Registered:</b> <code>{len(all_users)} Users</code>\n"
         f"├ {ce('folder')} <b>Userbot Session Pool:</b> <code>{len(sessions)} Active</code>\n"
         f"├ {ce('timer')} <b>Auto-Delete Delay:</b> <code>{AUTO_DELETE_TIME}s</code>\n"
@@ -760,8 +796,8 @@ async def callback_handler(_, query: CallbackQuery):
         text = (
             f"┌── {ce('panel')} <b>ADMIN CONTROL SYSTEM</b>\n"
             f"│\n"
-            f"├ 👤 <b>Account Role:</b> {role_str}\n"
-            f"├ 📡 <b>Database:</b> {db_str}\n"
+            f"├ {ce('user')} <b>Account Role:</b> {role_str}\n"
+            f"├ {ce('antenna')} <b>Database:</b> {db_str}\n"
             f"├ {ce('users')} <b>Total Registered:</b> <code>{len(all_users)} Users</code>\n"
             f"├ {ce('folder')} <b>Userbot Session Pool:</b> <code>{len(sessions)} Active</code>\n"
             f"├ {ce('timer')} <b>Auto-Delete Delay:</b> <code>{AUTO_DELETE_TIME}s</code>\n"
@@ -778,8 +814,8 @@ async def callback_handler(_, query: CallbackQuery):
         await query.message.reply_text(
             f"┌── {ce('broadcast')} <b>BROADCAST INTAKE</b>\n"
             f"│\n"
-            f"├ 💬 Send any Text Message\n"
-            f"├ 🎙️ Send Voice or Audio\n"
+            f"├ {ce('chat')} Send any Text Message\n"
+            f"├ {ce('mic')} Send Voice or Audio\n"
             f"├ {ce('media')} Send Photo or Video with Caption\n"
             f"│\n"
             f"└─ <i>Send <code>/cancel</code> to abort anytime.</i>",
@@ -794,10 +830,10 @@ async def callback_handler(_, query: CallbackQuery):
         text = (
             f"┌── {ce('disk')} <b>SERVER STORAGE OVERVIEW</b>\n"
             f"│\n"
-            f"├ 📊 <b>Disk Usage:</b> ⌠ {bar} ⌡ <code>{st['percent']:.1f}%</code>\n"
-            f"├ 📦 <b>Used Space:</b> <code>{human_bytes(st['used'])}</code>\n"
+            f"├ {ce('chart')} <b>Disk Usage:</b> ⌠ {bar} ⌡ <code>{st['percent']:.1f}%</code>\n"
+            f"├ {ce('box')} <b>Used Space:</b> <code>{human_bytes(st['used'])}</code>\n"
             f"├ {ce('online')} <b>Free Space:</b> <code>{human_bytes(st['free'])}</code>\n"
-            f"├ 🗂️ <b>Total Capacity:</b> <code>{human_bytes(st['total'])}</code>\n"
+            f"├ {ce('cabinet')} <b>Total Capacity:</b> <code>{human_bytes(st['total'])}</code>\n"
             f"│\n"
             f"└ {ce('folder')} <b>Temp Downloads:</b> <code>{human_bytes(st['dl_size'])}</code> ({st['dl_files']} files)"
         )
@@ -828,10 +864,10 @@ async def callback_handler(_, query: CallbackQuery):
         text = (
             f"┌── {ce('disk')} <b>SERVER STORAGE OVERVIEW</b>\n"
             f"│\n"
-            f"├ 📊 <b>Disk Usage:</b> ⌠ {bar} ⌡ <code>{st['percent']:.1f}%</code>\n"
-            f"├ 📦 <b>Used Space:</b> <code>{human_bytes(st['used'])}</code>\n"
+            f"├ {ce('chart')} <b>Disk Usage:</b> ⌠ {bar} ⌡ <code>{st['percent']:.1f}%</code>\n"
+            f"├ {ce('box')} <b>Used Space:</b> <code>{human_bytes(st['used'])}</code>\n"
             f"├ {ce('online')} <b>Free Space:</b> <code>{human_bytes(st['free'])}</code>\n"
-            f"├ 🗂️ <b>Total Capacity:</b> <code>{human_bytes(st['total'])}</code>\n"
+            f"├ {ce('cabinet')} <b>Total Capacity:</b> <code>{human_bytes(st['total'])}</code>\n"
             f"│\n"
             f"└ {ce('folder')} <b>Temp Downloads:</b> <code>{human_bytes(st['dl_size'])}</code> ({st['dl_files']} files)"
         )
@@ -908,7 +944,7 @@ async def callback_handler(_, query: CallbackQuery):
             [{"text": "Remove Admin", "callback_data": f"deladmin_{target_uid}", "icon_custom_emoji_id": UI_EMOJIS["trash"], "style": "danger"}],
             [{"text": "Back", "callback_data": "btn_manage_admins", "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "danger"}]
         ])
-        await query.message.edit_text(f"⚙️ <b>Permissions for Admin:</b> <code>{target_uid}</code>", reply_markup=markup)
+        await query.message.edit_text(f"{ce('gear')} <b>Permissions for Admin:</b> <code>{target_uid}</code>", reply_markup=markup)
         await query.answer()
 
     elif data.startswith("togperm_"):
@@ -968,8 +1004,8 @@ async def message_input_router(_, message: Message):
         return await message.reply_text(
             f"┌── {ce('broadcast')} <b>BROADCAST INTAKE</b>\n"
             f"│\n"
-            f"├ 💬 Send Text Message\n"
-            f"├ 🎙️ Send Voice / Audio\n"
+            f"├ {ce('chat')} Send Text Message\n"
+            f"├ {ce('mic')} Send Voice / Audio\n"
             f"├ {ce('media')} Send Photo / Video\n"
             f"│\n"
             f"└─ <i>Send <code>/cancel</code> to abort.</i>",
@@ -981,7 +1017,7 @@ async def message_input_router(_, message: Message):
         return await clean_cmd_handler(_, message)
     elif is_btn(text_input, "howto"):
         return await message.reply_text(
-            f"┌── ℹ️ <b>HOW TO OPERATE VAULT BOT</b>\n"
+            f"┌── {ce('info')} <b>HOW TO OPERATE VAULT BOT</b>\n"
             f"│\n"
             f"├ <b>1.</b> Send any public channel or restricted post link.\n"
             f"├ <b>2.</b> Connect your Telegram account via <code>/login</code> for private channels.\n"
@@ -1020,7 +1056,7 @@ async def message_input_router(_, message: Message):
                 f"┌── {ce('phone')} <b>TELEGRAM VERIFICATION</b>\n"
                 f"│\n"
                 f"├ Enter the OTP received in Telegram.\n"
-                f"└─ 💡 <i>Tip: Add spaces between digits (e.g. <code>1 2 3 4 5</code>)</i>",
+                f"└─ {ce('bulb')} <i>Tip: Add spaces between digits (e.g. <code>1 2 3 4 5</code>)</i>",
                 reply_markup=ForceReply(selective=True)
             )
         except Exception as e:
@@ -1048,7 +1084,7 @@ async def message_input_router(_, message: Message):
             await message.reply_text(
                 f"┌── {ce('check')} <b>ACCOUNT LINKED SUCCESSFULLY!</b>\n"
                 f"│\n"
-                f"├ 👤 <b>Connected:</b> <code>{acc}</code>\n"
+                f"├ {ce('user')} <b>Connected:</b> <code>{acc}</code>\n"
                 f"└─ {ce('spark')} Your session is now active in the userbot pool.",
                 reply_markup=get_bottom_keyboard(user_id)
             )
@@ -1087,7 +1123,7 @@ async def message_input_router(_, message: Message):
             await message.reply_text(
                 f"┌── {ce('check')} <b>ACCOUNT LINKED SUCCESSFULLY!</b>\n"
                 f"│\n"
-                f"├ 👤 <b>Connected:</b> <code>{acc}</code>\n"
+                f"├ {ce('user')} <b>Connected:</b> <code>{acc}</code>\n"
                 f"└─ {ce('spark')} Your session is now ready.",
                 reply_markup=get_bottom_keyboard(user_id)
             )
@@ -1239,7 +1275,7 @@ async def message_input_router(_, message: Message):
     # Single Media Processing
     if not (target_msg.media or target_msg.video or target_msg.photo or target_msg.document or target_msg.audio or target_msg.voice):
         if target_msg.text:
-            return await status.edit_text(f"📝 <b>Text Content:</b>\n\n{target_msg.text}")
+            return await status.edit_text(f"{ce('note')} <b>Text Content:</b>\n\n{target_msg.text}")
         return await status.edit_text(f"{ce('warning')} <b>No media found in the post.</b>")
 
     ext = ".mp4" if target_msg.video else ".jpg" if target_msg.photo else ".mp3" if target_msg.audio else ""
@@ -1380,7 +1416,7 @@ async def start_handler(_, message: Message):
     user_id = message.from_user.id
     asyncio.to_thread(sync_register_user, user_id)
     await message.reply_text(
-        f"┌── 👋 <b>WELCOME, {message.from_user.first_name.upper()}!</b>\n"
+        f"┌── {ce('wave')} <b>WELCOME, {message.from_user.first_name.upper()}!</b>\n"
         f"│\n"
         f"├ {ce('spark')} Send any public or private Telegram link to download media.\n"
         f"├ {ce('lock')} Use <code>/login</code> or the button below to link your account.\n"
@@ -1392,6 +1428,21 @@ async def start_handler(_, message: Message):
 @bot.on_message(filters.command("login") & filters.private & filters.incoming)
 async def public_login_cmd(_, message: Message):
     user_id = message.from_user.id
+
+    # আগে একাউন্ট কানেক্ট করা থাকলে আবার লগইন করতে দেবে না
+    if not (ADMINS_CAN_ADD_MULTIPLE and is_any_admin(user_id)):
+        existing = await asyncio.to_thread(sync_get_user_session, user_id)
+        if existing:
+            user_states.pop(user_id, None)
+            acc_name = html.escape(str(existing.get("account_name", "Unknown")))
+            return await message.reply_text(
+                f"┌── {ce('warning')} <b>ACCOUNT ALREADY CONNECTED</b>\n"
+                f"│\n"
+                f"├ {ce('user')} <b>Connected:</b> <code>{acc_name}</code>\n"
+                f"└─ {ce('check')} <i>You have already connected an account. No need to connect again.</i>",
+                reply_markup=get_bottom_keyboard(user_id)
+            )
+
     user_states[user_id] = "WAIT_PHONE"
     markup = create_custom_inline_markup([
         [{"text": "Cancel", "callback_data": "btn_cancel_login", "icon_custom_emoji_id": UI_EMOJIS["cross"], "style": "danger"}]
@@ -1429,10 +1480,10 @@ async def storage_cmd_handler(_, message: Message):
     text = (
         f"┌── {ce('disk')} <b>SERVER STORAGE OVERVIEW</b>\n"
         f"│\n"
-        f"├ 📊 <b>Disk Usage:</b> ⌠ {bar} ⌡ <code>{st['percent']:.1f}%</code>\n"
-        f"├ 📦 <b>Used Space:</b> <code>{human_bytes(st['used'])}</code>\n"
+        f"├ {ce('chart')} <b>Disk Usage:</b> ⌠ {bar} ⌡ <code>{st['percent']:.1f}%</code>\n"
+        f"├ {ce('box')} <b>Used Space:</b> <code>{human_bytes(st['used'])}</code>\n"
         f"├ {ce('online')} <b>Free Space:</b> <code>{human_bytes(st['free'])}</code>\n"
-        f"├ 🗂️ <b>Total Capacity:</b> <code>{human_bytes(st['total'])}</code>\n"
+        f"├ {ce('cabinet')} <b>Total Capacity:</b> <code>{human_bytes(st['total'])}</code>\n"
         f"│\n"
         f"└ {ce('folder')} <b>Temp Downloads:</b> <code>{human_bytes(st['dl_size'])}</code> ({st['dl_files']} files)"
     )
