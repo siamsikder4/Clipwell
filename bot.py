@@ -5,6 +5,7 @@ import json
 import shutil
 import asyncio
 import logging
+import aiohttp
 from aiohttp import web
 from hydrogram import Client, filters
 from hydrogram.enums import ParseMode
@@ -90,24 +91,121 @@ def ce(name: str) -> str:
     return fallback
 
 # =====================================================================
-# 🛠️ RAW DICT TO HYDROGRAM INLINE BUTTON CONVERTER
-# (আপনার স্ক্রিপ্টের মতো icon_custom_emoji_id ও style সাপোর্ট নিশ্চিত করতে)
+# ⌨️ BOTTOM (REPLY) KEYBOARD BUTTONS CONFIG
+# 👉 নিচের "emoji_id" গুলো ফাঁকা রাখা হয়েছে, আপনার Custom Emoji ID বসিয়ে নিন।
+# 👉 "style" হবে: "primary" (নীল) | "success" (সবুজ) | "danger" (লাল) | "" (ডিফল্ট)
 # =====================================================================
-def create_custom_inline_markup(rows: list) -> InlineKeyboardMarkup:
-    """Raw Dictionary থেকে Hydrogram InlineKeyboardMarkup বানানোর ফাংশন"""
-    converted_rows = []
+KB_BUTTONS = {
+    "admin":     {"text": "Admin Panel",     "emoji_id": "6314576556278685829", "style": "primary", "legacy": FALLBACK_SYMBOLS["panel"]},
+    "broadcast": {"text": "Broadcast",       "emoji_id": "6311947409228307310", "style": "primary", "legacy": FALLBACK_SYMBOLS["broadcast"]},
+    "storage":   {"text": "Storage",         "emoji_id": "6314438073648158907", "style": "success", "legacy": FALLBACK_SYMBOLS["disk"]},
+    "clean":     {"text": "Clean Cache",     "emoji_id": "6314192620562161224", "style": "danger",  "legacy": FALLBACK_SYMBOLS["broom"]},
+    "connect":   {"text": "Connect Account", "emoji_id": "6314537472076291328", "style": "success", "legacy": FALLBACK_SYMBOLS["phone"]},
+    "latency":   {"text": "Latency",         "emoji_id": "6052973985224728368", "style": "primary", "legacy": FALLBACK_SYMBOLS["rocket"]},
+    "howto":     {"text": "How To Use",      "emoji_id": "6314162714704878982", "style": "primary", "legacy": "ℹ️"},
+}
+
+def is_btn(text: str, key: str) -> bool:
+    """নতুন (ইমোজি ছাড়া) এবং পুরনো (ইমোজি সহ) দুই ধরনের বাটন টেক্সটই ম্যাচ করবে"""
+    b = KB_BUTTONS[key]
+    return text in (b["text"], f"{b['legacy']} {b['text']}")
+
+# =====================================================================
+# 🛠️ BOT API BRIDGE
+# Hydrogram (MTProto) বাটনের icon_custom_emoji_id / style পাঠাতে পারে না,
+# তাই বাটন-সহ মেসেজগুলো সরাসরি Telegram Bot API দিয়ে যাবে।
+# বাকি সব কিছু আগের মতোই Hydrogram দিয়ে চলবে।
+# =====================================================================
+class RawMarkup:
+    """Bot API-র জন্য কাঁচা JSON reply_markup রাখার ক্লাস"""
+    def __init__(self, data: dict):
+        self.data = data
+
+_EMOJI_TAG_RE = re.compile(r'<emoji id="(\d+)">(.*?)</emoji>', re.DOTALL)
+
+def to_bot_api_html(text: str) -> str:
+    """Hydrogram-এর <emoji id=".."> কে Bot API-র <tg-emoji emoji-id=".."> এ রূপান্তর"""
+    return _EMOJI_TAG_RE.sub(r'<tg-emoji emoji-id="\1">\2</tg-emoji>', text or "")
+
+async def bot_api_call(method: str, payload: dict):
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}", json=payload) as r:
+                data = await r.json()
+                if not data.get("ok"):
+                    logger.error(f"BotAPI {method} failed: {data.get('description')}")
+                return data
+    except Exception as e:
+        logger.error(f"BotAPI {method} error: {e}")
+        return {"ok": False}
+
+def create_custom_inline_markup(rows: list) -> RawMarkup:
+    """Raw Dictionary থেকে Bot API Inline Keyboard বানানোর ফাংশন (icon_custom_emoji_id ও style সহ)"""
+    kb_rows = []
     for row in rows:
-        converted_row = []
+        kb_row = []
         for btn in row:
-            b = InlineKeyboardButton(text=btn["text"], callback_data=btn.get("callback_data"))
-            # আপনার স্ক্রিপ্টের মতো কাঁচা এট্রিবিউট বাইন্ড করা
-            if "icon_custom_emoji_id" in btn:
-                setattr(b, "icon_custom_emoji_id", str(btn["icon_custom_emoji_id"]))
-            if "style" in btn:
-                setattr(b, "style", str(btn["style"]))
-            converted_row.append(b)
-        converted_rows.append(converted_row)
-    return InlineKeyboardMarkup(converted_rows)
+            b = {"text": btn["text"]}
+            if btn.get("callback_data"):
+                b["callback_data"] = btn["callback_data"]
+            if btn.get("icon_custom_emoji_id"):
+                b["icon_custom_emoji_id"] = str(btn["icon_custom_emoji_id"])
+            if btn.get("style"):
+                b["style"] = str(btn["style"])
+            kb_row.append(b)
+        kb_rows.append(kb_row)
+    return RawMarkup({"inline_keyboard": kb_rows})
+
+# ---- Hydrogram মেথড প্যাচ: RawMarkup পেলে Bot API, নাহলে আগের মতোই Hydrogram ----
+_orig_reply_text = Message.reply_text
+_orig_edit_text = Message.edit_text
+_orig_edit_reply_markup = Message.edit_reply_markup
+_orig_send_message = Client.send_message
+
+async def _patched_reply_text(self, text, *args, reply_markup=None, **kwargs):
+    if isinstance(reply_markup, RawMarkup):
+        return await bot_api_call("sendMessage", {
+            "chat_id": self.chat.id,
+            "text": to_bot_api_html(text),
+            "parse_mode": "HTML",
+            "reply_markup": reply_markup.data
+        })
+    return await _orig_reply_text(self, text, *args, reply_markup=reply_markup, **kwargs)
+
+async def _patched_edit_text(self, text, *args, reply_markup=None, **kwargs):
+    if isinstance(reply_markup, RawMarkup):
+        return await bot_api_call("editMessageText", {
+            "chat_id": self.chat.id,
+            "message_id": self.id,
+            "text": to_bot_api_html(text),
+            "parse_mode": "HTML",
+            "reply_markup": reply_markup.data
+        })
+    return await _orig_edit_text(self, text, *args, reply_markup=reply_markup, **kwargs)
+
+async def _patched_edit_reply_markup(self, reply_markup=None, *args, **kwargs):
+    if isinstance(reply_markup, RawMarkup):
+        return await bot_api_call("editMessageReplyMarkup", {
+            "chat_id": self.chat.id,
+            "message_id": self.id,
+            "reply_markup": reply_markup.data
+        })
+    return await _orig_edit_reply_markup(self, reply_markup, *args, **kwargs)
+
+async def _patched_send_message(self, chat_id, text, *args, reply_markup=None, **kwargs):
+    if isinstance(reply_markup, RawMarkup):
+        return await bot_api_call("sendMessage", {
+            "chat_id": chat_id,
+            "text": to_bot_api_html(text),
+            "parse_mode": "HTML",
+            "reply_markup": reply_markup.data
+        })
+    return await _orig_send_message(self, chat_id, text, *args, reply_markup=reply_markup, **kwargs)
+
+Message.reply_text = _patched_reply_text
+Message.edit_text = _patched_edit_text
+Message.edit_reply_markup = _patched_edit_reply_markup
+Client.send_message = _patched_send_message
 
 # Logging Configuration
 logging.basicConfig(
@@ -161,24 +259,29 @@ active_tasks = {}
 
 # ----------------- BOTTOM KEYBOARD BUILDER ----------------- #
 
+def _kb_btn(key: str) -> dict:
+    b = KB_BUTTONS[key]
+    out = {"text": b["text"]}
+    if b.get("emoji_id"):
+        out["icon_custom_emoji_id"] = str(b["emoji_id"])
+    if b.get("style"):
+        out["style"] = b["style"]
+    return out
+
 def get_bottom_keyboard(user_id: int):
-    """কিবোর্ডের বাটন সেটআপ"""
+    """কিবোর্ডের বাটন সেটআপ (Bot API: icon_custom_emoji_id + style সহ)"""
     if is_any_admin(user_id):
-        return ReplyKeyboardMarkup(
-            [
-                [KeyboardButton(f"{FALLBACK_SYMBOLS['panel']} Admin Panel"), KeyboardButton(f"{FALLBACK_SYMBOLS['broadcast']} Broadcast")],
-                [KeyboardButton(f"{FALLBACK_SYMBOLS['disk']} Storage"), KeyboardButton(f"{FALLBACK_SYMBOLS['broom']} Clean Cache")],
-                [KeyboardButton(f"{FALLBACK_SYMBOLS['phone']} Connect Account"), KeyboardButton(f"{FALLBACK_SYMBOLS['rocket']} Latency")]
-            ],
-            resize_keyboard=True
-        )
-    return ReplyKeyboardMarkup(
-        [
-            [KeyboardButton(f"{FALLBACK_SYMBOLS['phone']} Connect Account"), KeyboardButton(f"{FALLBACK_SYMBOLS['rocket']} Latency")],
-            [KeyboardButton("ℹ️ How To Use")]
-        ],
-        resize_keyboard=True
-    )
+        rows = [
+            [_kb_btn("admin"), _kb_btn("broadcast")],
+            [_kb_btn("storage"), _kb_btn("clean")],
+            [_kb_btn("connect"), _kb_btn("latency")]
+        ]
+    else:
+        rows = [
+            [_kb_btn("connect"), _kb_btn("latency")],
+            [_kb_btn("howto")]
+        ]
+    return RawMarkup({"keyboard": rows, "resize_keyboard": True})
 
 # ----------------- STORAGE & PROGRESS HELPERS ----------------- #
 
@@ -533,7 +636,7 @@ async def broadcast_to_all_users(source_message: Message, admin_id: int):
         f"└ {ce('cross')} <b>Failed:</b> <code>{failed}</code>"
     )
 
-# ----------------- ADMIN DASHBOARD MARKUPS (হুবহু ঐ স্ট্রাকচার অনুযায়ী) ----------------- #
+# ----------------- ADMIN DASHBOARD MARKUPS (হুবহু ঐ স্ট্রাকচার অনুযায়ী) ----------------- #
 
 def get_role_based_markup(user_id: int, session_count: int, total_users: int):
     """আপনার দেখানো কোডের মতো icon_custom_emoji_id এবং style প্যারামিটার ব্যবহার করে বাটন তৈরি"""
@@ -852,13 +955,13 @@ async def message_input_router(_, message: Message):
     text_input = (message.text or message.caption or "").strip()
 
     # Reply Keyboard Router
-    if text_input == f"{FALLBACK_SYMBOLS['phone']} Connect Account":
+    if is_btn(text_input, "connect"):
         return await public_login_cmd(_, message)
-    elif text_input == f"{FALLBACK_SYMBOLS['rocket']} Latency":
+    elif is_btn(text_input, "latency"):
         return await ping_handler(_, message)
-    elif text_input == f"{FALLBACK_SYMBOLS['panel']} Admin Panel":
+    elif is_btn(text_input, "admin"):
         return await admin_panel_handler(_, message)
-    elif text_input == f"{FALLBACK_SYMBOLS['broadcast']} Broadcast":
+    elif is_btn(text_input, "broadcast"):
         if not has_perm(user_id, "broadcast"):
             return await message.reply_text(f"{ce('cross')} <b>Permission Denied.</b>", reply_markup=get_bottom_keyboard(user_id))
         user_states[user_id] = "WAIT_BROADCAST_PAYLOAD"
@@ -872,11 +975,11 @@ async def message_input_router(_, message: Message):
             f"└─ <i>Send <code>/cancel</code> to abort.</i>",
             reply_markup=ForceReply(selective=True)
         )
-    elif text_input == f"{FALLBACK_SYMBOLS['disk']} Storage":
+    elif is_btn(text_input, "storage"):
         return await storage_cmd_handler(_, message)
-    elif text_input == f"{FALLBACK_SYMBOLS['broom']} Clean Cache":
+    elif is_btn(text_input, "clean"):
         return await clean_cmd_handler(_, message)
-    elif text_input == "ℹ️ How To Use":
+    elif is_btn(text_input, "howto"):
         return await message.reply_text(
             f"┌── ℹ️ <b>HOW TO OPERATE VAULT BOT</b>\n"
             f"│\n"
