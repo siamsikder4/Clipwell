@@ -9,7 +9,7 @@ import html
 import aiohttp
 from aiohttp import web
 from hydrogram import Client, filters
-from hydrogram.enums import ParseMode
+from hydrogram.enums import ParseMode, ChatMemberStatus
 from hydrogram.types import (
     Message,
     InlineKeyboardMarkup,
@@ -24,7 +24,19 @@ from hydrogram.types import (
     InputMediaAudio,
     InputMediaDocument
 )
-from hydrogram.errors import SessionPasswordNeeded, FloodWait, UserIsBlocked, InputUserDeactivated
+from hydrogram.errors import (
+    SessionPasswordNeeded,
+    FloodWait,
+    UserIsBlocked,
+    InputUserDeactivated,
+    UserNotParticipant
+)
+
+try:
+    from hydrogram import StopTransmission
+except ImportError:
+    class StopTransmission(Exception):
+        pass
 
 # =====================================================================
 # 🎨 CENTRALIZED UI CUSTOM EMOJIS CONFIGURATION
@@ -122,25 +134,27 @@ KB_BUTTONS = {
     "connect":   {"text": "Connect Account", "emoji_id": "6314537472076291328", "style": "success", "legacy": FALLBACK_SYMBOLS["phone"]},
     "latency":   {"text": "Latency",         "emoji_id": "6052973985224728368", "style": "primary", "legacy": FALLBACK_SYMBOLS["rocket"]},
     "howto":     {"text": "How To Use",      "emoji_id": "6314162714704878982", "style": "primary", "legacy": "ℹ️"},
+    "profile":   {"text": "Profile",         "emoji_id": UI_EMOJIS["user"],     "style": "primary", "legacy": FALLBACK_SYMBOLS["user"]},
 }
 
 # ---------------------------------------------------------------------
 # 📐 বাটনের পজিশন (লেআউট) — প্রতিটা [ ] = একটা সারি (row)
-# একটা সারিতে ১টা দিলে বাটন ফুল-উইডথ, ২-৩টা দিলে পাশাপাশি বসবে।
-# নামগুলো উপরের KB_BUTTONS এর key: admin, broadcast, storage, clean, connect, latency, howto
 # ---------------------------------------------------------------------
 KB_LAYOUT_ADMIN = [
     ["admin", "broadcast"],
     ["storage", "clean"],
     ["connect", "latency"],
+    ["profile"],
 ]
 KB_LAYOUT_USER = [
     ["connect", "latency"],
-    ["howto"],
+    ["profile", "howto"],
 ]
 
 # True হলে Admin/Owner একাধিক একাউন্ট কানেক্ট করতে পারবে (সাধারণ ইউজার শুধু ১টা)
 ADMINS_CAN_ADD_MULTIPLE = True
+# True হলে Admin/Owner এর ক্রেডিট লাগবে না
+ADMINS_UNLIMITED = True
 
 def is_btn(text: str, key: str) -> bool:
     """নতুন (ইমোজি ছাড়া) এবং পুরনো (ইমোজি সহ) দুই ধরনের বাটন টেক্সটই ম্যাচ করবে"""
@@ -151,7 +165,6 @@ def is_btn(text: str, key: str) -> bool:
 # 🛠️ BOT API BRIDGE
 # Hydrogram (MTProto) বাটনের icon_custom_emoji_id / style পাঠাতে পারে না,
 # তাই বাটন-সহ মেসেজগুলো সরাসরি Telegram Bot API দিয়ে যাবে।
-# বাকি সব কিছু আগের মতোই Hydrogram দিয়ে চলবে।
 # =====================================================================
 class RawMarkup:
     """Bot API-র জন্য কাঁচা JSON reply_markup রাখার ক্লাস"""
@@ -177,7 +190,7 @@ async def bot_api_call(method: str, payload: dict):
         return {"ok": False}
 
 def create_custom_inline_markup(rows: list) -> RawMarkup:
-    """Raw Dictionary থেকে Bot API Inline Keyboard বানানোর ফাংশন (icon_custom_emoji_id ও style সহ)"""
+    """Raw Dictionary থেকে Bot API Inline Keyboard বানানোর ফাংশন (icon_custom_emoji_id, style, url সহ)"""
     kb_rows = []
     for row in rows:
         kb_row = []
@@ -185,6 +198,8 @@ def create_custom_inline_markup(rows: list) -> RawMarkup:
             b = {"text": btn["text"]}
             if btn.get("callback_data"):
                 b["callback_data"] = btn["callback_data"]
+            if btn.get("url"):
+                b["url"] = btn["url"]
             if btn.get("icon_custom_emoji_id"):
                 b["icon_custom_emoji_id"] = str(btn["icon_custom_emoji_id"])
             if btn.get("style"):
@@ -251,15 +266,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Environment Configuration
-API_ID = int(os.environ.get("API_ID", "35039821"))
-API_HASH = os.environ.get("API_HASH", "77df805f1700eeefec861de6c93ee2ae").strip()
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8952918726:AAGnKZm-S8hmBaWzltPfrdWRcyVHGVx44d0").strip()
+# =====================================================================
+# 🔐 Environment Configuration (সব সিক্রেট এখন শুধু env থেকে পড়া হবে)
+# =====================================================================
+API_ID = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"].strip()
+BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
 FIREBASE_KEY_RAW = os.environ.get("FIREBASE_KEY", "").strip()
 
 OWNER_ID = 8271633124
 PORT = int(os.environ.get("PORT", "8080"))
 AUTO_DELETE_TIME = int(os.environ.get("AUTO_DELETE_TIME", "120"))  # Seconds
+
+DAILY_CREDITS = int(os.environ.get("DAILY_CREDITS", "30"))
+BOT_START = time.time()
+
+# Force Subscribe: @username অথবা -100xxxxxxxxxx (বট ঐ চ্যানেলে Admin হতে হবে)
+_fs_raw = os.environ.get("FORCE_SUB_CHANNEL", "").strip()
+FORCE_SUB_CHANNEL = int(_fs_raw) if _fs_raw.lstrip("-").isdigit() else _fs_raw
+FORCE_SUB_LINK = os.environ.get("FORCE_SUB_LINK", "").strip() or (
+    f"https://t.me/{_fs_raw.lstrip('@')}" if _fs_raw and not _fs_raw.lstrip("-").isdigit() else ""
+)
 
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -293,6 +320,9 @@ loaded_admins = {}
 mem_bot_users = set()
 
 active_tasks = {}
+user_cache = {}
+pending_target = {}        # admin -> যে user কে ম্যানেজ করছে
+cancel_requests = set()    # ক্যান্সেল করা টাস্ক
 
 # ----------------- BOTTOM KEYBOARD BUILDER ----------------- #
 
@@ -326,7 +356,7 @@ def human_bytes(size: int) -> str:
 def get_storage_stats():
     total, used, free = shutil.disk_usage(".")
     percent = (used / total) * 100 if total > 0 else 0
-    
+
     dl_size = 0
     dl_files = 0
     if os.path.exists(DOWNLOAD_DIR):
@@ -345,12 +375,23 @@ def get_storage_stats():
         "dl_files": dl_files
     }
 
+def cancel_markup(key: str) -> RawMarkup:
+    return create_custom_inline_markup([[{
+        "text": "Cancel",
+        "callback_data": f"cancel_{key}",
+        "icon_custom_emoji_id": UI_EMOJIS["cross"],
+        "style": "danger"
+    }]])
+
 class ProgressTracker:
-    def __init__(self, message: Message, action_text: str, task_id: str = None, task_type: str = "download"):
+    def __init__(self, message: Message, action_text: str, task_id: str = None,
+                 task_type: str = "download", cancel_key: str = None):
         self.message = message
         self.action_text = action_text
         self.task_id = task_id
         self.task_type = task_type
+        self.cancel_key = cancel_key
+        self.markup = cancel_markup(cancel_key) if cancel_key else None
         self.last_update_time = time.time()
 
         if self.task_id:
@@ -365,6 +406,9 @@ class ProgressTracker:
             }
 
     async def progress(self, current: int, total: int):
+        if self.cancel_key and self.cancel_key in cancel_requests:
+            raise StopTransmission
+
         now = time.time()
         percent = (current / total) * 100 if total > 0 else 0
 
@@ -372,7 +416,7 @@ class ProgressTracker:
             time_diff = max(0.1, now - self.last_update_time)
             bytes_diff = current - active_tasks[self.task_id]["current"]
             speed = f"{human_bytes(int(bytes_diff / time_diff))}/s" if bytes_diff > 0 else "0 B/s"
-            
+
             active_tasks[self.task_id].update({
                 "current": current,
                 "total": total,
@@ -395,7 +439,7 @@ class ProgressTracker:
             f"└ {icon} <code>{human_bytes(current)}</code> / <code>{human_bytes(total)}</code>"
         )
         try:
-            await self.message.edit_text(text)
+            await self.message.edit_text(text, reply_markup=self.markup)
         except Exception:
             pass
 
@@ -404,11 +448,14 @@ class ProgressTracker:
             active_tasks.pop(self.task_id, None)
 
 class AlbumProgressTracker:
-    def __init__(self, message: Message, total_files: int, action_text: str = "Downloading album", task_id: str = None):
+    def __init__(self, message: Message, total_files: int, action_text: str = "Downloading album",
+                 task_id: str = None, cancel_key: str = None):
         self.message = message
         self.total_files = total_files
         self.action_text = action_text
         self.task_id = task_id
+        self.cancel_key = cancel_key
+        self.markup = cancel_markup(cancel_key) if cancel_key else None
         self.last_update_time = time.time()
         self.file_progress = {}
         self.lock = asyncio.Lock()
@@ -424,7 +471,13 @@ class AlbumProgressTracker:
                 "updated_at": time.time()
             }
 
+    def is_cancelled(self) -> bool:
+        return bool(self.cancel_key and self.cancel_key in cancel_requests)
+
     async def progress(self, current: int, total: int, idx: int):
+        if self.is_cancelled():
+            raise StopTransmission
+
         self.file_progress[idx] = (current, total)
         now = time.time()
 
@@ -458,7 +511,7 @@ class AlbumProgressTracker:
                 f"└ {ce('download')} <code>{human_bytes(total_downloaded)}</code> / <code>{human_bytes(total_size)}</code>"
             )
             try:
-                await self.message.edit_text(text)
+                await self.message.edit_text(text, reply_markup=self.markup)
             except Exception:
                 pass
 
@@ -468,8 +521,61 @@ class AlbumProgressTracker:
 
 # ----------------- DATABASE HELPERS ----------------- #
 
+def today_str() -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime())
+
+def has_unlimited(user_id: int) -> bool:
+    return ADMINS_UNLIMITED and is_any_admin(user_id)
+
+def sync_save_user(user_id: int):
+    u = user_cache.get(user_id)
+    if not u or not db:
+        return
+    try:
+        db.collection("registered_users").document(str(user_id)).set({"user_id": user_id, **u}, merge=True)
+    except Exception as e:
+        logger.error(f"Save user error: {e}")
+
+def sync_get_user(user_id: int) -> dict:
+    """ইউজারের ডাটা (credits, banned...) ক্যাশ/ডাটাবেস থেকে আনে; দিন বদলালে ক্রেডিট রিসেট করে"""
+    u = user_cache.get(user_id)
+    needs_save = False
+    if u is None:
+        u = {"credits": DAILY_CREDITS, "last_reset": today_str(), "banned": False,
+             "joined": time.time(), "downloads": 0}
+        found = False
+        if db:
+            try:
+                d = db.collection("registered_users").document(str(user_id)).get()
+                if d.exists:
+                    found = True
+                    data = d.to_dict()
+                    for k in ("credits", "last_reset", "banned", "joined", "downloads"):
+                        if k in data:
+                            u[k] = data[k]
+            except Exception:
+                pass
+        user_cache[user_id] = u
+        needs_save = not found
+    if u["last_reset"] != today_str():
+        u["credits"] = max(u["credits"], DAILY_CREDITS)  # Admin এর দেওয়া বাড়তি ক্রেডিট নষ্ট হবে না
+        u["last_reset"] = today_str()
+        needs_save = True
+    if needs_save:
+        sync_save_user(user_id)
+    return u
+
+def sync_charge(user_id: int):
+    """সফল ডাউনলোডের পর ১ ক্রেডিট কাটে"""
+    u = sync_get_user(user_id)
+    u["downloads"] = u.get("downloads", 0) + 1
+    if not has_unlimited(user_id):
+        u["credits"] = max(0, u["credits"] - 1)
+    sync_save_user(user_id)
+
 def sync_register_user(user_id: int):
     mem_bot_users.add(user_id)
+    sync_get_user(user_id)
     if not db:
         return
     try:
@@ -479,6 +585,24 @@ def sync_register_user(user_id: int):
         }, merge=True)
     except Exception:
         pass
+
+def sync_get_stats() -> dict:
+    users = []
+    if db:
+        try:
+            users = [d.to_dict() for d in db.collection("registered_users").stream()]
+        except Exception:
+            users = []
+    if not users:
+        users = list(user_cache.values())
+    now = time.time()
+    return {
+        "total": len(users),
+        "banned": sum(1 for u in users if u.get("banned")),
+        "active24": sum(1 for u in users if now - u.get("last_active", 0) < 86400),
+        "new24": sum(1 for u in users if now - u.get("joined", 0) < 86400),
+        "downloads": sum(u.get("downloads", 0) for u in users),
+    }
 
 def sync_get_all_bot_users():
     if not db:
@@ -502,14 +626,15 @@ def sync_get_all_admins():
                 data = d.to_dict()
                 admins[int(d.id)] = {
                     "sessions": data.get("sessions", False),
-                    "broadcast": data.get("broadcast", True)
+                    "broadcast": data.get("broadcast", True),
+                    "users": data.get("users", False)
                 }
     except Exception as e:
         logger.error(f"Get Admins Error: {e}")
     return admins
 
 def sync_add_admin(user_id: int):
-    default_perms = {"sessions": False, "broadcast": True}
+    default_perms = {"sessions": False, "broadcast": True, "users": False}
     loaded_admins[user_id] = default_perms
     if not db:
         return True
@@ -672,10 +797,174 @@ async def broadcast_to_all_users(source_message: Message, admin_id: int):
         f"└ {ce('cross')} <b>Failed:</b> <code>{failed}</code>"
     )
 
-# ----------------- ADMIN DASHBOARD MARKUPS (হুবহু ঐ স্ট্রাকচার অনুযায়ী) ----------------- #
+# ----------------- FORCE SUB + BAN GATE ----------------- #
+
+async def check_subscribed(user_id: int) -> bool:
+    if not FORCE_SUB_CHANNEL:
+        return True
+    try:
+        m = await bot.get_chat_member(FORCE_SUB_CHANNEL, user_id)
+        return m.status not in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED)
+    except UserNotParticipant:
+        return False
+    except Exception as e:
+        logger.error(f"ForceSub check error (বট চ্যানেলে Admin আছে কিনা দেখুন): {e}")
+        return True  # এরর হলে ইউজারকে আটকাবে না
+
+def force_sub_markup() -> RawMarkup:
+    rows = []
+    if FORCE_SUB_LINK:
+        rows.append([{"text": "Join Channel", "url": FORCE_SUB_LINK,
+                      "icon_custom_emoji_id": UI_EMOJIS["broadcast"], "style": "primary"}])
+    rows.append([{"text": "I've Joined", "callback_data": "btn_check_sub",
+                  "icon_custom_emoji_id": UI_EMOJIS["check"], "style": "success"}])
+    return create_custom_inline_markup(rows)
+
+@bot.on_message(filters.private & filters.incoming, group=-1)
+async def global_gate(_, message: Message):
+    if not message.from_user:
+        return
+    uid = message.from_user.id
+    if is_any_admin(uid):
+        return
+    u = await asyncio.to_thread(sync_get_user, uid)
+    if u["banned"]:
+        await message.reply_text(f"{ce('cross')} <b>You are banned from using this bot.</b>")
+        message.stop_propagation()
+    if not await check_subscribed(uid):
+        await message.reply_text(
+            f"┌── {ce('lock')} <b>JOIN REQUIRED</b>\n"
+            f"│\n"
+            f"└─ Please join our channel first, then tap <b>I've Joined</b>.",
+            reply_markup=force_sub_markup()
+        )
+        message.stop_propagation()
+
+@bot.on_callback_query(group=-1)
+async def callback_gate(_, query: CallbackQuery):
+    uid = query.from_user.id
+    if is_any_admin(uid) or query.data == "btn_check_sub":
+        return
+    u = await asyncio.to_thread(sync_get_user, uid)
+    if u["banned"]:
+        await query.answer("You are banned.", show_alert=True)
+        query.stop_propagation()
+    if not await check_subscribed(uid):
+        await query.answer("Join the channel first!", show_alert=True)
+        query.stop_propagation()
+
+# ----------------- USER PROFILE ----------------- #
+
+def build_profile(user_id: int, first_name: str):
+    u = sync_get_user(user_id)
+    sess = sync_get_user_session(user_id)
+    acc = html.escape(str(sess.get("account_name", "Unknown"))) if sess else "Not connected"
+    role = (f"{ce('crown')} Owner" if user_id == OWNER_ID
+            else f"{ce('shield')} Admin" if is_any_admin(user_id) else f"{ce('user')} User")
+    credits = "∞ Unlimited" if has_unlimited(user_id) else f"{u['credits']} / {DAILY_CREDITS}"
+
+    now = time.gmtime()
+    left = 86400 - (now.tm_hour * 3600 + now.tm_min * 60 + now.tm_sec)
+
+    # চলমান ট্রান্সফার (Cancel বাটনের জন্য)
+    bases = []
+    for k in list(active_tasks.keys()):
+        if f"task_{user_id}_" in k:
+            base = k[k.index("task_"):]
+            if base not in bases:
+                bases.append(base)
+
+    text = (
+        f"┌── {ce('user')} <b>MY PROFILE</b>\n"
+        f"│\n"
+        f"├ <b>Name:</b> {html.escape(first_name or 'User')}\n"
+        f"├ <b>ID:</b> <code>{user_id}</code>\n"
+        f"├ <b>Role:</b> {role}\n"
+        f"├ {ce('spark')} <b>Credits Today:</b> <code>{credits}</code>\n"
+        f"├ {ce('timer')} <b>Reset In:</b> <code>{left // 3600}h {(left % 3600) // 60}m</code>\n"
+        f"├ {ce('download')} <b>Total Downloads:</b> <code>{u.get('downloads', 0)}</code>\n"
+        f"├ {ce('phone')} <b>Account:</b> <code>{acc}</code>\n"
+        f"└ {ce('refresh')} <b>Active Transfers:</b> <code>{len(bases)}</code>"
+    )
+    rows = [[{"text": f"Cancel Download #{i}", "callback_data": f"cancel_{b}",
+              "icon_custom_emoji_id": UI_EMOJIS["cross"], "style": "danger"}]
+            for i, b in enumerate(bases, 1)]
+    rows.append([{"text": "Refresh", "callback_data": "btn_profile_refresh",
+                  "icon_custom_emoji_id": UI_EMOJIS["refresh"], "style": "success"}])
+    return text, create_custom_inline_markup(rows)
+
+@bot.on_message(filters.command("profile") & filters.private & filters.incoming)
+async def profile_handler(_, message: Message):
+    uid = message.from_user.id
+    text, markup = await asyncio.to_thread(build_profile, uid, message.from_user.first_name)
+    await message.reply_text(text, reply_markup=markup)
+
+# ----------------- USER MANAGER (Ban / Credits) ----------------- #
+
+def user_card_text(uid: int, u: dict) -> str:
+    status = f"{ce('offline')} Banned" if u["banned"] else f"{ce('online')} Active"
+    return (
+        f"┌── {ce('user')} <b>USER MANAGER</b>\n"
+        f"│\n"
+        f"├ <b>ID:</b> <code>{uid}</code>\n"
+        f"├ <b>Status:</b> {status}\n"
+        f"├ {ce('spark')} <b>Credits:</b> <code>{u['credits']}</code>\n"
+        f"└ {ce('download')} <b>Downloads:</b> <code>{u.get('downloads', 0)}</code>"
+    )
+
+def user_card_markup(uid: int, u: dict) -> RawMarkup:
+    if u["banned"]:
+        ban_btn = {"text": "Unban User", "callback_data": f"ub_unban_{uid}",
+                   "icon_custom_emoji_id": UI_EMOJIS["check"], "style": "success"}
+    else:
+        ban_btn = {"text": "Ban User", "callback_data": f"ub_ban_{uid}",
+                   "icon_custom_emoji_id": UI_EMOJIS["cross"], "style": "danger"}
+    return create_custom_inline_markup([
+        [ban_btn],
+        [{"text": "Give / Remove Credits", "callback_data": f"uc_add_{uid}",
+          "icon_custom_emoji_id": UI_EMOJIS["spark"], "style": "primary"}],
+        [{"text": "Back", "callback_data": "btn_refresh_panel",
+          "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "primary"}]
+    ])
+
+@bot.on_message(filters.command(["ban", "unban"]) & filters.private & filters.incoming)
+async def ban_cmd(_, message: Message):
+    uid = message.from_user.id
+    if not has_perm(uid, "users"):
+        return await message.reply_text(f"{ce('cross')} <b>Permission Denied.</b>")
+    if len(message.command) < 2 or not message.command[1].isdigit():
+        return await message.reply_text("Usage: <code>/ban 123456</code> or <code>/unban 123456</code>")
+    target = int(message.command[1])
+    if is_any_admin(target):
+        return await message.reply_text(f"{ce('cross')} <b>You can't ban an admin.</b>")
+    ban = message.command[0].lower() == "ban"
+    u = await asyncio.to_thread(sync_get_user, target)
+    u["banned"] = ban
+    await asyncio.to_thread(sync_save_user, target)
+    await message.reply_text(user_card_text(target, u), reply_markup=user_card_markup(target, u))
+
+@bot.on_message(filters.command("addcredit") & filters.private & filters.incoming)
+async def addcredit_cmd(_, message: Message):
+    uid = message.from_user.id
+    if not has_perm(uid, "users"):
+        return await message.reply_text(f"{ce('cross')} <b>Permission Denied.</b>")
+    try:
+        target, amt = int(message.command[1]), int(message.command[2])
+    except Exception:
+        return await message.reply_text("Usage: <code>/addcredit 123456 50</code>")
+    u = await asyncio.to_thread(sync_get_user, target)
+    u["credits"] = max(0, u["credits"] + amt)
+    await asyncio.to_thread(sync_save_user, target)
+    await message.reply_text(user_card_text(target, u), reply_markup=user_card_markup(target, u))
+    try:
+        await bot.send_message(target, f"{ce('spark')} <b>Admin added <code>{amt}</code> credits.</b> Now: <code>{u['credits']}</code>")
+    except Exception:
+        pass
+
+# ----------------- ADMIN DASHBOARD MARKUPS ----------------- #
 
 def get_role_based_markup(user_id: int, session_count: int, total_users: int):
-    """আপনার দেখানো কোডের মতো icon_custom_emoji_id এবং style প্যারামিটার ব্যবহার করে বাটন তৈরি"""
+    """icon_custom_emoji_id এবং style প্যারামিটার ব্যবহার করে বাটন তৈরি"""
     raw_buttons = [
         [
             {
@@ -712,6 +1001,20 @@ def get_role_based_markup(user_id: int, session_count: int, total_users: int):
                 "icon_custom_emoji_id": UI_EMOJIS["broom"],
                 "style": "danger"
             }
+        ],
+        [
+            {
+                "text": "Stats",
+                "callback_data": "btn_stats",
+                "icon_custom_emoji_id": UI_EMOJIS["target"],
+                "style": "primary"
+            },
+            {
+                "text": "Manage User",
+                "callback_data": "btn_user_manager",
+                "icon_custom_emoji_id": UI_EMOJIS["user"],
+                "style": "primary"
+            }
         ]
     ]
 
@@ -733,8 +1036,21 @@ def get_role_based_markup(user_id: int, session_count: int, total_users: int):
             "style": "success"
         }
     ])
-    
+
     return create_custom_inline_markup(raw_buttons)
+
+def perm_markup(target_uid: int) -> RawMarkup:
+    perms = loaded_admins.get(target_uid, {})
+    s_tag = FALLBACK_SYMBOLS['online'] if perms.get("sessions") else FALLBACK_SYMBOLS['offline']
+    b_tag = FALLBACK_SYMBOLS['online'] if perms.get("broadcast") else FALLBACK_SYMBOLS['offline']
+    u_tag = FALLBACK_SYMBOLS['online'] if perms.get("users") else FALLBACK_SYMBOLS['offline']
+    return create_custom_inline_markup([
+        [{"text": f"Manage Sessions: {s_tag}", "callback_data": f"togperm_{target_uid}_sessions", "style": "primary"}],
+        [{"text": f"Send Broadcast: {b_tag}", "callback_data": f"togperm_{target_uid}_broadcast", "style": "primary"}],
+        [{"text": f"Manage Users: {u_tag}", "callback_data": f"togperm_{target_uid}_users", "style": "primary"}],
+        [{"text": "Remove Admin", "callback_data": f"deladmin_{target_uid}", "icon_custom_emoji_id": UI_EMOJIS["trash"], "style": "danger"}],
+        [{"text": "Back", "callback_data": "btn_manage_admins", "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "danger"}]
+    ])
 
 @bot.on_message(filters.command(["admin", "panel"]) & filters.private & filters.incoming)
 async def admin_panel_handler(_, message: Message):
@@ -784,6 +1100,26 @@ async def callback_handler(_, query: CallbackQuery):
         await query.message.reply_text(f"{ce('lock')} <b>Please send your 2FA password:</b>", reply_markup=ForceReply(selective=True))
         return await query.answer()
 
+    if data == "btn_check_sub":
+        if await check_subscribed(user_id):
+            await query.message.edit_text(f"{ce('check')} <b>Verified! Send /start to begin.</b>")
+            return await query.answer("Verified")
+        return await query.answer("You haven't joined yet!", show_alert=True)
+
+    if data == "btn_profile_refresh":
+        text, markup = await asyncio.to_thread(build_profile, user_id, query.from_user.first_name)
+        await query.message.edit_text(text, reply_markup=markup)
+        return await query.answer("Refreshed")
+
+    if data.startswith("cancel_"):
+        key = data[len("cancel_"):]  # task_<uid>_<time>
+        parts = key.split("_")
+        owner_part = parts[1] if len(parts) >= 3 else ""
+        if owner_part != str(user_id) and not is_any_admin(user_id):
+            return await query.answer("Not your task", show_alert=True)
+        cancel_requests.add(key)
+        return await query.answer("Cancelling...")
+
     if not is_any_admin(user_id):
         return await query.answer("Access Denied", show_alert=True)
 
@@ -819,6 +1155,69 @@ async def callback_handler(_, query: CallbackQuery):
             f"├ {ce('media')} Send Photo or Video with Caption\n"
             f"│\n"
             f"└─ <i>Send <code>/cancel</code> to abort anytime.</i>",
+            reply_markup=ForceReply(selective=True)
+        )
+        await query.answer()
+
+    elif data == "btn_stats":
+        s = await asyncio.to_thread(sync_get_stats)
+        up = int(time.time() - BOT_START)
+        text = (
+            f"┌── {ce('chart')} <b>BOT STATISTICS</b>\n"
+            f"│\n"
+            f"├ {ce('users')} <b>Total Users:</b> <code>{s['total']}</code>\n"
+            f"├ {ce('online')} <b>Active (24h):</b> <code>{s['active24']}</code>\n"
+            f"├ {ce('spark')} <b>New (24h):</b> <code>{s['new24']}</code>\n"
+            f"├ {ce('offline')} <b>Banned:</b> <code>{s['banned']}</code>\n"
+            f"├ {ce('download')} <b>Total Downloads:</b> <code>{s['downloads']}</code>\n"
+            f"├ {ce('folder')} <b>Userbot Sessions:</b> <code>{len(loaded_user_clients)}</code>\n"
+            f"├ {ce('refresh')} <b>Active Transfers:</b> <code>{len(active_tasks)}</code>\n"
+            f"└ {ce('timer')} <b>Uptime:</b> <code>{up // 3600}h {(up % 3600) // 60}m</code>"
+        )
+        markup = create_custom_inline_markup([
+            [{"text": "Refresh", "callback_data": "btn_stats", "icon_custom_emoji_id": UI_EMOJIS["refresh"], "style": "success"}],
+            [{"text": "Back", "callback_data": "btn_refresh_panel", "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "primary"}]
+        ])
+        await query.message.edit_text(text, reply_markup=markup)
+        await query.answer()
+
+    elif data == "btn_user_manager":
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        user_states[user_id] = "WAIT_USER_LOOKUP"
+        await query.message.reply_text(
+            f"{ce('user')} <b>Send the Telegram User ID:</b>",
+            reply_markup=ForceReply(selective=True)
+        )
+        await query.answer()
+
+    elif data.startswith("ub_ban_") or data.startswith("ub_unban_"):
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        ban = data.startswith("ub_ban_")
+        target = int(data.rsplit("_", 1)[1])
+        if is_any_admin(target):
+            return await query.answer("You can't ban an admin", show_alert=True)
+        u = await asyncio.to_thread(sync_get_user, target)
+        u["banned"] = ban
+        await asyncio.to_thread(sync_save_user, target)
+        await query.answer("User banned" if ban else "User unbanned")
+        await query.message.edit_text(user_card_text(target, u), reply_markup=user_card_markup(target, u))
+        try:
+            await bot.send_message(
+                target,
+                f"{ce('cross') if ban else ce('check')} <b>You have been {'banned' if ban else 'unbanned'} by admin.</b>"
+            )
+        except Exception:
+            pass
+
+    elif data.startswith("uc_add_"):
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        pending_target[user_id] = int(data.rsplit("_", 1)[1])
+        user_states[user_id] = "WAIT_CREDIT_AMOUNT"
+        await query.message.reply_text(
+            f"{ce('spark')} <b>Send credit amount</b> (e.g. <code>50</code>, remove: <code>-10</code>):",
             reply_markup=ForceReply(selective=True)
         )
         await query.answer()
@@ -886,7 +1285,7 @@ async def callback_handler(_, query: CallbackQuery):
             text += "└ <i>No userbot sessions currently linked.</i>"
         else:
             for idx, s in enumerate(sessions, 1):
-                text += f"├ <b>{idx}.</b> <code>{s.get('account_name', 'Unknown')}</code>\n"
+                text += f"├ <b>{idx}.</b> <code>{html.escape(str(s.get('account_name', 'Unknown')))}</code>\n"
             text += "│\n└─ <i>Sessions handle private restricted downloads.</i>"
         markup = create_custom_inline_markup([[{"text": "Back", "callback_data": "btn_refresh_panel", "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "primary"}]])
         await query.message.edit_text(text, reply_markup=markup)
@@ -934,17 +1333,7 @@ async def callback_handler(_, query: CallbackQuery):
         if user_id != OWNER_ID:
             return await query.answer("Owner Only", show_alert=True)
         target_uid = int(data.split("_")[1])
-        perms = loaded_admins.get(target_uid, {})
-        s_tag = FALLBACK_SYMBOLS['online'] if perms.get("sessions") else FALLBACK_SYMBOLS['offline']
-        b_tag = FALLBACK_SYMBOLS['online'] if perms.get("broadcast") else FALLBACK_SYMBOLS['offline']
-
-        markup = create_custom_inline_markup([
-            [{"text": f"Manage Sessions: {s_tag}", "callback_data": f"togperm_{target_uid}_sessions", "style": "primary"}],
-            [{"text": f"Send Broadcast: {b_tag}", "callback_data": f"togperm_{target_uid}_broadcast", "style": "primary"}],
-            [{"text": "Remove Admin", "callback_data": f"deladmin_{target_uid}", "icon_custom_emoji_id": UI_EMOJIS["trash"], "style": "danger"}],
-            [{"text": "Back", "callback_data": "btn_manage_admins", "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "danger"}]
-        ])
-        await query.message.edit_text(f"{ce('gear')} <b>Permissions for Admin:</b> <code>{target_uid}</code>", reply_markup=markup)
+        await query.message.edit_text(f"{ce('gear')} <b>Permissions for Admin:</b> <code>{target_uid}</code>", reply_markup=perm_markup(target_uid))
         await query.answer()
 
     elif data.startswith("togperm_"):
@@ -957,17 +1346,7 @@ async def callback_handler(_, query: CallbackQuery):
         if db:
             db.collection("bot_admins").document(str(target_uid)).set({p_key: not curr}, merge=True)
         await query.answer("Permission Updated")
-
-        perms = loaded_admins.get(target_uid, {})
-        s_tag = FALLBACK_SYMBOLS['online'] if perms.get("sessions") else FALLBACK_SYMBOLS['offline']
-        b_tag = FALLBACK_SYMBOLS['online'] if perms.get("broadcast") else FALLBACK_SYMBOLS['offline']
-        markup = create_custom_inline_markup([
-            [{"text": f"Manage Sessions: {s_tag}", "callback_data": f"togperm_{target_uid}_sessions", "style": "primary"}],
-            [{"text": f"Send Broadcast: {b_tag}", "callback_data": f"togperm_{target_uid}_broadcast", "style": "primary"}],
-            [{"text": "Remove Admin", "callback_data": f"deladmin_{target_uid}", "icon_custom_emoji_id": UI_EMOJIS["trash"], "style": "danger"}],
-            [{"text": "Back", "callback_data": "btn_manage_admins", "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "danger"}]
-        ])
-        await query.message.edit_reply_markup(reply_markup=markup)
+        await query.message.edit_reply_markup(reply_markup=perm_markup(target_uid))
 
     elif data.startswith("deladmin_"):
         if user_id != OWNER_ID:
@@ -982,10 +1361,10 @@ async def callback_handler(_, query: CallbackQuery):
 
 # ----------------- MESSAGE ROUTER & BROADCAST INTAKE ----------------- #
 
-@bot.on_message(filters.private & filters.incoming & ~filters.command(["start", "help", "admin", "panel", "ping", "storage", "clean", "login", "cancel"]))
+@bot.on_message(filters.private & filters.incoming & ~filters.command(["start", "help", "admin", "panel", "ping", "storage", "clean", "login", "cancel", "profile", "ban", "unban", "addcredit"]))
 async def message_input_router(_, message: Message):
     user_id = message.from_user.id
-    asyncio.to_thread(sync_register_user, user_id)
+    await asyncio.to_thread(sync_register_user, user_id)
 
     state = user_states.get(user_id)
     text_input = (message.text or message.caption or "").strip()
@@ -997,6 +1376,8 @@ async def message_input_router(_, message: Message):
         return await ping_handler(_, message)
     elif is_btn(text_input, "admin"):
         return await admin_panel_handler(_, message)
+    elif is_btn(text_input, "profile"):
+        return await profile_handler(_, message)
     elif is_btn(text_input, "broadcast"):
         if not has_perm(user_id, "broadcast"):
             return await message.reply_text(f"{ce('cross')} <b>Permission Denied.</b>", reply_markup=get_bottom_keyboard(user_id))
@@ -1021,7 +1402,8 @@ async def message_input_router(_, message: Message):
             f"│\n"
             f"├ <b>1.</b> Send any public channel or restricted post link.\n"
             f"├ <b>2.</b> Connect your Telegram account via <code>/login</code> for private channels.\n"
-            f"├ <b>3.</b> Delivered files automatically purge in <code>{AUTO_DELETE_TIME}s</code>.\n"
+            f"├ <b>3.</b> Each download costs 1 credit ({DAILY_CREDITS} free credits daily).\n"
+            f"├ <b>4.</b> Delivered files automatically purge in <code>{AUTO_DELETE_TIME}s</code>.\n"
             f"│\n"
             f"└─ {ce('spark')} <i>Fast, persistent and cloud-integrated.</i>",
             reply_markup=get_bottom_keyboard(user_id)
@@ -1041,6 +1423,35 @@ async def message_input_router(_, message: Message):
         t_id = int(text_input)
         await asyncio.to_thread(sync_add_admin, t_id)
         return await message.reply_text(f"{ce('check')} <b>Admin <code>{t_id}</code> successfully added!</b>", reply_markup=get_bottom_keyboard(user_id))
+
+    # User Manager: ID নেওয়া
+    if state == "WAIT_USER_LOOKUP" and has_perm(user_id, "users"):
+        user_states.pop(user_id, None)
+        if not text_input.isdigit():
+            return await message.reply_text(f"{ce('cross')} <b>User ID must contain only digits.</b>", reply_markup=get_bottom_keyboard(user_id))
+        t_id = int(text_input)
+        u = await asyncio.to_thread(sync_get_user, t_id)
+        return await message.reply_text(user_card_text(t_id, u), reply_markup=user_card_markup(t_id, u))
+
+    # User Manager: ক্রেডিট পরিমাণ নেওয়া
+    if state == "WAIT_CREDIT_AMOUNT" and has_perm(user_id, "users"):
+        user_states.pop(user_id, None)
+        t_id = pending_target.pop(user_id, None)
+        try:
+            amt = int(text_input)
+        except ValueError:
+            return await message.reply_text(f"{ce('cross')} <b>Send a valid number.</b>", reply_markup=get_bottom_keyboard(user_id))
+        if not t_id:
+            return
+        u = await asyncio.to_thread(sync_get_user, t_id)
+        u["credits"] = max(0, u["credits"] + amt)
+        await asyncio.to_thread(sync_save_user, t_id)
+        await message.reply_text(user_card_text(t_id, u), reply_markup=user_card_markup(t_id, u))
+        try:
+            await bot.send_message(t_id, f"{ce('spark')} <b>Admin added <code>{amt}</code> credits.</b> Now: <code>{u['credits']}</code>")
+        except Exception:
+            pass
+        return
 
     # Multi-step Interactive Login Flow
     if state == "WAIT_PHONE":
@@ -1078,13 +1489,13 @@ async def message_input_router(_, message: Message):
             await cl.disconnect()
             login_clients.pop(user_id, None)
             user_states.pop(user_id, None)
-            
+
             await asyncio.to_thread(sync_add_session, s_str, acc, user_id)
             asyncio.create_task(init_session_pool())
             await message.reply_text(
                 f"┌── {ce('check')} <b>ACCOUNT LINKED SUCCESSFULLY!</b>\n"
                 f"│\n"
-                f"├ {ce('user')} <b>Connected:</b> <code>{acc}</code>\n"
+                f"├ {ce('user')} <b>Connected:</b> <code>{html.escape(acc)}</code>\n"
                 f"└─ {ce('spark')} Your session is now active in the userbot pool.",
                 reply_markup=get_bottom_keyboard(user_id)
             )
@@ -1117,13 +1528,13 @@ async def message_input_router(_, message: Message):
             await cl.disconnect()
             login_clients.pop(user_id, None)
             user_states.pop(user_id, None)
-            
+
             await asyncio.to_thread(sync_add_session, s_str, acc, user_id)
             asyncio.create_task(init_session_pool())
             await message.reply_text(
                 f"┌── {ce('check')} <b>ACCOUNT LINKED SUCCESSFULLY!</b>\n"
                 f"│\n"
-                f"├ {ce('user')} <b>Connected:</b> <code>{acc}</code>\n"
+                f"├ {ce('user')} <b>Connected:</b> <code>{html.escape(acc)}</code>\n"
                 f"└─ {ce('spark')} Your session is now ready.",
                 reply_markup=get_bottom_keyboard(user_id)
             )
@@ -1147,6 +1558,17 @@ async def message_input_router(_, message: Message):
             )
         return
 
+    # ক্রেডিট চেক
+    if not has_unlimited(user_id):
+        _u = await asyncio.to_thread(sync_get_user, user_id)
+        if _u["credits"] <= 0:
+            return await message.reply_text(
+                f"┌── {ce('warning')} <b>NO CREDITS LEFT</b>\n"
+                f"│\n"
+                f"└─ Your daily <code>{DAILY_CREDITS}</code> credits are used up. They reset at 00:00 UTC.",
+                reply_markup=get_bottom_keyboard(user_id)
+            )
+
     try:
         await message.react("🫡")
     except Exception:
@@ -1163,6 +1585,7 @@ async def message_input_router(_, message: Message):
     try:
         copied = await bot.copy_message(chat_id=message.chat.id, from_chat_id=chat_id, message_id=msg_id)
         if copied:
+            await asyncio.to_thread(sync_charge, user_id)
             asyncio.create_task(silent_auto_delete(message.chat.id, [copied.id, message.id]))
             return
     except Exception:
@@ -1197,6 +1620,7 @@ async def message_input_router(_, message: Message):
     try:
         fwd = await working_client.forward_messages(message.chat.id, chat_id, msg_id)
         if fwd:
+            await asyncio.to_thread(sync_charge, user_id)
             asyncio.create_task(silent_auto_delete(message.chat.id, [fwd.id, message.id]))
             return
     except Exception:
@@ -1218,7 +1642,7 @@ async def message_input_router(_, message: Message):
 
     # Album Processing
     if len(media_group) > 1:
-        alb_tracker = AlbumProgressTracker(status, len(media_group), "Downloading album...", task_id=task_id)
+        alb_tracker = AlbumProgressTracker(status, len(media_group), "Downloading album...", task_id=task_id, cancel_key=task_id)
         for i, m in enumerate(media_group):
             m_obj = m.video or m.document or m.audio or m.photo
             sz = getattr(m_obj, "file_size", 0) or 0
@@ -1226,6 +1650,18 @@ async def message_input_router(_, message: Message):
 
         tasks = [download_album_item(working_client, m, idx, message.from_user.id, alb_tracker) for idx, m in enumerate(media_group)]
         results = await asyncio.gather(*tasks)
+
+        if task_id in cancel_requests:
+            cancel_requests.discard(task_id)
+            alb_tracker.finish()
+            for r in results:
+                for f in (r[0], r[3]):
+                    if f and os.path.exists(f):
+                        try:
+                            os.remove(f)
+                        except Exception:
+                            pass
+            return await status.edit_text(f"{ce('cross')} <b>Download cancelled.</b>")
 
         files_to_cleanup, thumbs_to_cleanup, input_media = [], [], []
         for path, m, idx, thumb_path in sorted([r for r in results if r[0]], key=lambda x: x[2]):
@@ -1259,6 +1695,7 @@ async def message_input_router(_, message: Message):
             for i in range(0, len(input_media), 10):
                 res = await bot.send_media_group(message.chat.id, input_media[i:i + 10])
                 sent_msgs.extend(res)
+            await asyncio.to_thread(sync_charge, user_id)
             await status.delete()
             asyncio.create_task(silent_auto_delete(message.chat.id, [m.id for m in sent_msgs] + [message.id]))
         else:
@@ -1275,7 +1712,7 @@ async def message_input_router(_, message: Message):
     # Single Media Processing
     if not (target_msg.media or target_msg.video or target_msg.photo or target_msg.document or target_msg.audio or target_msg.voice):
         if target_msg.text:
-            return await status.edit_text(f"{ce('note')} <b>Text Content:</b>\n\n{target_msg.text}")
+            return await status.edit_text(f"{ce('note')} <b>Text Content:</b>\n\n{html.escape(target_msg.text)}")
         return await status.edit_text(f"{ce('warning')} <b>No media found in the post.</b>")
 
     ext = ".mp4" if target_msg.video else ".jpg" if target_msg.photo else ".mp3" if target_msg.audio else ""
@@ -1283,10 +1720,13 @@ async def message_input_router(_, message: Message):
         ext = os.path.splitext(target_msg.document.file_name or "")[1] or ".bin"
 
     single_dest = os.path.join(DOWNLOAD_DIR, f"{message.from_user.id}_{int(time.time())}{ext}")
-    dl_tracker = ProgressTracker(status, "Downloading media...", task_id=f"dl_{task_id}", task_type="download")
+    dl_tracker = ProgressTracker(status, "Downloading media...", task_id=f"dl_{task_id}",
+                                 task_type="download", cancel_key=task_id)
     file_path = None
 
     for attempt in range(2):
+        if task_id in cancel_requests:
+            break
         try:
             file_path = await working_client.download_media(
                 target_msg,
@@ -1300,6 +1740,16 @@ async def message_input_router(_, message: Message):
                 await asyncio.sleep(2)
 
     dl_tracker.finish()
+
+    if task_id in cancel_requests:
+        cancel_requests.discard(task_id)
+        for f in (file_path, single_dest):
+            if f and os.path.exists(f):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+        return await status.edit_text(f"{ce('cross')} <b>Download cancelled.</b>")
 
     if not file_path or not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
         return await status.edit_text(f"{ce('cross')} <b>Download failed.</b>")
@@ -1316,7 +1766,8 @@ async def message_input_router(_, message: Message):
         except Exception:
             pass
 
-    up_tracker = ProgressTracker(status, "Uploading media...", task_id=f"up_{task_id}", task_type="upload")
+    up_tracker = ProgressTracker(status, "Uploading media...", task_id=f"up_{task_id}",
+                                 task_type="upload", cancel_key=task_id)
     cap = target_msg.caption or ""
     sent = None
 
@@ -1356,12 +1807,20 @@ async def message_input_router(_, message: Message):
                 progress=up_tracker.progress
             )
     except Exception as e:
-        await status.edit_text(f"{ce('cross')} <b>Upload failed:</b> <code>{e}</code>")
+        if task_id not in cancel_requests:
+            await status.edit_text(f"{ce('cross')} <b>Upload failed:</b> <code>{e}</code>")
     finally:
         up_tracker.finish()
 
-    await status.delete()
-    if sent:
+    cancelled = task_id in cancel_requests
+    cancel_requests.discard(task_id)
+    if cancelled:
+        await status.edit_text(f"{ce('cross')} <b>Upload cancelled.</b>")
+    elif sent:
+        await status.delete()
+
+    if sent and not cancelled:
+        await asyncio.to_thread(sync_charge, user_id)
         asyncio.create_task(silent_auto_delete(message.chat.id, [sent.id, message.id]))
 
     for f in [file_path, thumb_path]:
@@ -1388,6 +1847,8 @@ async def download_album_item(client, media_msg, idx, user_id, tracker: AlbumPro
 
         path = None
         for attempt in range(2):
+            if tracker and tracker.is_cancelled():
+                break
             try:
                 path = await client.download_media(
                     media_msg,
@@ -1414,12 +1875,13 @@ async def download_album_item(client, media_msg, idx, user_id, tracker: AlbumPro
 @bot.on_message(filters.command("start") & filters.private & filters.incoming)
 async def start_handler(_, message: Message):
     user_id = message.from_user.id
-    asyncio.to_thread(sync_register_user, user_id)
+    await asyncio.to_thread(sync_register_user, user_id)
     await message.reply_text(
-        f"┌── {ce('wave')} <b>WELCOME, {message.from_user.first_name.upper()}!</b>\n"
+        f"┌── {ce('wave')} <b>WELCOME, {html.escape(message.from_user.first_name.upper())}!</b>\n"
         f"│\n"
         f"├ {ce('spark')} Send any public or private Telegram link to download media.\n"
         f"├ {ce('lock')} Use <code>/login</code> or the button below to link your account.\n"
+        f"├ {ce('user')} Daily free credits: <code>{DAILY_CREDITS}</code> (check <code>/profile</code>)\n"
         f"│\n"
         f"└─ <i>All downloads will automatically self-delete after {AUTO_DELETE_TIME}s.</i>",
         reply_markup=get_bottom_keyboard(user_id)
@@ -1462,6 +1924,7 @@ async def cancel_handler(_, message: Message):
     user_id = message.from_user.id
     user_states.pop(user_id, None)
     login_clients.pop(user_id, None)
+    pending_target.pop(user_id, None)
     await message.reply_text(f"{ce('check')} <b>Current operation cancelled.</b>", reply_markup=get_bottom_keyboard(user_id))
 
 @bot.on_message(filters.command("ping") & filters.private & filters.incoming)
@@ -1540,13 +2003,13 @@ HTML_DASHBOARD = """
         .status-badge { background: #064e3b; color: #34d399; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 6px; }
         .status-dot { width: 8px; height: 8px; background: #10b981; border-radius: 50%; animation: pulse 2s infinite; }
         .section-title { font-size: 13px; font-weight: 700; color: #94a3b8; text-transform: uppercase; margin-bottom: 12px; letter-spacing: 0.5px; }
-        
+
         .storage-box { background: #0f172a; border-radius: 12px; padding: 16px; margin-bottom: 20px; border: 1px solid #1e293b; }
         .storage-title { font-size: 13px; color: #94a3b8; margin-bottom: 8px; display: flex; justify-content: space-between; }
         .storage-val { font-size: 24px; font-weight: 800; color: #f8fafc; margin-bottom: 10px; }
         .progress-bar-bg { width: 100%; height: 10px; background: #334155; border-radius: 6px; overflow: hidden; }
         .progress-bar-fill { height: 100%; border-radius: 6px; transition: width 0.4s ease; }
-        
+
         .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px; }
         .stat-item { background: #1e293b; border: 1px solid #334155; padding: 10px; border-radius: 8px; }
         .stat-label { font-size: 11px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
@@ -1628,7 +2091,7 @@ HTML_DASHBOARD = """
                 const d = await res.json();
                 document.getElementById('pct-text').innerText = d.percent.toFixed(1) + '%';
                 document.getElementById('pct-big').innerText = d.percent.toFixed(1) + '% Full';
-                
+
                 const fill = document.getElementById('prog-fill');
                 fill.style.width = Math.min(100, d.percent) + '%';
                 if(d.percent > 85) fill.style.background = '#ef4444';
@@ -1739,7 +2202,7 @@ async def handle_web_clean(_):
                 elif os.path.isdir(file_path):
                     shutil.rmtree(file_path)
                     deleted += 1
-            except Exception as e:
+            except Exception:
                 pass
     return web.json_response({
         "status": "ok",
@@ -1771,6 +2234,7 @@ async def main():
     try:
         await bot.set_bot_commands([
             BotCommand("start", "Start the bot"),
+            BotCommand("profile", "My profile and credits"),
             BotCommand("login", "Connect an account to userbot pool"),
             BotCommand("admin", "Admin Control Panel"),
             BotCommand("storage", "Check Disk Usage"),
@@ -1782,7 +2246,7 @@ async def main():
         pass
     await init_session_pool()
     await web_server()
-    logger.info("Bot Online with User-Facing Self-Login and Custom Emojis!")
+    logger.info("Bot Online with Profile, Credits, Force Sub and Custom Emojis!")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
