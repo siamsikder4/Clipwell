@@ -7,67 +7,88 @@ import asyncio
 import logging
 from aiohttp import web
 from hydrogram import Client, filters
+from hydrogram.enums import ParseMode
 from hydrogram.types import (
     Message,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
     CallbackQuery,
     ForceReply,
     BotCommand,
     InputMediaPhoto,
     InputMediaVideo,
     InputMediaAudio,
-    InputMediaDocument,
-    ChatMemberUpdated
+    InputMediaDocument
 )
-from hydrogram.errors import SessionPasswordNeeded, FloodWait
+from hydrogram.errors import SessionPasswordNeeded, FloodWait, UserIsBlocked, InputUserDeactivated
 
 # =====================================================================
-# 🎨 CENTRALIZED UI EMOJIS CONFIGURATION
-# আপনার পছন্দের Emoji বা Telegram Custom Emoji ID এখানে পরিবর্তন করুন
+# 🎨 CENTRALIZED UI CUSTOM EMOJIS CONFIGURATION
+# আপনার প্রদত্ত হুবহু Telegram Custom Emoji IDs
 # =====================================================================
 UI_EMOJIS = {
     # 📌 General & System Status
-    "spark": "6053061091456457277",          # হেডার এবং অ্যাক্টিভেশন হাইলাইট
-    "rocket": "6314344267267450186",         # স্পিড, ল্যাটেন্সি ও পিং
-    "online": "6311876323224592776",         # সচল/সফল স্ট্যাটাস নির্দেশক
-    "offline": "6314179022695702286",        # অফলাইন/অক্ষম নির্দেশক
-    "refresh": "6053323501073341449",        # রিফ্রেশ বা রিলোড বাটন
-    "cross": "6052869226677410910",          # বাতিল বা এরর
-    "check": "6053202116707622090",          # সফল বার্তা ও টিকমার্ক
-    "warning": "6183514473895042082",        # সতর্কবার্তা
-    "back": "6314565157435480578",           # মেনু ব্যাক বাটন
+    "spark": "6053061091456457277",
+    "rocket": "6314344267267450186",
+    "online": "6311876323224592776",
+    "offline": "6314179022695702286",
+    "refresh": "6053323501073341449",
+    "cross": "6052869226677410910",
+    "check": "6053202116707622090",
+    "warning": "6183514473895042082",
+    "back": "6314565157435480578",
 
     # 🎛️ Admin Panel & Roles
-    "panel": "6053275839821257175",          # কন্ট্রোল প্যানেল হেডার
-    "crown": "6338946058982267602",          # ওনার (Owner) পদমর্যাদা
-    "shield": "6052869252447215120",         # অ্যাডমিন (Admin) পদমর্যাদা
-    "user": "6053028307971085979",           # সাধারণ ইউজার বা অ্যাকাউন্ট প্রোফাইল
-    "users": "6311892601150643233",          # ইউজারবট ও অ্যাডমিন তালিকা
-    "lock": "6314447153209023665",           # টু-স্টেপ (2FA) সিকিউরিটি
-    "phone": "6314529384652872650",          # ফোন নম্বর ও সেলফ-লগইন
+    "panel": "6053275839821257175",
+    "crown": "6338946058982267602",
+    "shield": "6052869252447215120",
+    "user": "6053028307971085979",
+    "users": "6311892601150643233",
+    "lock": "6314447153209023665",
+    "phone": "6314529384652872650",
 
     # 💾 Storage & Maintenance
-    "disk": "6052914628776697272",           # ডিস্ক ও স্টোরেজ মেনু
-    "broom": "6314192620562161224",          # ডিস্ক ক্লিনআপ বা ক্যাশ পরিষ্কার
-    "folder": "6052921672523061549",         # ফোল্ডার ও ডাউনলোড ফাইল
-    "trash": "6314398126157340467",          # আইটেম/সেশন রিমুভ
+    "disk": "6052914628776697272",
+    "broom": "6314192620562161224",
+    "folder": "6052921672523061549",
+    "trash": "6314398126157340467",
 
     # 📢 Broadcast & Messaging
-    "broadcast": "6053275839821257175",      # ব্রডকাস্ট সিস্টেম
-    "timer": "6314097066129759042",          # ইন্টারভ্যাল ও অটো-ডিলিট টাইমার
-    "target": "6053120894581086446",         # টার্গেট চ্যাট/গ্রুপ
-    "media": "6314426086394436542",          # ছবি ও ব্যানার লিঙ্ক
-    "pencil": "6314293152861657827",          # মেসেজ এডিট অপশন
-    "list": "6338935574967098253",           # চ্যাট তালিকা বাটন
+    "broadcast": "6053275839821257175",
+    "timer": "6314097066129759042",
+    "target": "6053120894581086446",
+    "media": "6314426086394436542",
+    "pencil": "6314293152861657827",
+    "list": "6338935574967098253",
 
     # 📥 Download & Upload Progress
-    "download": "6053120894581086446",       # ডাউনলোড নির্দেশক
-    "upload": "6314266682978211811",         # আপলোড নির্দেশক
-    "bar_fill": "6053117952528493140",        # প্রগ্রেস বার পূর্ণ অংশ (Standard: ▓ or ▰)
-    "bar_empty": "6338899694810307622",       # প্রগ্রেস বার খালি অংশ (Standard: ░ or ▱)
-    "reaction": "6314425974725288033",       # লিঙ্ক পাওয়ার সাথে সাথে রিঅ্যাকশন
+    "download": "6053120894581086446",
+    "upload": "6314266682978211811",
+    "bar_fill": "6053117952528493140",
+    "bar_empty": "6338899694810307622",
+    "reaction": "6314425974725288033",
 }
+
+FALLBACK_SYMBOLS = {
+    "spark": "⚡", "rocket": "🚀", "online": "🟢", "offline": "🔴",
+    "refresh": "🔄", "cross": "❌", "check": "✅", "warning": "⚠️",
+    "back": "🔙", "panel": "🎛️", "crown": "👑", "shield": "🛡️",
+    "user": "👤", "users": "👥", "lock": "🔐", "phone": "📱",
+    "disk": "💾", "broom": "🧹", "folder": "📂", "trash": "🗑️",
+    "broadcast": "📢", "timer": "⏱️", "target": "🎯", "media": "🖼️",
+    "pencil": "✏️", "list": "📋", "download": "📥", "upload": "📤",
+    "bar_fill": "▰", "bar_empty": "▱"
+}
+
+def ce(name: str) -> str:
+    """Renders Telegram Custom Emoji tag in HTML mode."""
+    emoji_id = UI_EMOJIS.get(name, "")
+    fallback = FALLBACK_SYMBOLS.get(name, "✨")
+    if emoji_id:
+        return f'<emoji id="{emoji_id}">{fallback}</emoji>'
+    return fallback
 
 # Logging Configuration
 logging.basicConfig(
@@ -82,11 +103,11 @@ API_HASH = os.environ.get("API_HASH", "77df805f1700eeefec861de6c93ee2ae").strip(
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8952918726:AAGnKZm-S8hmBaWzltPfrdWRcyVHGVx44d0").strip()
 FIREBASE_KEY_RAW = os.environ.get("FIREBASE_KEY", "").strip()
 
-OWNER_ID = 6142774415
+OWNER_ID = 8271633124
 PORT = int(os.environ.get("PORT", "8080"))
 AUTO_DELETE_TIME = int(os.environ.get("AUTO_DELETE_TIME", "120"))  # Seconds
 
-# Local disk storage
+# Local Storage Directory
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
@@ -109,25 +130,39 @@ bot = Client(
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
     in_memory=True,
-    workers=16
+    workers=16,
+    parse_mode=ParseMode.HTML
 )
 
 user_states = {}
 login_clients = {}
 loaded_user_clients = []
 loaded_admins = {}
+mem_bot_users = set()
 
 # Live Web UI Progress Tracking Pool
 active_tasks = {}
 
-# Broadcast In-Memory State
-mem_broadcast_settings = {
-    "is_enabled": False,
-    "message": "🔥 Join our channel for updates!\n[Join Channel|https://t.me/telegram]",
-    "media_url": "",
-    "interval_minutes": 2
-}
-mem_broadcast_chats = {}
+# ----------------- BOTTOM KEYBOARD BUILDER ----------------- #
+
+def get_bottom_keyboard(user_id: int):
+    """Persistent bottom keyboard for users and admins."""
+    if is_any_admin(user_id):
+        return ReplyKeyboardMarkup(
+            [
+                [KeyboardButton(f"{FALLBACK_SYMBOLS['panel']} Admin Panel"), KeyboardButton(f"{FALLBACK_SYMBOLS['broadcast']} Broadcast")],
+                [KeyboardButton(f"{FALLBACK_SYMBOLS['disk']} Storage"), KeyboardButton(f"{FALLBACK_SYMBOLS['broom']} Clean Cache")],
+                [KeyboardButton(f"{FALLBACK_SYMBOLS['phone']} Connect Account"), KeyboardButton(f"{FALLBACK_SYMBOLS['rocket']} Latency")]
+            ],
+            resize_keyboard=True
+        )
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(f"{FALLBACK_SYMBOLS['phone']} Connect Account"), KeyboardButton(f"{FALLBACK_SYMBOLS['rocket']} Latency")],
+            [KeyboardButton("ℹ️ How To Use")]
+        ],
+        resize_keyboard=True
+    )
 
 # ----------------- STORAGE & PROGRESS HELPERS ----------------- #
 
@@ -203,13 +238,13 @@ class ProgressTracker:
         self.last_update_time = now
 
         filled = int(percent / 10)
-        bar = UI_EMOJIS["bar_fill"] * filled + UI_EMOJIS["bar_empty"] * (10 - filled)
-        icon = UI_EMOJIS["upload"] if self.task_type == "upload" else UI_EMOJIS["download"]
+        bar = ce("bar_fill") * filled + ce("bar_empty") * (10 - filled)
+        icon = ce("upload") if self.task_type == "upload" else ce("download")
 
         text = (
-            f"{UI_EMOJIS['spark']} **{self.action_text}**\n\n"
-            f"⌠ {bar} ⌡ `{percent:.1f}%`\n"
-            f"{icon} `{human_bytes(current)}` / `{human_bytes(total)}`"
+            f"{ce('spark')} <b>{self.action_text}</b>\n\n"
+            f"⌠ {bar} ⌡ <code>{percent:.1f}%</code>\n"
+            f"{icon} <code>{human_bytes(current)}</code> / <code>{human_bytes(total)}</code>"
         )
         try:
             await self.message.edit_text(text)
@@ -267,12 +302,12 @@ class AlbumProgressTracker:
 
             completed_files = sum(1 for c, t in self.file_progress.values() if t > 0 and c >= t)
             filled = min(10, int(percent / 10))
-            bar = UI_EMOJIS["bar_fill"] * filled + UI_EMOJIS["bar_empty"] * (10 - filled)
+            bar = ce("bar_fill") * filled + ce("bar_empty") * (10 - filled)
 
             text = (
-                f"{UI_EMOJIS['spark']} **{self.action_text} ({completed_files}/{self.total_files})**\n\n"
-                f"⌠ {bar} ⌡ `{percent:.1f}%`\n"
-                f"{UI_EMOJIS['download']} `{human_bytes(total_downloaded)}` / `{human_bytes(total_size)}`"
+                f"{ce('spark')} <b>{self.action_text} ({completed_files}/{self.total_files})</b>\n\n"
+                f"⌠ {bar} ⌡ <code>{percent:.1f}%</code>\n"
+                f"{ce('download')} <code>{human_bytes(total_downloaded)}</code> / <code>{human_bytes(total_size)}</code>"
             )
             try:
                 await self.message.edit_text(text)
@@ -283,7 +318,31 @@ class AlbumProgressTracker:
         if self.task_id:
             active_tasks.pop(self.task_id, None)
 
-# ----------------- DATABASE & PERMISSIONS ----------------- #
+# ----------------- DATABASE HELPERS ----------------- #
+
+def sync_register_user(user_id: int):
+    mem_bot_users.add(user_id)
+    if not db:
+        return
+    try:
+        db.collection("registered_users").document(str(user_id)).set({
+            "user_id": user_id,
+            "last_active": time.time()
+        }, merge=True)
+    except Exception:
+        pass
+
+def sync_get_all_bot_users():
+    if not db:
+        return list(mem_bot_users)
+    try:
+        users = []
+        for d in db.collection("registered_users").stream():
+            if d.id.isdigit():
+                users.append(int(d.id))
+        return list(set(users) | mem_bot_users)
+    except Exception:
+        return list(mem_bot_users)
 
 def sync_get_all_admins():
     admins = {}
@@ -295,15 +354,14 @@ def sync_get_all_admins():
                 data = d.to_dict()
                 admins[int(d.id)] = {
                     "sessions": data.get("sessions", False),
-                    "broadcast": data.get("broadcast", False),
-                    "chats": data.get("chats", False)
+                    "broadcast": data.get("broadcast", True)
                 }
     except Exception as e:
         logger.error(f"Get Admins Error: {e}")
     return admins
 
 def sync_add_admin(user_id: int):
-    default_perms = {"sessions": False, "broadcast": False, "chats": True}
+    default_perms = {"sessions": False, "broadcast": True}
     loaded_admins[user_id] = default_perms
     if not db:
         return True
@@ -312,16 +370,6 @@ def sync_add_admin(user_id: int):
         return True
     except Exception:
         return False
-
-def sync_update_admin_perm(user_id: int, perm_key: str, value: bool):
-    if user_id in loaded_admins:
-        loaded_admins[user_id][perm_key] = value
-    if not db:
-        return
-    try:
-        db.collection("bot_admins").document(str(user_id)).set({perm_key: value}, merge=True)
-    except Exception:
-        pass
 
 def sync_delete_admin(user_id: int):
     loaded_admins.pop(user_id, None)
@@ -372,97 +420,6 @@ def sync_delete_session(doc_id: str):
     except Exception:
         return False
 
-def sync_get_broadcast_settings():
-    global mem_broadcast_settings
-    if not db:
-        return mem_broadcast_settings
-    try:
-        doc = db.collection("bot_settings").document("broadcast_config").get()
-        if doc.exists:
-            data = doc.to_dict()
-            mem_broadcast_settings.update(data)
-            return mem_broadcast_settings
-        return mem_broadcast_settings
-    except Exception:
-        return mem_broadcast_settings
-
-def sync_save_broadcast_settings(data: dict):
-    global mem_broadcast_settings
-    mem_broadcast_settings.update(data)
-    if not db:
-        return
-    try:
-        db.collection("bot_settings").document("broadcast_config").set(data, merge=True)
-    except Exception:
-        pass
-
-def sync_get_all_broadcast_chats():
-    if not db:
-        return dict(mem_broadcast_chats)
-    try:
-        chats = {}
-        for d in db.collection("broadcast_chats").stream():
-            data = d.to_dict()
-            chats[int(d.id)] = {
-                "title": data.get("title", "Chat"),
-                "last_msg_id": data.get("last_msg_id", 0),
-                "is_active": data.get("is_active", True)
-            }
-        return chats
-    except Exception:
-        return dict(mem_broadcast_chats)
-
-def sync_add_broadcast_chat(chat_id: int, title: str):
-    if chat_id not in mem_broadcast_chats:
-        mem_broadcast_chats[chat_id] = {"title": title or "Chat", "last_msg_id": 0, "is_active": True}
-    if not db:
-        return
-    try:
-        db.collection("broadcast_chats").document(str(chat_id)).set({
-            "chat_id": chat_id,
-            "title": title or "Chat",
-            "is_active": True,
-            "updated_at": time.time()
-        }, merge=True)
-    except Exception:
-        pass
-
-def sync_toggle_chat_active(chat_id: int):
-    all_chats = sync_get_all_broadcast_chats()
-    chat_data = all_chats.get(chat_id, {"title": "Chat", "last_msg_id": 0, "is_active": True})
-    new_state = not chat_data.get("is_active", True)
-    chat_data["is_active"] = new_state
-    mem_broadcast_chats[chat_id] = chat_data
-
-    if db:
-        try:
-            db.collection("broadcast_chats").document(str(chat_id)).set({"is_active": new_state}, merge=True)
-        except Exception:
-            pass
-    return new_state
-
-def sync_update_chat_last_msg(chat_id: int, last_msg_id: int):
-    if chat_id in mem_broadcast_chats:
-        mem_broadcast_chats[chat_id]["last_msg_id"] = last_msg_id
-    if not db:
-        return
-    try:
-        db.collection("broadcast_chats").document(str(chat_id)).update({
-            "last_msg_id": last_msg_id,
-            "last_sent": time.time()
-        })
-    except Exception:
-        pass
-
-def sync_remove_broadcast_chat(chat_id: int):
-    mem_broadcast_chats.pop(chat_id, None)
-    if not db:
-        return
-    try:
-        db.collection("broadcast_chats").document(str(chat_id)).delete()
-    except Exception:
-        pass
-
 async def init_session_pool():
     global loaded_user_clients, loaded_admins
     loaded_admins = await asyncio.to_thread(sync_get_all_admins)
@@ -503,217 +460,109 @@ async def silent_auto_delete(chat_id: int, message_ids: list, delay: int = AUTO_
     except Exception:
         pass
 
-# ----------------- BROADCAST ENGINE ----------------- #
+# ----------------- DIRECT USER BROADCAST ENGINE ----------------- #
 
-def parse_broadcast_content(raw_text: str):
-    buttons = []
-    clean_lines = []
-    button_pattern = re.compile(r"\[(.*?)\Vert{}(https?://\S+)\]")
+async def broadcast_to_all_users(source_message: Message, admin_id: int):
+    all_users = await asyncio.to_thread(sync_get_all_bot_users)
+    if not all_users:
+        return await bot.send_message(admin_id, f"{ce('cross')} <b>No registered users found.</b>")
 
-    for line in raw_text.splitlines():
-        found_btns = button_pattern.findall(line)
-        if found_btns:
-            row = [InlineKeyboardButton(text=btn[0].strip(), url=btn[1].strip()) for btn in found_btns]
-            buttons.append(row)
-        else:
-            clean_lines.append(line)
-
-    markup = InlineKeyboardMarkup(buttons) if buttons else None
-    return "\n".join(clean_lines).strip(), markup
-
-async def auto_broadcast_worker():
-    await asyncio.sleep(5)
-    logger.info("Responsive Broadcast Worker Active.")
-    while True:
-        try:
-            config = await asyncio.to_thread(sync_get_broadcast_settings)
-            is_enabled = config.get("is_enabled", False)
-            raw_msg = config.get("message", "").strip()
-            media_url = config.get("media_url", "").strip()
-            interval_mins = max(1, int(config.get("interval_minutes", 2)))
-
-            if is_enabled and raw_msg:
-                text_content, markup = parse_broadcast_content(raw_msg)
-                target_chats = await asyncio.to_thread(sync_get_all_broadcast_chats)
-
-                for chat_id, c_data in list(target_chats.items()):
-                    fresh_conf = await asyncio.to_thread(sync_get_broadcast_settings)
-                    if not fresh_conf.get("is_enabled", False):
-                        break
-
-                    if not c_data.get("is_active", True):
-                        continue
-
-                    old_msg_id = c_data.get("last_msg_id", 0)
-                    if old_msg_id:
-                        try:
-                            await bot.delete_messages(chat_id=chat_id, message_ids=old_msg_id)
-                        except Exception:
-                            pass
-
-                    sent = None
-                    try:
-                        if media_url:
-                            sent = await bot.send_photo(
-                                chat_id=chat_id,
-                                photo=media_url,
-                                caption=text_content,
-                                reply_markup=markup
-                            )
-                        else:
-                            sent = await bot.send_message(
-                                chat_id=chat_id,
-                                text=text_content,
-                                reply_markup=markup,
-                                disable_web_page_preview=False
-                            )
-
-                        if sent:
-                            await asyncio.to_thread(sync_update_chat_last_msg, chat_id, sent.id)
-
-                        await asyncio.sleep(1.5)
-
-                    except FloodWait as f:
-                        await asyncio.sleep(f.value + 1)
-                    except Exception as err:
-                        err_str = str(err)
-                        if any(x in err_str for x in ["CHAT_WRITE_FORBIDDEN", "USER_BANNED_IN_CHANNEL", "PEER_ID_INVALID", "CHAT_NOT_MODIFIED"]):
-                            await asyncio.to_thread(sync_remove_broadcast_chat, chat_id)
-
-            total_sleep_sec = interval_mins * 60
-            for _ in range(total_sleep_sec // 5):
-                await asyncio.sleep(5)
-                check = await asyncio.to_thread(sync_get_broadcast_settings)
-                if not check.get("is_enabled", False):
-                    break
-
-        except Exception as e:
-            logger.error(f"Broadcast Loop Error: {e}")
-            await asyncio.sleep(10)
-
-# ----------------- CHAT TRACKING EVENTS ----------------- #
-
-@bot.on_chat_member_updated()
-async def bot_join_leave_detector(_, update: ChatMemberUpdated):
-    if not update.new_chat_member:
-        return
-    try:
-        me = await bot.get_me()
-        if update.new_chat_member.user.id == me.id:
-            status = update.new_chat_member.status
-            chat_title = update.chat.title or "Telegram Chat"
-            if status in ["administrator", "member"]:
-                await asyncio.to_thread(sync_add_broadcast_chat, update.chat.id, chat_title)
-            elif status in ["left", "banned"]:
-                await asyncio.to_thread(sync_remove_broadcast_chat, update.chat.id)
-    except Exception as e:
-        logger.error(f"Chat Update Error: {e}")
-
-@bot.on_message((filters.group | filters.channel) & ~filters.service)
-async def auto_track_channel_messages(_, message: Message):
-    try:
-        await asyncio.to_thread(sync_add_broadcast_chat, message.chat.id, message.chat.title or "Chat")
-    except Exception:
-        pass
-
-@bot.on_message(filters.command("addchat") & filters.private)
-async def manual_add_chat(_, message: Message):
-    if not has_perm(message.from_user.id, "chats"):
-        return await message.reply_text(f"{UI_EMOJIS['cross']} You do not have permission to manage broadcast chats.")
-    args = message.text.split()
-    if len(args) < 2:
-        return await message.reply_text(f"{UI_EMOJIS['cross']} Usage: `/addchat -100xxxxxxxxxx`")
-    try:
-        target_id = int(args[1].strip())
-        await asyncio.to_thread(sync_add_broadcast_chat, target_id, "Manual Chat")
-        await message.reply_text(f"{UI_EMOJIS['check']} Chat `{target_id}` added to broadcast database successfully!")
-    except Exception as e:
-        await message.reply_text(f"{UI_EMOJIS['cross']} Error: `{e}`")
-
-# ----------------- PUBLIC SELF-LOGIN HANDLER (/login) ----------------- #
-
-@bot.on_message(filters.command("login") & filters.private)
-async def public_login_cmd(_, message: Message):
-    user_id = message.from_user.id
-    user_states[user_id] = "WAIT_PHONE"
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton(f"{UI_EMOJIS['cross']} Cancel", callback_data="btn_cancel_login")]])
-    await message.reply_text(
-        f"{UI_EMOJIS['phone']} **Connect Your Telegram Account**\n\n"
-        "Send your phone number with country code (e.g. `+8801700000000`):\n\n"
-        "_Your account helps the bot download restricted content._",
-        reply_markup=markup
+    status_msg = await bot.send_message(
+        admin_id,
+        f"{ce('broadcast')} <b>Broadcasting started...</b>\n"
+        f"🎯 Target Audience: <code>{len(all_users)}</code> users\n"
+        f"⏳ Dispatching payload..."
     )
 
-# ----------------- STREAMLINED ADMIN DASHBOARD ----------------- #
+    success, blocked, failed = 0, 0, 0
 
-def get_role_based_markup(user_id: int, session_count: int, is_broadcast_active: bool):
-    buttons = []
-    
-    # Session Management
-    if has_perm(user_id, "sessions"):
-        buttons.append([
-            InlineKeyboardButton(f"{UI_EMOJIS['folder']} Sessions ({session_count})", callback_data="btn_list_sessions"),
-            InlineKeyboardButton(f"{UI_EMOJIS['trash']} Remove Session", callback_data="btn_del_menu")
-        ])
+    for idx, uid in enumerate(all_users, 1):
+        try:
+            await source_message.copy(chat_id=uid)
+            success += 1
+        except FloodWait as fw:
+            await asyncio.sleep(fw.value + 1)
+            try:
+                await source_message.copy(chat_id=uid)
+                success += 1
+            except Exception:
+                failed += 1
+        except (UserIsBlocked, InputUserDeactivated):
+            blocked += 1
+        except Exception:
+            failed += 1
 
-    # Broadcast
-    if has_perm(user_id, "broadcast"):
-        b_tag = f"{UI_EMOJIS['online']} Active" if is_broadcast_active else f"{UI_EMOJIS['offline']} Disabled"
-        buttons.append([
-            InlineKeyboardButton(f"{UI_EMOJIS['broadcast']} Broadcast [{b_tag}]", callback_data="btn_broadcast_panel")
-        ])
+        if idx % 20 == 0 or idx == len(all_users):
+            try:
+                await status_msg.edit_text(
+                    f"{ce('broadcast')} <b>Broadcast in progress...</b>\n\n"
+                    f"📊 <b>Progress:</b> <code>{idx}/{len(all_users)}</code>\n"
+                    f"{ce('check')} <b>Delivered:</b> <code>{success}</code>\n"
+                    f"{ce('offline')} <b>Blocked:</b> <code>{blocked}</code>\n"
+                    f"{ce('cross')} <b>Failed:</b> <code>{failed}</code>"
+                )
+            except Exception:
+                pass
+        await asyncio.sleep(0.05)
 
-    # System Utilities
-    buttons.append([
-        InlineKeyboardButton(f"{UI_EMOJIS['disk']} Disk Usage", callback_data="btn_storage_info"),
-        InlineKeyboardButton(f"{UI_EMOJIS['broom']} Clean Storage", callback_data="btn_clean_storage")
-    ])
+    await status_msg.edit_text(
+        f"┏━━━━━━ {ce('check')} <b>BROADCAST REPORT</b> ━━━━━━┓\n\n"
+        f"  🎯 <b>Total Users:</b> <code>{len(all_users)}</code>\n"
+        f"  {ce('online')} <b>Delivered:</b> <code>{success}</code>\n"
+        f"  {ce('offline')} <b>Blocked:</b> <code>{blocked}</code>\n"
+        f"  {ce('cross')} <b>Failed:</b> <code>{failed}</code>\n\n"
+        f"┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+    )
+
+# ----------------- ADMIN DASHBOARD MARKUPS ----------------- #
+
+def get_role_based_markup(user_id: int, session_count: int, total_users: int):
+    buttons = [
+        [
+            InlineKeyboardButton(f"{FALLBACK_SYMBOLS['broadcast']} Broadcast to Users ({total_users})", callback_data="btn_start_broadcast")
+        ],
+        [
+            InlineKeyboardButton(f"{FALLBACK_SYMBOLS['folder']} Sessions ({session_count})", callback_data="btn_list_sessions"),
+            InlineKeyboardButton(f"{FALLBACK_SYMBOLS['trash']} Remove Session", callback_data="btn_del_menu")
+        ],
+        [
+            InlineKeyboardButton(f"{FALLBACK_SYMBOLS['disk']} Storage Info", callback_data="btn_storage_info"),
+            InlineKeyboardButton(f"{FALLBACK_SYMBOLS['broom']} Clean Cache", callback_data="btn_clean_storage")
+        ]
+    ]
 
     if user_id == OWNER_ID:
         buttons.append([
-            InlineKeyboardButton(f"{UI_EMOJIS['users']} Manage Admins", callback_data="btn_manage_admins")
+            InlineKeyboardButton(f"{FALLBACK_SYMBOLS['users']} Manage Sub-Admins", callback_data="btn_manage_admins")
         ])
 
-    buttons.append([InlineKeyboardButton(f"{UI_EMOJIS['refresh']} Refresh Dashboard", callback_data="btn_refresh_panel")])
+    buttons.append([InlineKeyboardButton(f"{FALLBACK_SYMBOLS['refresh']} Refresh Dashboard", callback_data="btn_refresh_panel")])
     return InlineKeyboardMarkup(buttons)
-
-def get_admin_perm_markup(target_id: int):
-    perms = loaded_admins.get(target_id, {})
-    s_tag = UI_EMOJIS['online'] if perms.get("sessions") else UI_EMOJIS['offline']
-    b_tag = UI_EMOJIS['online'] if perms.get("broadcast") else UI_EMOJIS['offline']
-    c_tag = UI_EMOJIS['online'] if perms.get("chats") else UI_EMOJIS['offline']
-
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"Manage Sessions: {s_tag}", callback_data=f"togperm_{target_id}_sessions")],
-        [InlineKeyboardButton(f"Broadcast: {b_tag}", callback_data=f"togperm_{target_id}_broadcast")],
-        [InlineKeyboardButton(f"Add Chats (/addchat): {c_tag}", callback_data=f"togperm_{target_id}_chats")],
-        [InlineKeyboardButton(f"{UI_EMOJIS['trash']} Remove Admin", callback_data=f"deladmin_{target_id}")],
-        [InlineKeyboardButton(f"{UI_EMOJIS['back']} Back", callback_data="btn_manage_admins")]
-    ])
 
 @bot.on_message(filters.command(["admin", "panel"]) & filters.private)
 async def admin_panel_handler(_, message: Message):
     user_id = message.from_user.id
     if not is_any_admin(user_id):
-        return await message.reply_text(f"{UI_EMOJIS['cross']} **Access Denied.**")
+        return await message.reply_text(f"{ce('cross')} <b>Access Denied.</b>")
 
     sessions = await asyncio.to_thread(sync_get_all_sessions)
-    config = await asyncio.to_thread(sync_get_broadcast_settings)
+    all_users = await asyncio.to_thread(sync_get_all_bot_users)
 
-    role_str = f"{UI_EMOJIS['crown']} Owner" if user_id == OWNER_ID else f"{UI_EMOJIS['shield']} Sub-Admin"
-    db_str = f"Online {UI_EMOJIS['online']}" if db else f"Offline {UI_EMOJIS['offline']}"
-    bc_str = f"Enabled {UI_EMOJIS['online']}" if config.get('is_enabled') else f"Disabled {UI_EMOJIS['offline']}"
+    role_str = f"{ce('crown')} Master Owner" if user_id == OWNER_ID else f"{ce('shield')} Sub-Admin"
+    db_str = f"Online {ce('online')}" if db else f"Offline {ce('offline')}"
 
     text = (
-        f"┏━━━━━━ {UI_EMOJIS['panel']} **ADMIN CONTROL PANEL** ━━━━━━┓\n\n"
-        f"  {UI_EMOJIS['user']} **Role:** `{role_str}`\n"
-        f"  📊 **Database:** `{db_str}`\n"
-        f"  {UI_EMOJIS['users']} **Active Userbots:** `{len(sessions)}`\n"
-        f"  {UI_EMOJIS['timer']} **Auto-Delete Timer:** `{AUTO_DELETE_TIME}s`\n"
-        f"  {UI_EMOJIS['broadcast']} **Auto-Broadcast:** `{bc_str}`\n\n"
-        "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+        f"┏━━━━━━ {ce('panel')} <b>ADMIN CONTROL PANEL</b> ━━━━━━┓\n\n"
+        f"  {ce('user')} <b>Account Role:</b> {role_str}\n"
+        f"  📊 <b>Database:</b> {db_str}\n"
+        f"  {ce('users')} <b>Total Users:</b> <code>{len(all_users)}</code>\n"
+        f"  {ce('folder')} <b>Active Userbots:</b> <code>{len(sessions)}</code>\n"
+        f"  {ce('timer')} <b>Auto-Delete Delay:</b> <code>{AUTO_DELETE_TIME}s</code>\n\n"
+        f"┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
     )
-    await message.reply_text(text, reply_markup=get_role_based_markup(user_id, len(sessions), config.get("is_enabled", False)))
+    await message.reply_text(text, reply_markup=get_role_based_markup(user_id, len(sessions), len(all_users)))
+
+# ----------------- CALLBACK BUTTONS ROUTING ----------------- #
 
 @bot.on_callback_query()
 async def callback_handler(_, query: CallbackQuery):
@@ -726,53 +575,66 @@ async def callback_handler(_, query: CallbackQuery):
         user_states.pop(user_id, None)
         if session_data and session_data.get("cl") and session_data["cl"].is_connected:
             await session_data["cl"].disconnect()
-        await query.message.edit_text(f"{UI_EMOJIS['cross']} Login cancelled.")
+        await query.message.edit_text(f"{ce('cross')} Login process cancelled.")
         return await query.answer("Cancelled")
 
     if data == "btn_retry_2fa":
         user_states[user_id] = "WAIT_2FA"
-        await query.message.reply_text(f"{UI_EMOJIS['lock']} Re-enter 2FA password:", reply_markup=ForceReply(selective=True))
+        await query.message.reply_text(f"{ce('lock')} Please send your 2FA password:", reply_markup=ForceReply(selective=True))
         return await query.answer()
 
-    # Admin verification
+    # Admin access verification
     if not is_any_admin(user_id):
-        return await query.answer(f"{UI_EMOJIS['cross']} Access Denied", show_alert=True)
+        return await query.answer(f"Access Denied", show_alert=True)
 
     if data == "btn_refresh_panel":
         sessions = await asyncio.to_thread(sync_get_all_sessions)
-        config = await asyncio.to_thread(sync_get_broadcast_settings)
-        role_str = f"{UI_EMOJIS['crown']} Owner" if user_id == OWNER_ID else f"{UI_EMOJIS['shield']} Sub-Admin"
-        db_str = f"Online {UI_EMOJIS['online']}" if db else f"Offline {UI_EMOJIS['offline']}"
-        bc_str = f"Enabled {UI_EMOJIS['online']}" if config.get('is_enabled') else f"Disabled {UI_EMOJIS['offline']}"
+        all_users = await asyncio.to_thread(sync_get_all_bot_users)
+        role_str = f"{ce('crown')} Master Owner" if user_id == OWNER_ID else f"{ce('shield')} Sub-Admin"
+        db_str = f"Online {ce('online')}" if db else f"Offline {ce('offline')}"
 
         text = (
-            f"┏━━━━━━ {UI_EMOJIS['panel']} **ADMIN CONTROL PANEL** ━━━━━━┓\n\n"
-            f"  {UI_EMOJIS['user']} **Role:** `{role_str}`\n"
-            f"  📊 **Database:** `{db_str}`\n"
-            f"  {UI_EMOJIS['users']} **Active Userbots:** `{len(sessions)}`\n"
-            f"  {UI_EMOJIS['timer']} **Auto-Delete Timer:** `{AUTO_DELETE_TIME}s`\n"
-            f"  {UI_EMOJIS['broadcast']} **Auto-Broadcast:** `{bc_str}`\n\n"
-            "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+            f"┏━━━━━━ {ce('panel')} <b>ADMIN CONTROL PANEL</b> ━━━━━━┓\n\n"
+            f"  {ce('user')} <b>Account Role:</b> {role_str}\n"
+            f"  📊 <b>Database:</b> {db_str}\n"
+            f"  {ce('users')} <b>Total Users:</b> <code>{len(all_users)}</code>\n"
+            f"  {ce('folder')} <b>Active Userbots:</b> <code>{len(sessions)}</code>\n"
+            f"  {ce('timer')} <b>Auto-Delete Delay:</b> <code>{AUTO_DELETE_TIME}s</code>\n\n"
+            f"┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
         )
-        await query.message.edit_text(text, reply_markup=get_role_based_markup(user_id, len(sessions), config.get("is_enabled", False)))
-        await query.answer(f"Refreshed {UI_EMOJIS['refresh']}")
+        await query.message.edit_text(text, reply_markup=get_role_based_markup(user_id, len(sessions), len(all_users)))
+        await query.answer("Dashboard Refreshed")
+
+    elif data == "btn_start_broadcast":
+        if not has_perm(user_id, "broadcast"):
+            return await query.answer("Permission Denied", show_alert=True)
+        user_states[user_id] = "WAIT_BROADCAST_PAYLOAD"
+        await query.message.reply_text(
+            f"{ce('broadcast')} <b>Send the message or media to broadcast:</b>\n\n"
+            f"• 💬 Text Message\n"
+            f"• 🎙️ Voice / Audio\n"
+            f"• {ce('media')} Photo / Video with Caption\n\n"
+            f"<i>Send <code>/cancel</code> to abort.</i>",
+            reply_markup=ForceReply(selective=True)
+        )
+        await query.answer()
 
     elif data == "btn_storage_info":
         st = get_storage_stats()
         filled = int(st["percent"] / 10)
-        bar = UI_EMOJIS["bar_fill"] * filled + UI_EMOJIS["bar_empty"] * (10 - filled)
+        bar = ce("bar_fill") * filled + ce("bar_empty") * (10 - filled)
         text = (
-            f"┏━━━━━━ {UI_EMOJIS['disk']} **DISK STORAGE INFO** ━━━━━━┓\n\n"
-            f"  📊 **Disk Full:** `⌠{bar}⌡ {st['percent']:.1f}%`\n"
-            f"  📦 **Used Space:** `{human_bytes(st['used'])}`\n"
-            f"  {UI_EMOJIS['online']} **Free Space:** `{human_bytes(st['free'])}`\n"
-            f"  🗂️ **Total Disk:** `{human_bytes(st['total'])}`\n\n"
-            f"  {UI_EMOJIS['folder']} **Downloads Temp:** `{human_bytes(st['dl_size'])}` ({st['dl_files']} files)\n"
-            "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+            f"┏━━━━━━ {ce('disk')} <b>DISK STORAGE INFO</b> ━━━━━━┓\n\n"
+            f"  📊 <b>Disk Full:</b> ⌠{bar}⌡ <code>{st['percent']:.1f}%</code>\n"
+            f"  📦 <b>Used Space:</b> <code>{human_bytes(st['used'])}</code>\n"
+            f"  {ce('online')} <b>Free Space:</b> <code>{human_bytes(st['free'])}</code>\n"
+            f"  🗂️ <b>Total Space:</b> <code>{human_bytes(st['total'])}</code>\n\n"
+            f"  {ce('folder')} <b>Temp Downloads:</b> <code>{human_bytes(st['dl_size'])}</code> ({st['dl_files']} files)\n"
+            f"┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
         )
         markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"{UI_EMOJIS['broom']} Clean Temp Files", callback_data="btn_clean_storage")],
-            [InlineKeyboardButton(f"{UI_EMOJIS['back']} Back", callback_data="btn_refresh_panel")]
+            [InlineKeyboardButton(f"{FALLBACK_SYMBOLS['broom']} Clean Temp Files", callback_data="btn_clean_storage")],
+            [InlineKeyboardButton(f"{FALLBACK_SYMBOLS['back']} Back", callback_data="btn_refresh_panel")]
         ])
         await query.message.edit_text(text, reply_markup=markup)
         await query.answer()
@@ -793,210 +655,41 @@ async def callback_handler(_, query: CallbackQuery):
         await query.answer(f"Freed {human_bytes(freed_bytes)}", show_alert=True)
         st = get_storage_stats()
         filled = int(st["percent"] / 10)
-        bar = UI_EMOJIS["bar_fill"] * filled + UI_EMOJIS["bar_empty"] * (10 - filled)
+        bar = ce("bar_fill") * filled + ce("bar_empty") * (10 - filled)
         text = (
-            f"┏━━━━━━ {UI_EMOJIS['disk']} **DISK STORAGE INFO** ━━━━━━┓\n\n"
-            f"  📊 **Disk Full:** `⌠{bar}⌡ {st['percent']:.1f}%`\n"
-            f"  📦 **Used Space:** `{human_bytes(st['used'])}`\n"
-            f"  {UI_EMOJIS['online']} **Free Space:** `{human_bytes(st['free'])}`\n"
-            f"  🗂️ **Total Disk:** `{human_bytes(st['total'])}`\n\n"
-            f"  {UI_EMOJIS['folder']} **Downloads Temp:** `{human_bytes(st['dl_size'])}` ({st['dl_files']} files)\n"
-            "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+            f"┏━━━━━━ {ce('disk')} <b>DISK STORAGE INFO</b> ━━━━━━┓\n\n"
+            f"  📊 <b>Disk Full:</b> ⌠{bar}⌡ <code>{st['percent']:.1f}%</code>\n"
+            f"  📦 <b>Used Space:</b> <code>{human_bytes(st['used'])}</code>\n"
+            f"  {ce('online')} <b>Free Space:</b> <code>{human_bytes(st['free'])}</code>\n"
+            f"  🗂️ <b>Total Space:</b> <code>{human_bytes(st['total'])}</code>\n\n"
+            f"  {ce('folder')} <b>Temp Downloads:</b> <code>{human_bytes(st['dl_size'])}</code> ({st['dl_files']} files)\n"
+            f"┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
         )
         markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"{UI_EMOJIS['broom']} Clean Temp Files", callback_data="btn_clean_storage")],
-            [InlineKeyboardButton(f"{UI_EMOJIS['back']} Back", callback_data="btn_refresh_panel")]
+            [InlineKeyboardButton(f"{FALLBACK_SYMBOLS['broom']} Clean Temp Files", callback_data="btn_clean_storage")],
+            [InlineKeyboardButton(f"{FALLBACK_SYMBOLS['back']} Back", callback_data="btn_refresh_panel")]
         ])
         await query.message.edit_text(text, reply_markup=markup)
-
-    elif data == "btn_broadcast_panel":
-        if not has_perm(user_id, "broadcast"):
-            return await query.answer("Permission Denied", show_alert=True)
-        config = await asyncio.to_thread(sync_get_broadcast_settings)
-        chats = await asyncio.to_thread(sync_get_all_broadcast_chats)
-        status_text = f"{UI_EMOJIS['online']} ACTIVE" if config.get("is_enabled") else f"{UI_EMOJIS['offline']} DISABLED"
-        toggle_text = f"{UI_EMOJIS['offline']} Turn OFF" if config.get("is_enabled") else f"{UI_EMOJIS['online']} Turn ON"
-
-        text = (
-            f"┏━━━━━━ {UI_EMOJIS['broadcast']} **BROADCAST CONFIG** ━━━━━━┓\n\n"
-            f"  {UI_EMOJIS['spark']} **Status:** `{status_text}`\n"
-            f"  {UI_EMOJIS['timer']} **Interval:** Every `{config.get('interval_minutes', 2)} mins`\n"
-            f"  {UI_EMOJIS['target']} **Chats:** `{len(chats)}`\n"
-            f"  {UI_EMOJIS['media']} **Media:** `{config.get('media_url') or 'None'}`\n\n"
-            f"  📝 **Message:**\n  `{config.get('message', 'None')}`\n"
-            "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
-        )
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton(toggle_text, callback_data="btn_toggle_broadcast")],
-            [InlineKeyboardButton(f"{UI_EMOJIS['list']} Chats List ({len(chats)})", callback_data="btn_manage_chats")],
-            [
-                InlineKeyboardButton(f"{UI_EMOJIS['pencil']} Edit Message", callback_data="btn_edit_broadcast_msg"),
-                InlineKeyboardButton(f"{UI_EMOJIS['media']} Set Media", callback_data="btn_set_media_url")
-            ],
-            [InlineKeyboardButton(f"{UI_EMOJIS['timer']} Set Interval", callback_data="btn_set_broadcast_interval")],
-            [InlineKeyboardButton(f"{UI_EMOJIS['back']} Back", callback_data="btn_refresh_panel")]
-        ])
-        await query.message.edit_text(text, reply_markup=markup)
-        await query.answer()
-
-    elif data == "btn_toggle_broadcast":
-        if not has_perm(user_id, "broadcast"):
-            return await query.answer("Permission Denied", show_alert=True)
-        config = await asyncio.to_thread(sync_get_broadcast_settings)
-        new_state = not config.get("is_enabled", False)
-        config["is_enabled"] = new_state
-        await asyncio.to_thread(sync_save_broadcast_settings, config)
-        await query.answer(f"Broadcast {'Enabled' if new_state else 'Disabled'}")
-
-        chats = await asyncio.to_thread(sync_get_all_broadcast_chats)
-        status_text = f"{UI_EMOJIS['online']} ACTIVE" if new_state else f"{UI_EMOJIS['offline']} DISABLED"
-        toggle_text = f"{UI_EMOJIS['offline']} Turn OFF" if new_state else f"{UI_EMOJIS['online']} Turn ON"
-        text = (
-            f"┏━━━━━━ {UI_EMOJIS['broadcast']} **BROADCAST CONFIG** ━━━━━━┓\n\n"
-            f"  {UI_EMOJIS['spark']} **Status:** `{status_text}`\n"
-            f"  {UI_EMOJIS['timer']} **Interval:** Every `{config.get('interval_minutes', 2)} mins`\n"
-            f"  {UI_EMOJIS['target']} **Chats:** `{len(chats)}`\n"
-            f"  {UI_EMOJIS['media']} **Media:** `{config.get('media_url') or 'None'}`\n\n"
-            f"  📝 **Message:**\n  `{config.get('message', 'None')}`\n"
-            "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
-        )
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton(toggle_text, callback_data="btn_toggle_broadcast")],
-            [InlineKeyboardButton(f"{UI_EMOJIS['list']} Chats List ({len(chats)})", callback_data="btn_manage_chats")],
-            [
-                InlineKeyboardButton(f"{UI_EMOJIS['pencil']} Edit Message", callback_data="btn_edit_broadcast_msg"),
-                InlineKeyboardButton(f"{UI_EMOJIS['media']} Set Media", callback_data="btn_set_media_url")
-            ],
-            [InlineKeyboardButton(f"{UI_EMOJIS['timer']} Set Interval", callback_data="btn_set_broadcast_interval")],
-            [InlineKeyboardButton(f"{UI_EMOJIS['back']} Back", callback_data="btn_refresh_panel")]
-        ])
-        await query.message.edit_text(text, reply_markup=markup)
-
-    elif data == "btn_set_media_url":
-        if not has_perm(user_id, "broadcast"):
-            return await query.answer("Permission Denied", show_alert=True)
-        user_states[user_id] = "WAIT_MEDIA_URL"
-        await query.message.reply_text(f"{UI_EMOJIS['media']} Send direct image link (e.g. `https://example.com/banner.jpg`) or send `none` to remove:", reply_markup=ForceReply(selective=True))
-        await query.answer()
-
-    elif data == "btn_manage_chats":
-        if not has_perm(user_id, "broadcast"):
-            return await query.answer("Permission Denied", show_alert=True)
-        chats = await asyncio.to_thread(sync_get_all_broadcast_chats)
-        if not chats:
-            await query.answer("No chats registered yet!", show_alert=True)
-            return
-
-        buttons = []
-        for cid, cinfo in chats.items():
-            st = UI_EMOJIS['online'] if cinfo.get("is_active", True) else UI_EMOJIS['offline']
-            title = cinfo.get("title", f"Chat {cid}")[:20]
-            buttons.append([InlineKeyboardButton(f"{st} {title}", callback_data=f"viewchat_{cid}")])
-
-        buttons.append([InlineKeyboardButton(f"{UI_EMOJIS['back']} Back", callback_data="btn_broadcast_panel")])
-        await query.message.edit_text("Select any chat to toggle active status:", reply_markup=InlineKeyboardMarkup(buttons))
-        await query.answer()
-
-    elif data.startswith("viewchat_"):
-        if not has_perm(user_id, "broadcast"):
-            return await query.answer("Permission Denied", show_alert=True)
-        cid = int(data.split("_")[1])
-        chats = await asyncio.to_thread(sync_get_all_broadcast_chats)
-        cinfo = chats.get(cid, {"title": "Chat", "is_active": True})
-
-        is_active = cinfo.get("is_active", True)
-        tog_btn = f"{UI_EMOJIS['offline']} Disable Auto-Message" if is_active else f"{UI_EMOJIS['online']} Enable Auto-Message"
-        status_str = f"{UI_EMOJIS['online']} Active" if is_active else f"{UI_EMOJIS['offline']} Disabled"
-
-        text = (
-            f"📌 **Chat:** `{cinfo.get('title')}`\n"
-            f"🆔 **ID:** `{cid}`\n"
-            f"{UI_EMOJIS['spark']} **Status:** `{status_str}`"
-        )
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton(tog_btn, callback_data=f"togchat_{cid}")],
-            [InlineKeyboardButton(f"{UI_EMOJIS['trash']} Remove", callback_data=f"delchat_{cid}")],
-            [InlineKeyboardButton(f"{UI_EMOJIS['back']} Back", callback_data="btn_manage_chats")]
-        ])
-        await query.message.edit_text(text, reply_markup=markup)
-        await query.answer()
-
-    elif data.startswith("togchat_"):
-        if not has_perm(user_id, "broadcast"):
-            return await query.answer("Permission Denied", show_alert=True)
-        cid = int(data.split("_")[1])
-        new_state = await asyncio.to_thread(sync_toggle_chat_active, cid)
-        await query.answer(f"Status changed to {'Active' if new_state else 'Disabled'}")
-
-        chats = await asyncio.to_thread(sync_get_all_broadcast_chats)
-        cinfo = chats.get(cid, {"title": "Chat", "is_active": new_state})
-        tog_btn = f"{UI_EMOJIS['offline']} Disable Auto-Message" if new_state else f"{UI_EMOJIS['online']} Enable Auto-Message"
-        status_str = f"{UI_EMOJIS['online']} Active" if new_state else f"{UI_EMOJIS['offline']} Disabled"
-        text = (
-            f"📌 **Chat:** `{cinfo.get('title')}`\n"
-            f"🆔 **ID:** `{cid}`\n"
-            f"{UI_EMOJIS['spark']} **Status:** `{status_str}`"
-        )
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton(tog_btn, callback_data=f"togchat_{cid}")],
-            [InlineKeyboardButton(f"{UI_EMOJIS['trash']} Remove", callback_data=f"delchat_{cid}")],
-            [InlineKeyboardButton(f"{UI_EMOJIS['back']} Back", callback_data="btn_manage_chats")]
-        ])
-        await query.message.edit_text(text, reply_markup=markup)
-
-    elif data.startswith("delchat_"):
-        if not has_perm(user_id, "broadcast"):
-            return await query.answer("Permission Denied", show_alert=True)
-        cid = int(data.split("_")[1])
-        await asyncio.to_thread(sync_remove_broadcast_chat, cid)
-        await query.answer("Chat removed!", show_alert=True)
-
-        chats = await asyncio.to_thread(sync_get_all_broadcast_chats)
-        buttons = []
-        for c, cinfo in chats.items():
-            st = UI_EMOJIS['online'] if cinfo.get("is_active", True) else UI_EMOJIS['offline']
-            title = cinfo.get("title", f"Chat {c}")[:20]
-            buttons.append([InlineKeyboardButton(f"{st} {title}", callback_data=f"viewchat_{c}")])
-        buttons.append([InlineKeyboardButton(f"{UI_EMOJIS['back']} Back", callback_data="btn_broadcast_panel")])
-        await query.message.edit_text("Chat list updated:", reply_markup=InlineKeyboardMarkup(buttons))
-
-    elif data == "btn_edit_broadcast_msg":
-        if not has_perm(user_id, "broadcast"):
-            return await query.answer("Permission Denied", show_alert=True)
-        user_states[user_id] = "WAIT_BROADCAST_MSG"
-        await query.message.reply_text(
-            f"{UI_EMOJIS['pencil']} Send new broadcast template:\n\n"
-            "Example with buttons:\n"
-            "Hello World!\n"
-            "`[Join Channel|https://t.me/channel]`",
-            reply_markup=ForceReply(selective=True)
-        )
-        await query.answer()
-
-    elif data == "btn_set_broadcast_interval":
-        if not has_perm(user_id, "broadcast"):
-            return await query.answer("Permission Denied", show_alert=True)
-        user_states[user_id] = "WAIT_BROADCAST_INTERVAL"
-        await query.message.reply_text(f"{UI_EMOJIS['timer']} Enter interval in minutes (e.g. 5):", reply_markup=ForceReply(selective=True))
-        await query.answer()
 
     elif data == "btn_list_sessions":
         if not has_perm(user_id, "sessions"):
             return await query.answer("Permission Denied", show_alert=True)
         sessions = await asyncio.to_thread(sync_get_all_sessions)
-        text = f"┏━━━━━━ {UI_EMOJIS['folder']} **ACTIVE SESSIONS** ━━━━━━┓\n\n"
+        text = f"┏━━━━━━ {ce('folder')} <b>ACTIVE SESSIONS</b> ━━━━━━┓\n\n"
+        if not sessions:
+            text += "  <i>No userbot sessions found.</i>\n"
         for idx, s in enumerate(sessions, 1):
-            text += f"  **{idx}.** `{s.get('account_name', 'Unknown')}`\n"
-        text += "\n┗━━━━━━━━━━━━━━━━━━━━━━━━┛"
-        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{UI_EMOJIS['back']} Back", callback_data="btn_refresh_panel")]]))
+            text += f"  <b>{idx}.</b> <code>{s.get('account_name', 'Unknown')}</code>\n"
+        text += "\n┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{FALLBACK_SYMBOLS['back']} Back", callback_data="btn_refresh_panel")]]))
         await query.answer()
 
     elif data == "btn_del_menu":
         if not has_perm(user_id, "sessions"):
             return await query.answer("Permission Denied", show_alert=True)
         sessions = await asyncio.to_thread(sync_get_all_sessions)
-        buttons = [[InlineKeyboardButton(f"{UI_EMOJIS['cross']} {s.get('account_name', 'Session')}", callback_data=f"del_{s['doc_id']}")] for s in sessions]
-        buttons.append([InlineKeyboardButton(f"{UI_EMOJIS['back']} Back", callback_data="btn_refresh_panel")])
+        buttons = [[InlineKeyboardButton(f"{FALLBACK_SYMBOLS['cross']} {s.get('account_name', 'Session')}", callback_data=f"del_{s['doc_id']}")] for s in sessions]
+        buttons.append([InlineKeyboardButton(f"{FALLBACK_SYMBOLS['back']} Back", callback_data="btn_refresh_panel")])
         await query.message.edit_text("Select session to remove:", reply_markup=InlineKeyboardMarkup(buttons))
         await query.answer()
 
@@ -1014,9 +707,9 @@ async def callback_handler(_, query: CallbackQuery):
             return await query.answer("Owner Only", show_alert=True)
         buttons = []
         for aid in loaded_admins:
-            buttons.append([InlineKeyboardButton(f"{UI_EMOJIS['shield']} Admin `{aid}`", callback_data=f"viewadmin_{aid}")])
-        buttons.append([InlineKeyboardButton(f"➕ Add New Admin", callback_data="btn_add_new_admin")])
-        buttons.append([InlineKeyboardButton(f"{UI_EMOJIS['back']} Back", callback_data="btn_refresh_panel")])
+            buttons.append([InlineKeyboardButton(f"{FALLBACK_SYMBOLS['shield']} Admin: {aid}", callback_data=f"viewadmin_{aid}")])
+        buttons.append([InlineKeyboardButton("➕ Add Sub-Admin", callback_data="btn_add_new_admin")])
+        buttons.append([InlineKeyboardButton(f"{FALLBACK_SYMBOLS['back']} Back", callback_data="btn_refresh_panel")])
         await query.message.edit_text("Manage sub-admins and rights:", reply_markup=InlineKeyboardMarkup(buttons))
         await query.answer()
 
@@ -1024,17 +717,24 @@ async def callback_handler(_, query: CallbackQuery):
         if user_id != OWNER_ID:
             return await query.answer("Owner Only", show_alert=True)
         user_states[user_id] = "WAIT_ADMIN_ID"
-        await query.message.reply_text(f"{UI_EMOJIS['user']} Send Telegram User ID of new admin:", reply_markup=ForceReply(selective=True))
+        await query.message.reply_text(f"{ce('user')} Send Telegram User ID of new admin:", reply_markup=ForceReply(selective=True))
         await query.answer()
 
     elif data.startswith("viewadmin_"):
         if user_id != OWNER_ID:
             return await query.answer("Owner Only", show_alert=True)
         target_uid = int(data.split("_")[1])
-        await query.message.edit_text(
-            f"⚙️ **Permissions for Admin:** `{target_uid}`",
-            reply_markup=get_admin_perm_markup(target_uid)
-        )
+        perms = loaded_admins.get(target_uid, {})
+        s_tag = FALLBACK_SYMBOLS['online'] if perms.get("sessions") else FALLBACK_SYMBOLS['offline']
+        b_tag = FALLBACK_SYMBOLS['online'] if perms.get("broadcast") else FALLBACK_SYMBOLS['offline']
+
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"Manage Sessions: {s_tag}", callback_data=f"togperm_{target_uid}_sessions")],
+            [InlineKeyboardButton(f"Send Broadcast: {b_tag}", callback_data=f"togperm_{target_uid}_broadcast")],
+            [InlineKeyboardButton(f"{FALLBACK_SYMBOLS['trash']} Remove Admin", callback_data=f"deladmin_{target_uid}")],
+            [InlineKeyboardButton(f"{FALLBACK_SYMBOLS['back']} Back", callback_data="btn_manage_admins")]
+        ])
+        await query.message.edit_text(f"⚙️ <b>Permissions for Admin:</b> <code>{target_uid}</code>", reply_markup=markup)
         await query.answer()
 
     elif data.startswith("togperm_"):
@@ -1043,9 +743,21 @@ async def callback_handler(_, query: CallbackQuery):
         _, t_uid_str, p_key = data.split("_")
         target_uid = int(t_uid_str)
         curr = loaded_admins.get(target_uid, {}).get(p_key, False)
-        await asyncio.to_thread(sync_update_admin_perm, target_uid, p_key, not curr)
-        await query.message.edit_reply_markup(reply_markup=get_admin_perm_markup(target_uid))
-        await query.answer("Updated")
+        loaded_admins.setdefault(target_uid, {})[p_key] = not curr
+        if db:
+            db.collection("bot_admins").document(str(target_uid)).set({p_key: not curr}, merge=True)
+        await query.answer("Permission Updated")
+
+        perms = loaded_admins.get(target_uid, {})
+        s_tag = FALLBACK_SYMBOLS['online'] if perms.get("sessions") else FALLBACK_SYMBOLS['offline']
+        b_tag = FALLBACK_SYMBOLS['online'] if perms.get("broadcast") else FALLBACK_SYMBOLS['offline']
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"Manage Sessions: {s_tag}", callback_data=f"togperm_{target_uid}_sessions")],
+            [InlineKeyboardButton(f"Send Broadcast: {b_tag}", callback_data=f"togperm_{target_uid}_broadcast")],
+            [InlineKeyboardButton(f"{FALLBACK_SYMBOLS['trash']} Remove Admin", callback_data=f"deladmin_{target_uid}")],
+            [InlineKeyboardButton(f"{FALLBACK_SYMBOLS['back']} Back", callback_data="btn_manage_admins")]
+        ])
+        await query.message.edit_reply_markup(reply_markup=markup)
 
     elif data.startswith("deladmin_"):
         if user_id != OWNER_ID:
@@ -1053,20 +765,70 @@ async def callback_handler(_, query: CallbackQuery):
         target_uid = int(data.split("_")[1])
         await asyncio.to_thread(sync_delete_admin, target_uid)
         await query.answer(f"Admin {target_uid} removed", show_alert=True)
-        buttons = [[InlineKeyboardButton(f"{UI_EMOJIS['shield']} Admin `{aid}`", callback_data=f"viewadmin_{aid}")] for aid in loaded_admins]
-        buttons.append([InlineKeyboardButton(f"➕ Add New Admin", callback_data="btn_add_new_admin")])
-        buttons.append([InlineKeyboardButton(f"{UI_EMOJIS['back']} Back", callback_data="btn_refresh_panel")])
+        buttons = [[InlineKeyboardButton(f"{FALLBACK_SYMBOLS['shield']} Admin: {aid}", callback_data=f"viewadmin_{aid}")] for aid in loaded_admins]
+        buttons.append([InlineKeyboardButton("➕ Add Sub-Admin", callback_data="btn_add_new_admin")])
+        buttons.append([InlineKeyboardButton(f"{FALLBACK_SYMBOLS['back']} Back", callback_data="btn_refresh_panel")])
         await query.message.edit_text("Admin list updated:", reply_markup=InlineKeyboardMarkup(buttons))
 
-# ----------------- INPUT PROMPT HANDLER (USERS & ADMINS) ----------------- #
+# ----------------- MESSAGE ROUTER & BROADCAST INTAKE ----------------- #
 
-@bot.on_message(filters.private & ~filters.command(["start", "help", "admin", "panel", "ping", "addchat", "storage", "clean", "login"]))
+@bot.on_message(filters.private & ~filters.command(["start", "help", "admin", "panel", "ping", "storage", "clean", "login", "cancel"]))
 async def message_input_router(_, message: Message):
     user_id = message.from_user.id
+    asyncio.to_thread(sync_register_user, user_id)
+
     state = user_states.get(user_id)
     text_input = (message.text or message.caption or "").strip()
 
-    # Public Login Steps
+    # Reply Keyboard Router
+    if text_input == f"{FALLBACK_SYMBOLS['phone']} Connect Account":
+        return await public_login_cmd(_, message)
+    elif text_input == f"{FALLBACK_SYMBOLS['rocket']} Latency":
+        return await ping_handler(_, message)
+    elif text_input == f"{FALLBACK_SYMBOLS['panel']} Admin Panel":
+        return await admin_panel_handler(_, message)
+    elif text_input == f"{FALLBACK_SYMBOLS['broadcast']} Broadcast":
+        if not has_perm(user_id, "broadcast"):
+            return await message.reply_text(f"{ce('cross')} <b>Permission Denied.</b>")
+        user_states[user_id] = "WAIT_BROADCAST_PAYLOAD"
+        return await message.reply_text(
+            f"{ce('broadcast')} <b>Forward or send your Broadcast payload now:</b>\n\n"
+            f"• 💬 Text Message\n"
+            f"• 🎙️ Voice Note / Audio\n"
+            f"• {ce('media')} Photo / Video\n\n"
+            f"<i>Send <code>/cancel</code> to abort.</i>",
+            reply_markup=ForceReply(selective=True)
+        )
+    elif text_input == f"{FALLBACK_SYMBOLS['disk']} Storage":
+        return await storage_cmd_handler(_, message)
+    elif text_input == f"{FALLBACK_SYMBOLS['broom']} Clean Cache":
+        return await clean_cmd_handler(_, message)
+    elif text_input == "ℹ️ How To Use":
+        return await message.reply_text(
+            f"┏━━━━━━ ℹ️ <b>HOW TO USE</b> ━━━━━━┓\n\n"
+            f"  1. Send any public or private Telegram link to download media.\n"
+            f"  2. Connect your account via <code>/login</code> to access restricted private channels.\n"
+            f"  3. Delivered media automatically self-deletes in <code>{AUTO_DELETE_TIME}s</code>.\n\n"
+            f"┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛",
+            reply_markup=get_bottom_keyboard(user_id)
+        )
+
+    # Broadcast Payload Receiver
+    if state == "WAIT_BROADCAST_PAYLOAD" and has_perm(user_id, "broadcast"):
+        user_states.pop(user_id, None)
+        asyncio.create_task(broadcast_to_all_users(message, user_id))
+        return
+
+    # Add Admin Prompt
+    if state == "WAIT_ADMIN_ID" and user_id == OWNER_ID:
+        user_states.pop(user_id, None)
+        if not text_input.isdigit():
+            return await message.reply_text(f"{ce('cross')} <b>User ID must contain only digits.</b>")
+        t_id = int(text_input)
+        await asyncio.to_thread(sync_add_admin, t_id)
+        return await message.reply_text(f"{ce('check')} <b>Admin <code>{t_id}</code> added successfully!</b>")
+
+    # Multi-step Interactive Login Flow
     if state == "WAIT_PHONE":
         user_states.pop(user_id, None)
         phone = text_input.replace(" ", "")
@@ -1077,11 +839,13 @@ async def message_input_router(_, message: Message):
             login_clients[user_id] = {"cl": cl, "phone": phone, "hash": c.phone_code_hash}
             user_states[user_id] = "WAIT_OTP"
             await message.reply_text(
-                f"{UI_EMOJIS['phone']} Enter the Telegram OTP code you received (separate numbers with spaces, e.g. `1 2 3 4 5`):",
+                f"{ce('phone')} <b>Telegram Verification Code</b>\n\n"
+                f"Enter the OTP received from Telegram.\n"
+                f"💡 <i>Tip: Add spaces between digits (e.g. <code>1 2 3 4 5</code>)</i>:",
                 reply_markup=ForceReply(selective=True)
             )
         except Exception as e:
-            await message.reply_text(f"{UI_EMOJIS['cross']} Failed to send code: `{e}`")
+            await message.reply_text(f"{ce('cross')} Failed to send code: <code>{e}</code>")
         return
 
     elif state == "WAIT_OTP":
@@ -1102,15 +866,23 @@ async def message_input_router(_, message: Message):
             
             await asyncio.to_thread(sync_add_session, s_str, acc, user_id)
             asyncio.create_task(init_session_pool())
-            await message.reply_text(f"{UI_EMOJIS['check']} **Account Connected Successfully!**\nWelcome, `{acc}`. Your session is now aiding the bot.")
+            await message.reply_text(
+                f"{ce('check')} <b>Account Connected Successfully!</b>\n\n"
+                f"Welcome, <code>{acc}</code>. Your session is active.",
+                reply_markup=get_bottom_keyboard(user_id)
+            )
         except SessionPasswordNeeded:
             user_states[user_id] = "WAIT_2FA"
-            await message.reply_text(f"{UI_EMOJIS['lock']} Account has Two-Step Verification. Enter your password:", reply_markup=ForceReply(selective=True))
+            await message.reply_text(
+                f"{ce('lock')} <b>Two-Step Verification Detected</b>\n\n"
+                f"Please enter your cloud account password:",
+                reply_markup=ForceReply(selective=True)
+            )
         except Exception as e:
             await cl.disconnect()
             login_clients.pop(user_id, None)
             user_states.pop(user_id, None)
-            await message.reply_text(f"{UI_EMOJIS['cross']} Login failed: `{e}`")
+            await message.reply_text(f"{ce('cross')} Login failed: <code>{e}</code>")
         return
 
     elif state == "WAIT_2FA":
@@ -1130,55 +902,20 @@ async def message_input_router(_, message: Message):
             
             await asyncio.to_thread(sync_add_session, s_str, acc, user_id)
             asyncio.create_task(init_session_pool())
-            await message.reply_text(f"{UI_EMOJIS['check']} **Account Connected Successfully!**\nWelcome, `{acc}`.")
+            await message.reply_text(
+                f"{ce('check')} <b>Account Connected Successfully!</b>\n\n"
+                f"Welcome, <code>{acc}</code>.",
+                reply_markup=get_bottom_keyboard(user_id)
+            )
         except Exception as e:
             await message.reply_text(
-                f"{UI_EMOJIS['cross']} Incorrect 2FA Password: `{e}`",
+                f"{ce('cross')} Incorrect 2FA Password: <code>{e}</code>",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"{UI_EMOJIS['refresh']} Retry", callback_data="btn_retry_2fa"),
-                     InlineKeyboardButton(f"{UI_EMOJIS['cross']} Cancel", callback_data="btn_cancel_login")]
+                    [InlineKeyboardButton(f"{FALLBACK_SYMBOLS['refresh']} Retry", callback_data="btn_retry_2fa"),
+                     InlineKeyboardButton(f"{FALLBACK_SYMBOLS['cross']} Cancel", callback_data="btn_cancel_login")]
                 ])
             )
         return
-
-    # Admin Management Prompts
-    if is_any_admin(user_id) and state:
-        if state == "WAIT_ADMIN_ID" and user_id == OWNER_ID:
-            user_states.pop(user_id, None)
-            if not text_input.isdigit():
-                return await message.reply_text(f"{UI_EMOJIS['cross']} User ID must be numeric.")
-            t_id = int(text_input)
-            await asyncio.to_thread(sync_add_admin, t_id)
-            await message.reply_text(f"{UI_EMOJIS['check']} Added Admin `{t_id}`. Configure permissions via `/admin`.")
-            return
-
-        elif state == "WAIT_BROADCAST_MSG" and has_perm(user_id, "broadcast"):
-            user_states.pop(user_id, None)
-            config = await asyncio.to_thread(sync_get_broadcast_settings)
-            config["message"] = text_input
-            await asyncio.to_thread(sync_save_broadcast_settings, config)
-            await message.reply_text(f"{UI_EMOJIS['check']} Broadcast message updated!")
-            return
-
-        elif state == "WAIT_MEDIA_URL" and has_perm(user_id, "broadcast"):
-            user_states.pop(user_id, None)
-            val = "" if text_input.lower() == "none" else text_input
-            config = await asyncio.to_thread(sync_get_broadcast_settings)
-            config["media_url"] = val
-            await asyncio.to_thread(sync_save_broadcast_settings, config)
-            await message.reply_text(f"{UI_EMOJIS['check']} Media URL updated!")
-            return
-
-        elif state == "WAIT_BROADCAST_INTERVAL" and has_perm(user_id, "broadcast"):
-            user_states.pop(user_id, None)
-            if not text_input.isdigit() or int(text_input) < 1:
-                return await message.reply_text(f"{UI_EMOJIS['cross']} Enter a valid number.")
-            mins = int(text_input)
-            config = await asyncio.to_thread(sync_get_broadcast_settings)
-            config["interval_minutes"] = mins
-            await asyncio.to_thread(sync_save_broadcast_settings, config)
-            await message.reply_text(f"{UI_EMOJIS['check']} Interval set to {mins} minutes.")
-            return
 
     # ----------------- TELEGRAM POST DOWNLOAD ROUTINE ----------------- #
     p_match = re.search(r"t\.me/c/(\d+)/(\d+)", text_input)
@@ -1188,7 +925,7 @@ async def message_input_router(_, message: Message):
         return
 
     try:
-        await message.react(UI_EMOJIS["reaction"])
+        await message.react("🫡")
     except Exception:
         pass
 
@@ -1212,7 +949,7 @@ async def message_input_router(_, message: Message):
         await init_session_pool()
 
     if not loaded_user_clients:
-        return await message.reply_text(f"{UI_EMOJIS['cross']} No active sessions found. Connect an account using `/login`.")
+        return await message.reply_text(f"{ce('cross')} No active sessions found. Connect an account using <code>/login</code>.")
 
     target_msg, working_client = None, None
     for _, _, u_client in loaded_user_clients:
@@ -1225,7 +962,7 @@ async def message_input_router(_, message: Message):
             continue
 
     if not target_msg or target_msg.empty:
-        return await message.reply_text(f"{UI_EMOJIS['cross']} Post unavailable or channel not joined by any active account.")
+        return await message.reply_text(f"{ce('cross')} Post unavailable or channel not joined by any active account.")
 
     # Direct Forward Bypass
     try:
@@ -1247,7 +984,7 @@ async def message_input_router(_, message: Message):
         except Exception:
             pass
 
-    status = await message.reply_text(f"{UI_EMOJIS['spark']} **Preparing transfer...**")
+    status = await message.reply_text(f"{ce('spark')} <b>Preparing transfer...</b>")
     task_id = f"task_{message.from_user.id}_{int(time.time())}"
 
     # Album Processing
@@ -1288,7 +1025,7 @@ async def message_input_router(_, message: Message):
         alb_tracker.finish()
 
         if len(input_media) >= 2:
-            await status.edit_text(f"{UI_EMOJIS['spark']} **Uploading album to Telegram...**")
+            await status.edit_text(f"{ce('spark')} <b>Uploading album to Telegram...</b>")
             sent_msgs = []
             for i in range(0, len(input_media), 10):
                 res = await bot.send_media_group(message.chat.id, input_media[i:i + 10])
@@ -1296,7 +1033,7 @@ async def message_input_router(_, message: Message):
             await status.delete()
             asyncio.create_task(silent_auto_delete(message.chat.id, [m.id for m in sent_msgs] + [message.id]))
         else:
-            await status.edit_text(f"{UI_EMOJIS['cross']} Album processing failed.")
+            await status.edit_text(f"{ce('cross')} Album processing failed.")
 
         for f in files_to_cleanup + thumbs_to_cleanup:
             try:
@@ -1309,8 +1046,8 @@ async def message_input_router(_, message: Message):
     # Single Media Processing
     if not (target_msg.media or target_msg.video or target_msg.photo or target_msg.document or target_msg.audio or target_msg.voice):
         if target_msg.text:
-            return await status.edit_text(f"📝 **Text:**\n\n{target_msg.text}")
-        return await status.edit_text(f"{UI_EMOJIS['warning']} No media found.")
+            return await status.edit_text(f"📝 <b>Text:</b>\n\n{target_msg.text}")
+        return await status.edit_text(f"{ce('warning')} No media found.")
 
     ext = ".mp4" if target_msg.video else ".jpg" if target_msg.photo else ".mp3" if target_msg.audio else ""
     if not ext and target_msg.document:
@@ -1336,7 +1073,7 @@ async def message_input_router(_, message: Message):
     dl_tracker.finish()
 
     if not file_path or not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-        return await status.edit_text(f"{UI_EMOJIS['cross']} **Download failed.**")
+        return await status.edit_text(f"{ce('cross')} <b>Download failed.</b>")
 
     thumb_path = None
     duration = target_msg.video.duration or 0 if target_msg.video else 0
@@ -1390,7 +1127,7 @@ async def message_input_router(_, message: Message):
                 progress=up_tracker.progress
             )
     except Exception as e:
-        await status.edit_text(f"{UI_EMOJIS['cross']} **Upload failed:** `{e}`")
+        await status.edit_text(f"{ce('cross')} <b>Upload failed:</b> <code>{e}</code>")
     finally:
         up_tracker.finish()
 
@@ -1447,45 +1184,67 @@ async def download_album_item(client, media_msg, idx, user_id, tracker: AlbumPro
 
 @bot.on_message(filters.command("start") & filters.private)
 async def start_handler(_, message: Message):
+    user_id = message.from_user.id
+    asyncio.to_thread(sync_register_user, user_id)
     await message.reply_text(
-        f"👋 **স্বাগতম, {message.from_user.first_name}!**\n\n"
-        f"{UI_EMOJIS['spark']} যে কোনো পাবলিক বা প্রাইভেট পোস্টের লিঙ্ক পাঠান ডাউনলোড করার জন্য।\n\n"
-        f"{UI_EMOJIS['lock']} আপনার নিজস্ব অ্যাকাউন্ট যুক্ত করতে `/login` ব্যবহার করুন।"
+        f"👋 <b>Welcome, {message.from_user.first_name}!</b>\n\n"
+        f"{ce('spark')} Send any public or private Telegram link to download media.\n\n"
+        f"{ce('lock')} Use <code>/login</code> or the button below to link your account.",
+        reply_markup=get_bottom_keyboard(user_id)
     )
+
+@bot.on_message(filters.command("login") & filters.private)
+async def public_login_cmd(_, message: Message):
+    user_id = message.from_user.id
+    user_states[user_id] = "WAIT_PHONE"
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton(f"{FALLBACK_SYMBOLS['cross']} Cancel", callback_data="btn_cancel_login")]])
+    await message.reply_text(
+        f"{ce('phone')} <b>Connect Your Telegram Account</b>\n\n"
+        "Send your phone number with country code (e.g. <code>+8801700000000</code>):\n\n"
+        "<i>Your account helps the bot download restricted content.</i>",
+        reply_markup=markup
+    )
+
+@bot.on_message(filters.command("cancel") & filters.private)
+async def cancel_handler(_, message: Message):
+    user_id = message.from_user.id
+    user_states.pop(user_id, None)
+    login_clients.pop(user_id, None)
+    await message.reply_text(f"{ce('check')} <b>Action cancelled.</b>", reply_markup=get_bottom_keyboard(user_id))
 
 @bot.on_message(filters.command("ping") & filters.private)
 async def ping_handler(_, message: Message):
     t0 = time.time()
-    msg = await message.reply_text(f"{UI_EMOJIS['spark']} Ping...")
-    await msg.edit_text(f"{UI_EMOJIS['rocket']} **Latency:** `{(time.time() - t0) * 1000:.1f}ms`")
+    msg = await message.reply_text(f"{ce('spark')} Testing Latency...")
+    await msg.edit_text(f"{ce('rocket')} <b>Latency:</b> <code>{(time.time() - t0) * 1000:.1f}ms</code>")
 
 @bot.on_message(filters.command("storage") & filters.private)
 async def storage_cmd_handler(_, message: Message):
     if not is_any_admin(message.from_user.id):
-        return await message.reply_text(f"{UI_EMOJIS['cross']} Access Denied.")
+        return await message.reply_text(f"{ce('cross')} Access Denied.")
     st = get_storage_stats()
     filled = int(st["percent"] / 10)
-    bar = UI_EMOJIS["bar_fill"] * filled + UI_EMOJIS["bar_empty"] * (10 - filled)
+    bar = ce("bar_fill") * filled + ce("bar_empty") * (10 - filled)
     text = (
-        f"┏━━━━━━ {UI_EMOJIS['disk']} **DISK STORAGE INFO** ━━━━━━┓\n\n"
-        f"  📊 **Disk Full:** `⌠{bar}⌡ {st['percent']:.1f}%`\n"
-        f"  📦 **Used Space:** `{human_bytes(st['used'])}`\n"
-        f"  {UI_EMOJIS['online']} **Free Space:** `{human_bytes(st['free'])}`\n"
-        f"  🗂️ **Total Disk:** `{human_bytes(st['total'])}`\n\n"
-        f"  {UI_EMOJIS['folder']} **Downloads Temp:** `{human_bytes(st['dl_size'])}` ({st['dl_files']} files)\n"
-        "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+        f"┏━━━━━━ {ce('disk')} <b>DISK STORAGE INFO</b> ━━━━━━┓\n\n"
+        f"  📊 <b>Disk Full:</b> ⌠{bar}⌡ <code>{st['percent']:.1f}%</code>\n"
+        f"  📦 <b>Used Space:</b> <code>{human_bytes(st['used'])}</code>\n"
+        f"  {ce('online')} <b>Free Space:</b> <code>{human_bytes(st['free'])}</code>\n"
+        f"  🗂️ <b>Total Space:</b> <code>{human_bytes(st['total'])}</code>\n\n"
+        f"  {ce('folder')} <b>Temp Downloads:</b> <code>{human_bytes(st['dl_size'])}</code> ({st['dl_files']} files)\n"
+        f"┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
     )
     markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{UI_EMOJIS['broom']} Clean Temp Files", callback_data="btn_clean_storage")]
+        [InlineKeyboardButton(f"{FALLBACK_SYMBOLS['broom']} Clean Temp Files", callback_data="btn_clean_storage")]
     ])
     await message.reply_text(text, reply_markup=markup)
 
 @bot.on_message(filters.command("clean") & filters.private)
 async def clean_cmd_handler(_, message: Message):
     if not is_any_admin(message.from_user.id):
-        return await message.reply_text(f"{UI_EMOJIS['cross']} Access Denied.")
+        return await message.reply_text(f"{ce('cross')} Access Denied.")
 
-    msg = await message.reply_text(f"{UI_EMOJIS['broom']} Cleaning temp files...")
+    msg = await message.reply_text(f"{ce('broom')} Cleaning temp files...")
     deleted_files = 0
     freed_bytes = 0
 
@@ -1504,9 +1263,9 @@ async def clean_cmd_handler(_, message: Message):
                 logger.error(f"Failed to delete {file_path}: {e}")
 
     await msg.edit_text(
-        f"{UI_EMOJIS['check']} **Storage Cleaned!**\n\n"
-        f"{UI_EMOJIS['trash']} Files Removed: `{deleted_files}`\n"
-        f"{UI_EMOJIS['disk']} Space Freed: `{human_bytes(freed_bytes)}`"
+        f"{ce('check')} <b>Storage Cleaned!</b>\n\n"
+        f"{ce('trash')} Files Removed: <code>{deleted_files}</code>\n"
+        f"{ce('disk')} Space Freed: <code>{human_bytes(freed_bytes)}</code>"
     )
 
 # ----------------- WEB DASHBOARD ----------------- #
@@ -1751,19 +1510,18 @@ async def main():
     try:
         await bot.set_bot_commands([
             BotCommand("start", "Start the bot"),
-            BotCommand("login", "Connect your account to the bot pool"),
+            BotCommand("login", "Connect an account to userbot pool"),
             BotCommand("admin", "Admin Control Panel"),
             BotCommand("storage", "Check Disk Usage"),
             BotCommand("clean", "Clean Temp Storage"),
             BotCommand("ping", "Check latency"),
-            BotCommand("addchat", "Add channel for broadcast")
+            BotCommand("cancel", "Cancel current operation")
         ])
     except Exception:
         pass
     await init_session_pool()
     await web_server()
-    asyncio.create_task(auto_broadcast_worker())
-    logger.info("Bot Online with User-Facing Self-Login Enabled!")
+    logger.info("Bot Online with User-Facing Self-Login and Custom Emojis!")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
