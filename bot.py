@@ -2317,4 +2317,237 @@ body{background:radial-gradient(900px 500px at 10% -10%,#1c2750 0,transparent 60
 .cell{background:#0e1427;border:1px solid var(--line);border-radius:10px;padding:10px}
 .cell b{display:block;font-size:14px;margin-top:2px}
 .task{background:#0e1427;border:1px solid var(--line);border-radius:10px;padding:10px;margin-top:10px}
-.task .r{display:flex;justi
+.task .r{display:flex;justify-content:space-between;font-size:12px;color:var(--mut);margin-top:6px}
+.empty{color:var(--mut);font-size:13px;text-align:center;padding:16px 0}
+.btn{width:100%;padding:12px;border:0;border-radius:10px;background:var(--bad);color:#fff;font-weight:700;cursor:pointer}
+.search{width:100%;padding:13px 14px;border-radius:12px;border:1px solid var(--line);background:#0e1427;color:var(--tx);font-size:15px;outline:none;margin-bottom:12px}
+.search:focus{border-color:var(--acc)}
+.user{display:flex;gap:12px;align-items:center;padding:12px;border-bottom:1px solid var(--line)}
+.user:last-child{border:0}
+.av{width:42px;height:42px;border-radius:50%;background:linear-gradient(135deg,var(--acc),#a66cff);display:flex;align-items:center;justify-content:center;font-weight:800;flex:none}
+.info{flex:1;min-width:0}
+.nm{font-weight:700;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sub{font-size:12px;color:var(--mut);margin-top:2px}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.chip{font-size:11px;padding:2px 8px;border-radius:6px;background:#0e1427;border:1px solid var(--line);color:var(--mut)}
+.st{font-size:11px;font-weight:700;padding:3px 9px;border-radius:99px}
+.st.ok{background:#0d3b2e;color:var(--ok)}.st.no{background:#4a1d1d;color:var(--bad)}
+.hide{display:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top"><div class="brand">⚡ Clipwell Control</div><div class="badge">● ONLINE</div></div>
+  <div class="tabs">
+    <div class="tab on" id="t1" onclick="show(1)">Overview</div>
+    <div class="tab" id="t2" onclick="show(2)">Users</div>
+  </div>
+
+  <div id="p1">
+    <div class="card">
+      <div class="lbl">Disk usage</div>
+      <div class="big" id="pct">--%</div>
+      <div class="bar"><div class="fill" id="fill"></div></div>
+      <div class="grid">
+        <div class="cell"><span class="lbl">Used</span><b id="used">--</b></div>
+        <div class="cell"><span class="lbl">Free</span><b id="free">--</b></div>
+        <div class="cell"><span class="lbl">Total</span><b id="total">--</b></div>
+        <div class="cell"><span class="lbl">Temp cache</span><b id="temp">--</b></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="lbl">Live transfers</div>
+      <div id="tasks"><div class="empty">No active transfers.</div></div>
+    </div>
+    <button class="btn" onclick="clean()">🧹 Clean download cache</button>
+  </div>
+
+  <div id="p2" class="hide">
+    <input class="search" id="q" placeholder="🔎 Search by ID, name or @username" oninput="debounce()">
+    <div class="card" style="padding:4px 4px"><div id="users"><div class="empty">Loading...</div></div></div>
+  </div>
+</div>
+
+<script>
+const KEY = new URLSearchParams(location.search).get('key') || '';
+function api(p, o) {
+  return fetch(p + (p.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(KEY), o)
+    .then(function (r) { if (r.status === 401) throw new Error('auth'); return r.json(); });
+}
+function esc(s) { var d = document.createElement('div'); d.textContent = (s == null) ? '' : String(s); return d.innerHTML; }
+function hb(b) { if (!b) return '0 B'; var k = 1024, s = ['B','KB','MB','GB','TB'], i = Math.floor(Math.log(b) / Math.log(k)); return parseFloat((b / Math.pow(k, i)).toFixed(2)) + ' ' + s[i]; }
+function ago(t) { if (!t) return 'never'; var s = Date.now() / 1000 - t; if (s < 60) return 'just now'; if (s < 3600) return Math.floor(s / 60) + 'm ago'; if (s < 86400) return Math.floor(s / 3600) + 'h ago'; return Math.floor(s / 86400) + 'd ago'; }
+function show(n) {
+  document.getElementById('p1').classList.toggle('hide', n !== 1);
+  document.getElementById('p2').classList.toggle('hide', n !== 2);
+  document.getElementById('t1').classList.toggle('on', n === 1);
+  document.getElementById('t2').classList.toggle('on', n === 2);
+  if (n === 2) loadUsers();
+}
+async function stats() {
+  try {
+    var d = await api('/api/stats');
+    document.getElementById('pct').innerText = d.percent.toFixed(1) + '% full';
+    var f = document.getElementById('fill');
+    f.style.width = Math.min(100, d.percent) + '%';
+    f.style.background = d.percent > 85 ? '#f87171' : d.percent > 65 ? '#fbbf24' : '#34d399';
+    document.getElementById('used').innerText = hb(d.used);
+    document.getElementById('free').innerText = hb(d.free);
+    document.getElementById('total').innerText = hb(d.total);
+    document.getElementById('temp').innerText = hb(d.dl_size) + ' (' + d.dl_files + ')';
+    var box = document.getElementById('tasks');
+    if (!d.tasks.length) { box.innerHTML = '<div class="empty">No active transfers.</div>'; return; }
+    box.innerHTML = d.tasks.map(function (t) {
+      return '<div class="task"><b style="font-size:13px">' + esc(t.name) + '</b>' +
+        '<div class="bar" style="margin-top:8px"><div class="fill" style="width:' + Math.min(100, t.percent || 0) + '%;background:#6c8cff"></div></div>' +
+        '<div class="r"><span>' + (t.percent || 0) + '%</span><span>' + hb(t.current) + ' / ' + hb(t.total) + '</span><span>' + esc(t.speed) + '</span></div></div>';
+    }).join('');
+  } catch (e) {
+    if (e.message === 'auth') document.getElementById('tasks').innerHTML = '<div class="empty">Unauthorized. Open with ?key=YOUR_TOKEN</div>';
+  }
+}
+var timer;
+function debounce() { clearTimeout(timer); timer = setTimeout(loadUsers, 300); }
+async function loadUsers() {
+  var q = document.getElementById('q').value;
+  var box = document.getElementById('users');
+  try {
+    var d = await api('/api/users?q=' + encodeURIComponent(q));
+    if (!d.users.length) { box.innerHTML = '<div class="empty">No users found.</div>'; return; }
+    box.innerHTML = d.users.map(function (u) {
+      var nm = u.name || ('User ' + u.id);
+      return '<div class="user"><div class="av">' + esc(nm.charAt(0).toUpperCase()) + '</div>' +
+        '<div class="info"><div class="nm">' + esc(nm) + (u.username ? ' <span style="color:#8b96b8;font-weight:400">@' + esc(u.username) + '</span>' : '') + '</div>' +
+        '<div class="sub">ID ' + esc(u.id) + ' · active ' + ago(u.last_active) + '</div>' +
+        '<div class="chips"><span class="chip">💳 ' + u.credits + '</span><span class="chip">📥 ' + u.downloads + '</span><span class="chip">🎁 ' + u.referrals + '</span></div></div>' +
+        '<span class="st ' + (u.banned ? 'no' : 'ok') + '">' + (u.banned ? 'BANNED' : 'ACTIVE') + '</span></div>';
+    }).join('');
+  } catch (e) {
+    box.innerHTML = '<div class="empty">Unauthorized. Open with ?key=YOUR_TOKEN</div>';
+  }
+}
+async function clean() {
+  if (!confirm('Delete all temporary download files?')) return;
+  try { var d = await api('/api/clean', { method: 'POST' }); alert('Cleaned ' + hb(d.freed)); stats(); }
+  catch (e) { alert('Failed'); }
+}
+stats(); setInterval(stats, 3000);
+</script>
+</body>
+</html>
+"""
+
+# ----------------- WEB SERVER HANDLERS ----------------- #
+
+def clean_download_dir() -> int:
+    freed = 0
+    if os.path.exists(DOWNLOAD_DIR):
+        for filename in os.listdir(DOWNLOAD_DIR):
+            fp = os.path.join(DOWNLOAD_DIR, filename)
+            try:
+                if os.path.isfile(fp) or os.path.islink(fp):
+                    freed += os.path.getsize(fp)
+                    os.unlink(fp)
+                elif os.path.isdir(fp):
+                    shutil.rmtree(fp)
+            except Exception as e:
+                logger.error(f"Failed to delete {fp}: {e}")
+    return freed
+
+def _authed(request) -> bool:
+    return bool(DASH_TOKEN) and request.query.get("key", "") == DASH_TOKEN
+
+def _unauth():
+    return web.json_response({"error": "unauthorized"}, status=401)
+
+async def web_index(request):
+    return web.Response(text=HTML_DASHBOARD, content_type="text/html")
+
+async def web_health(request):
+    return web.Response(text="OK")
+
+async def api_stats(request):
+    if not _authed(request):
+        return _unauth()
+    st = await asyncio.to_thread(get_storage_stats)
+    tasks = []
+    for _, t in list(active_tasks.items()):
+        tasks.append({
+            "name": t.get("name", ""),
+            "type": t.get("type", "download"),
+            "current": t.get("current", 0),
+            "total": t.get("total", 0),
+            "percent": t.get("percent", 0),
+            "speed": t.get("speed", "--"),
+        })
+    st["tasks"] = tasks
+    return web.json_response(st)
+
+async def api_users(request):
+    if not _authed(request):
+        return _unauth()
+    rows = await asyncio.to_thread(sync_search_users, request.query.get("q", ""), 100)
+    return web.json_response({"users": [{
+        "id": x.get("user_id"),
+        "name": x.get("name", ""),
+        "username": x.get("username", ""),
+        "credits": x.get("credits", 0),
+        "downloads": x.get("downloads", 0),
+        "referrals": x.get("referrals", 0),
+        "banned": bool(x.get("banned")),
+        "last_active": x.get("last_active", 0),
+        "joined": x.get("joined", 0),
+    } for x in rows]})
+
+async def api_clean(request):
+    if not _authed(request):
+        return _unauth()
+    freed = await asyncio.to_thread(clean_download_dir)
+    return web.json_response({"freed": freed})
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", web_index)
+    app.router.add_get("/health", web_health)
+    app.router.add_get("/api/stats", api_stats)
+    app.router.add_get("/api/users", api_users)
+    app.router.add_post("/api/clean", api_clean)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logger.info(f"Web dashboard running on port {PORT}")
+
+# ----------------- MAIN ----------------- #
+
+async def main():
+    global BOT_USERNAME
+
+    await asyncio.to_thread(sync_load_settings)
+    await start_web_server()
+
+    await bot.start()
+    me = await bot.get_me()
+    BOT_USERNAME = me.username or ""
+    logger.info(f"Bot started as @{BOT_USERNAME}")
+
+    try:
+        await bot.set_bot_commands([
+            BotCommand("start", "Start the bot"),
+            BotCommand("login", "Connect your Telegram account"),
+            BotCommand("profile", "My profile & credits"),
+            BotCommand("ping", "Check latency"),
+            BotCommand("cancel", "Cancel current operation"),
+        ])
+    except Exception as e:
+        logger.warning(f"set_bot_commands failed: {e}")
+
+    await init_session_pool()
+
+    from hydrogram import idle
+    await idle()
+
+    await bot.stop()
+
+if __name__ == "__main__":
+    bot.run(main())
