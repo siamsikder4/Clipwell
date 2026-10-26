@@ -362,6 +362,7 @@ active_tasks = {}
 user_cache = {}
 pending_target = {}        # admin -> যে user কে ম্যানেজ করছে
 cancel_requests = set()    # ক্যান্সেল করা টাস্ক
+READ_CACHE = {}            # token -> (doc_id, chat_id, msg_id) — Read Message ফিচারের জন্য
 
 # ----------------- BOTTOM KEYBOARD BUILDER ----------------- #
 
@@ -825,6 +826,40 @@ def sync_get_user_session(user_id: int):
             return s
     return None
 
+def parse_tme_link(text: str):
+    """t.me লিংক বা 'chat_id:msg_id' / 'username:msg_id' ফরম্যাট পার্স করে (chat_id, msg_id) রিটার্ন করে"""
+    text = (text or "").strip()
+    p_match = re.search(r"t\.me/c/(\d+)/(\d+)", text)
+    if p_match:
+        return int("-100" + p_match.group(1)), int(p_match.group(2))
+    pub_match = re.search(r"t\.me/([a-zA-Z0-9_]+)/(\d+)", text)
+    if pub_match:
+        return pub_match.group(1), int(pub_match.group(2))
+    if ":" in text:
+        a, b = text.rsplit(":", 1)
+        a = a.strip()
+        if b.strip().isdigit() and a:
+            if a.lstrip("-").isdigit():
+                return int(a), int(b.strip())
+            return a.lstrip("@"), int(b.strip())
+    return None
+
+def get_client_by_doc(doc_id: str):
+    """doc_id দিয়ে userbot pool থেকে client খুঁজে বের করে"""
+    for d, name, cl in loaded_user_clients:
+        if d == doc_id:
+            return cl, name
+    return None, None
+
+def session_pick_markup(action_prefix: str) -> RawMarkup:
+    """সেশন পুল থেকে কোনটা দিয়ে কাজ করবে বেছে নেওয়ার মার্কআপ"""
+    rows = [[{"text": "🔀 Auto (try all sessions)", "callback_data": f"{action_prefix}_auto", "style": "primary"}]]
+    for doc_id, name, _ in loaded_user_clients:
+        rows.append([{"text": name, "callback_data": f"{action_prefix}_{doc_id}", "style": "success"}])
+    rows.append([{"text": "Back", "callback_data": "btn_refresh_panel",
+                  "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "primary"}])
+    return create_custom_inline_markup(rows)
+
 async def init_session_pool():
     global loaded_user_clients, loaded_admins
     loaded_admins = await asyncio.to_thread(sync_get_all_admins)
@@ -1177,6 +1212,14 @@ def get_role_based_markup(user_id: int, session_count: int, total_users: int):
                 "callback_data": "btn_users_0",
                 "icon_custom_emoji_id": UI_EMOJIS["users"],
                 "style": "primary"
+            }
+        ],
+        [
+            {
+                "text": "Read Message (Session)",
+                "callback_data": "btn_read_msg",
+                "icon_custom_emoji_id": UI_EMOJIS["chat"],
+                "style": "success"
             }
         ],
         [
@@ -1592,6 +1635,51 @@ async def callback_handler(_, query: CallbackQuery):
         raw_buttons.append([{"text": "Back", "callback_data": "btn_refresh_panel", "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "danger"}])
         await query.message.edit_text("<b>Updated Admin List:</b>", reply_markup=create_custom_inline_markup(raw_buttons))
 
+    # ---------- 📖 Read Message (via Session) ---------- #
+    elif data == "btn_read_msg":
+        if not has_perm(user_id, "sessions"):
+            return await query.answer("Permission Denied", show_alert=True)
+        if not loaded_user_clients:
+            return await query.answer("No active sessions. Connect one via /login first.", show_alert=True)
+        await query.message.edit_text(
+            f"{ce('folder')} <b>Select a session to read with:</b>\n"
+            f"<i>Auto will try every connected session until one has access.</i>",
+            reply_markup=session_pick_markup("rdsess")
+        )
+        await query.answer()
+
+    elif data.startswith("rdsess_"):
+        if not has_perm(user_id, "sessions"):
+            return await query.answer("Permission Denied", show_alert=True)
+        doc_sel = data[len("rdsess_"):]
+        pending_target[user_id] = doc_sel
+        user_states[user_id] = "WAIT_READ_LINK"
+        await query.message.reply_text(
+            f"┌── {ce('chat')} <b>READ A MESSAGE</b>\n"
+            f"│\n"
+            f"├ Send a post link, e.g. <code>https://t.me/channel/123</code>\n"
+            f"└─ Or <code>chat_id:msg_id</code>, e.g. <code>-1001234567890:55</code>",
+            reply_markup=ForceReply(selective=True)
+        )
+        await query.answer()
+
+    elif data.startswith("fwdread_"):
+        if not has_perm(user_id, "sessions"):
+            return await query.answer("Permission Denied", show_alert=True)
+        token = data[len("fwdread_"):]
+        info = READ_CACHE.pop(token, None)
+        if not info:
+            return await query.answer("Expired, please fetch the message again.", show_alert=True)
+        doc_sel, chat_id, msg_id = info
+        cl, _nm = get_client_by_doc(doc_sel)
+        if not cl:
+            return await query.answer("That session is no longer active.", show_alert=True)
+        try:
+            await cl.forward_messages(user_id, chat_id, msg_id)
+            await query.answer("Forwarded to you!")
+        except Exception as e:
+            await query.answer(f"Failed: {e}"[:190], show_alert=True)
+
     # ---------- 🎨 Button Colors ---------- #
     elif data == "btn_colors":
         await query.message.edit_text(
@@ -1750,6 +1838,76 @@ async def message_input_router(_, message: Message):
             await bot.send_message(t_id, f"{ce('spark')} <b>Admin added <code>{amt}</code> credits.</b> Now: <code>{u['credits']}</code>")
         except Exception:
             pass
+        return
+
+    # Read Message (via Session): লিংক বা chat_id:msg_id নেওয়া
+    if state == "WAIT_READ_LINK" and has_perm(user_id, "sessions"):
+        user_states.pop(user_id, None)
+        doc_sel = pending_target.pop(user_id, None)
+        parsed = parse_tme_link(text_input)
+        if not parsed:
+            return await message.reply_text(
+                f"{ce('cross')} <b>Invalid format.</b>\n<i>Example: <code>https://t.me/channel/123</code> or <code>-1001234567890:55</code></i>",
+                reply_markup=get_bottom_keyboard(user_id)
+            )
+        chat_id, msg_id = parsed
+
+        clients_to_try = []
+        if doc_sel and doc_sel != "auto":
+            cl, nm = get_client_by_doc(doc_sel)
+            if cl:
+                clients_to_try = [(doc_sel, nm, cl)]
+        if not clients_to_try:
+            clients_to_try = loaded_user_clients
+
+        if not clients_to_try:
+            return await message.reply_text(f"{ce('cross')} <b>No active sessions.</b>", reply_markup=get_bottom_keyboard(user_id))
+
+        status = await message.reply_text(f"{ce('spark')} <i>Fetching message...</i>")
+        target_msg, used_name, used_doc = None, None, None
+        for d, nm, cl in clients_to_try:
+            try:
+                msg = await asyncio.wait_for(cl.get_messages(chat_id, msg_id), timeout=12)
+                if msg and not msg.empty:
+                    target_msg, used_name, used_doc = msg, nm, d
+                    break
+            except Exception:
+                continue
+
+        if not target_msg or target_msg.empty:
+            return await status.edit_text(f"{ce('cross')} <b>Message not found, or no connected session has access to that chat.</b>")
+
+        media_type = ("Video" if target_msg.video else "Photo" if target_msg.photo else
+                      "Audio" if target_msg.audio else "Voice" if target_msg.voice else
+                      "Document" if target_msg.document else "Text" if target_msg.text else "Other / Service")
+        sender = target_msg.from_user
+        sender_str = f"{html.escape(sender.first_name or '')} (<code>{sender.id}</code>)" if sender else "Channel / Unknown"
+        body = target_msg.text or target_msg.caption or ""
+        body_preview = (html.escape(body[:600]) + ("…" if len(body) > 600 else "")) if body else "<i>No text content.</i>"
+        date_str = target_msg.date.strftime("%Y-%m-%d %H:%M UTC") if getattr(target_msg, "date", None) else "—"
+
+        text_out = (
+            f"┌── {ce('chat')} <b>MESSAGE PREVIEW</b>\n"
+            f"│\n"
+            f"├ <b>Session Used:</b> <code>{html.escape(str(used_name))}</code>\n"
+            f"├ <b>Chat:</b> <code>{html.escape(str(chat_id))}</code>\n"
+            f"├ <b>Msg ID:</b> <code>{msg_id}</code>\n"
+            f"├ <b>Type:</b> <code>{media_type}</code>\n"
+            f"├ <b>From:</b> {sender_str}\n"
+            f"├ <b>Date:</b> <code>{date_str}</code>\n"
+            f"│\n"
+            f"└─ <b>Content:</b>\n{body_preview}"
+        )
+
+        markup_rows = []
+        if media_type != "Text" or body:
+            token = f"{user_id}_{int(time.time() * 1000) % 1000000}"
+            READ_CACHE[token] = (used_doc, chat_id, msg_id)
+            markup_rows.append([{"text": "Forward To Me", "callback_data": f"fwdread_{token}",
+                                  "icon_custom_emoji_id": UI_EMOJIS["check"], "style": "success"}])
+        markup_rows.append([{"text": "Back", "callback_data": "btn_refresh_panel",
+                              "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "primary"}])
+        await status.edit_text(text_out, reply_markup=create_custom_inline_markup(markup_rows))
         return
 
     # Multi-step Interactive Login Flow
