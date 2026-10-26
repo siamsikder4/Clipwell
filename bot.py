@@ -84,8 +84,7 @@ UI_EMOJIS = {
     "bar_empty": "6338899694810307622",
     "reaction": "6314425974725288033",
 
-    # 🆕 নতুন ইমোজি — নিচের ID গুলো ফাঁকা, আপনার Custom Emoji ID বসান
-    # (ফাঁকা থাকলে অটো সাধারণ ইমোজি দেখাবে, কোনো এরর হবে না)
+    # 🆕 নতুন ইমোজি — ফাঁকা থাকলে অটো সাধারণ ইমোজি দেখাবে, কোনো এরর হবে না
     "hourglass": "5371058888017715839",   # ⏳ Dispatching payload
     "chart": "5451882707875276247",       # 📊 Progress / Disk Usage
     "box": "5193085063998224234",         # 📦 Used Space
@@ -129,9 +128,8 @@ def ce(name: str) -> str:
 
 # =====================================================================
 # ⌨️ BOTTOM (REPLY) KEYBOARD BUTTONS CONFIG
-# 👉 "emoji_id" = বাটনের Custom Emoji ID (ফাঁকা রাখলে আইকন ছাড়া দেখাবে)
 # 👉 "style" হবে: "primary" (নীল) | "success" (সবুজ) | "danger" (লাল) | "" (ডিফল্ট)
-# 👉 এখানের style হলো ডিফল্ট; Admin Panel > Button Colors থেকে বদলালে সেটাই প্রাধান্য পাবে
+# 👉 Admin Panel > Button Colors থেকে বদলালে সেটাই প্রাধান্য পাবে
 # =====================================================================
 KB_BUTTONS = {
     "admin":     {"text": "Admin Panel",     "emoji_id": "6314576556278685829", "style": "primary", "legacy": FALLBACK_SYMBOLS["panel"]},
@@ -284,6 +282,10 @@ FIREBASE_KEY_RAW = os.environ.get("FIREBASE_KEY", "").strip()
 OWNER_ID = 8271633124
 PORT = int(os.environ.get("PORT", "8080"))
 AUTO_DELETE_TIME = int(os.environ.get("AUTO_DELETE_TIME", "120"))  # Seconds
+
+# 🌐 Web Dashboard সিকিউরিটি: DASH_TOKEN না দিলে ড্যাশবোর্ডের ডাটা/API বন্ধ থাকবে
+DASH_TOKEN = os.environ.get("DASH_TOKEN", "").strip()
+DASH_URL = os.environ.get("DASH_URL", "").strip().rstrip("/")
 
 DAILY_CREDITS = int(os.environ.get("DAILY_CREDITS", "30"))
 BOT_START = time.time()
@@ -607,7 +609,8 @@ def sync_get_user(user_id: int) -> dict:
                     found = True
                     data = d.to_dict()
                     for k in ("credits", "last_reset", "banned", "joined", "downloads",
-                              "referred_by", "referrals", "fresh"):
+                              "referred_by", "referrals", "fresh",
+                              "name", "username", "last_active"):
                         if k in data:
                             u[k] = data[k]
             except Exception:
@@ -632,18 +635,38 @@ def sync_charge(user_id: int):
         u["credits"] = max(0, u["credits"] - 1)
     sync_save_user(user_id)
 
-def sync_register_user(user_id: int):
+def sync_register_user(user_id: int, name: str = "", username: str = ""):
+    """ইউজার রেজিস্টার + নাম/ইউজারনেম/last_active সেভ (সার্চের জন্য)"""
     mem_bot_users.add(user_id)
-    sync_get_user(user_id)
-    if not db:
-        return
-    try:
-        db.collection("registered_users").document(str(user_id)).set({
-            "user_id": user_id,
-            "last_active": time.time()
-        }, merge=True)
-    except Exception:
-        pass
+    u = sync_get_user(user_id)
+    if name:
+        u["name"] = name
+    u["username"] = (username or "").lower()
+    u["last_active"] = time.time()
+    sync_save_user(user_id)
+
+def sync_search_users(q: str, limit: int = 50) -> list:
+    """ID / নাম / @username দিয়ে সার্চ। খালি q = সবাই (সর্বশেষ একটিভ আগে)"""
+    q = (q or "").strip().lower().lstrip("@")
+    rows = {}
+    if db:
+        try:
+            for d in db.collection("registered_users").stream():
+                if d.id.isdigit():
+                    x = d.to_dict()
+                    x["user_id"] = int(d.id)
+                    rows[int(d.id)] = x
+        except Exception as e:
+            logger.error(f"Search users error: {e}")
+    for uid, x in user_cache.items():
+        rows[uid] = {**rows.get(uid, {}), **x, "user_id": uid}
+    out = []
+    for uid, x in rows.items():
+        hay = f"{uid} {x.get('name', '')} {x.get('username', '')}".lower()
+        if not q or q in hay:
+            out.append(x)
+    out.sort(key=lambda x: x.get("last_active", x.get("joined", 0)), reverse=True)
+    return out[:limit]
 
 # ----------------- REFERRAL SYSTEM ----------------- #
 
@@ -1007,9 +1030,12 @@ async def profile_handler(_, message: Message):
 
 def user_card_text(uid: int, u: dict) -> str:
     status = f"{ce('offline')} Banned" if u["banned"] else f"{ce('online')} Active"
+    uname = f"@{html.escape(u['username'])}" if u.get("username") else "—"
     return (
         f"┌── {ce('user')} <b>USER MANAGER</b>\n"
         f"│\n"
+        f"├ <b>Name:</b> {html.escape(u.get('name') or '—')}\n"
+        f"├ <b>Username:</b> {uname}\n"
         f"├ <b>ID:</b> <code>{uid}</code>\n"
         f"├ <b>Status:</b> {status}\n"
         f"├ {ce('spark')} <b>Credits:</b> <code>{u['credits']}</code>\n"
@@ -1028,9 +1054,33 @@ def user_card_markup(uid: int, u: dict) -> RawMarkup:
         [ban_btn],
         [{"text": "Give / Remove Credits", "callback_data": f"uc_add_{uid}",
           "icon_custom_emoji_id": UI_EMOJIS["spark"], "style": "primary"}],
+        [{"text": "All Users", "callback_data": "btn_users_0",
+          "icon_custom_emoji_id": UI_EMOJIS["users"], "style": "primary"}],
         [{"text": "Back", "callback_data": "btn_refresh_panel",
           "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "primary"}]
     ])
+
+USERS_PER_PAGE = 8
+
+def user_label(x: dict) -> str:
+    dot = "🔴" if x.get("banned") else "🟢"
+    nm = (x.get("name") or str(x.get("user_id")))[:16]
+    un = f" @{x['username']}" if x.get("username") else ""
+    return f"{dot} {nm}{un}"
+
+def users_list_markup(rows: list, page: int = None, has_next: bool = False) -> RawMarkup:
+    kb = [[{"text": user_label(x), "callback_data": f"uv_{x['user_id']}", "style": "primary"}] for x in rows]
+    if page is not None:
+        nav = []
+        if page > 0:
+            nav.append({"text": "Prev", "callback_data": f"btn_users_{page - 1}"})
+        if has_next:
+            nav.append({"text": "Next", "callback_data": f"btn_users_{page + 1}"})
+        if nav:
+            kb.append(nav)
+    kb.append([{"text": "Back", "callback_data": "btn_refresh_panel",
+                "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "primary"}])
+    return create_custom_inline_markup(kb)
 
 @bot.on_message(filters.command(["ban", "unban"]) & filters.private & filters.incoming)
 async def ban_cmd(_, message: Message):
@@ -1123,6 +1173,14 @@ def get_role_based_markup(user_id: int, session_count: int, total_users: int):
         ],
         [
             {
+                "text": "All Users",
+                "callback_data": "btn_users_0",
+                "icon_custom_emoji_id": UI_EMOJIS["users"],
+                "style": "primary"
+            }
+        ],
+        [
+            {
                 "text": f"Referral Reward ({SETTINGS['ref_reward']})",
                 "callback_data": "btn_ref_reward",
                 "style": "primary"
@@ -1142,6 +1200,16 @@ def get_role_based_markup(user_id: int, session_count: int, total_users: int):
                 "callback_data": "btn_manage_admins",
                 "icon_custom_emoji_id": UI_EMOJIS["users"],
                 "style": "primary"
+            }
+        ])
+
+    # 🌐 Web Dashboard (শুধু অ্যাডমিন প্যানেলে দেখা যায়; টোকেন লিংকে থাকে)
+    if DASH_URL and DASH_TOKEN and has_perm(user_id, "users"):
+        raw_buttons.append([
+            {
+                "text": "Open Web Dashboard",
+                "url": f"{DASH_URL}/?key={quote(DASH_TOKEN)}",
+                "style": "success"
             }
         ])
 
@@ -1325,9 +1393,35 @@ async def callback_handler(_, query: CallbackQuery):
             return await query.answer("Permission Denied", show_alert=True)
         user_states[user_id] = "WAIT_USER_LOOKUP"
         await query.message.reply_text(
-            f"{ce('user')} <b>Send the Telegram User ID:</b>",
+            f"{ce('user')} <b>Send User ID, name or @username:</b>",
             reply_markup=ForceReply(selective=True)
         )
+        await query.answer()
+
+    # ---------- 👥 Users List / View ---------- #
+    elif data.startswith("btn_users_"):
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        page = int(data.rsplit("_", 1)[1])
+        allu = await asyncio.to_thread(sync_search_users, "", 2000)
+        chunk = allu[page * USERS_PER_PAGE:(page + 1) * USERS_PER_PAGE]
+        has_next = len(allu) > (page + 1) * USERS_PER_PAGE
+        await query.message.edit_text(
+            f"┌── {ce('users')} <b>ALL USERS</b>\n"
+            f"│\n"
+            f"├ <b>Total:</b> <code>{len(allu)}</code>\n"
+            f"└─ <b>Page:</b> <code>{page + 1}</code>\n\n"
+            f"<i>Tap a user to manage. Use Manage User to search by name/@username.</i>",
+            reply_markup=users_list_markup(chunk, page, has_next)
+        )
+        await query.answer()
+
+    elif data.startswith("uv_"):
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        target = int(data.rsplit("_", 1)[1])
+        u = await asyncio.to_thread(sync_get_user, target)
+        await query.message.edit_text(user_card_text(target, u), reply_markup=user_card_markup(target, u))
         await query.answer()
 
     elif data.startswith("ub_ban_") or data.startswith("ub_unban_"):
@@ -1549,7 +1643,8 @@ async def callback_handler(_, query: CallbackQuery):
 @bot.on_message(filters.private & filters.incoming & ~filters.command(["start", "help", "admin", "panel", "ping", "storage", "clean", "login", "cancel", "profile", "ban", "unban", "addcredit"]))
 async def message_input_router(_, message: Message):
     user_id = message.from_user.id
-    await asyncio.to_thread(sync_register_user, user_id)
+    await asyncio.to_thread(sync_register_user, user_id,
+                            message.from_user.first_name, message.from_user.username)
 
     state = user_states.get(user_id)
     text_input = (message.text or message.caption or "").strip()
@@ -1622,14 +1717,20 @@ async def message_input_router(_, message: Message):
         await asyncio.to_thread(sync_add_admin, t_id)
         return await message.reply_text(f"{ce('check')} <b>Admin <code>{t_id}</code> successfully added!</b>", reply_markup=get_bottom_keyboard(user_id))
 
-    # User Manager: ID নেওয়া
+    # User Manager: ID / নাম / @username দিয়ে সার্চ
     if state == "WAIT_USER_LOOKUP" and has_perm(user_id, "users"):
         user_states.pop(user_id, None)
-        if not text_input.isdigit():
-            return await message.reply_text(f"{ce('cross')} <b>User ID must contain only digits.</b>", reply_markup=get_bottom_keyboard(user_id))
-        t_id = int(text_input)
-        u = await asyncio.to_thread(sync_get_user, t_id)
-        return await message.reply_text(user_card_text(t_id, u), reply_markup=user_card_markup(t_id, u))
+        if text_input.isdigit():
+            t_id = int(text_input)
+            u = await asyncio.to_thread(sync_get_user, t_id)
+            return await message.reply_text(user_card_text(t_id, u), reply_markup=user_card_markup(t_id, u))
+        res = await asyncio.to_thread(sync_search_users, text_input, 10)
+        if not res:
+            return await message.reply_text(f"{ce('cross')} <b>No user found.</b>", reply_markup=get_bottom_keyboard(user_id))
+        return await message.reply_text(
+            f"{ce('users')} <b>Found {len(res)} user(s):</b>",
+            reply_markup=users_list_markup(res)
+        )
 
     # User Manager: ক্রেডিট পরিমাণ নেওয়া
     if state == "WAIT_CREDIT_AMOUNT" and has_perm(user_id, "users"):
@@ -2074,7 +2175,8 @@ async def download_album_item(client, media_msg, idx, user_id, tracker: AlbumPro
 @bot.on_message(filters.command("start") & filters.private & filters.incoming)
 async def start_handler(_, message: Message):
     user_id = message.from_user.id
-    await asyncio.to_thread(sync_register_user, user_id)
+    await asyncio.to_thread(sync_register_user, user_id,
+                            message.from_user.first_name, message.from_user.username)
     await process_referral(message, user_id)
     await message.reply_text(
         f"┌── {ce('wave')} <b>WELCOME, {html.escape(message.from_user.first_name.upper())}!</b>\n"
@@ -2192,249 +2294,27 @@ HTML_DASHBOARD = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Clipwell Bot Server Status</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-        body { background: #0f172a; color: #f8fafc; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }
-        .card { background: #1e293b; border: 1px solid #334155; border-radius: 16px; padding: 24px; width: 100%; max-width: 480px; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5); }
-        .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
-        .title { font-size: 20px; font-weight: 700; color: #38bdf8; display: flex; align-items: center; gap: 8px; }
-        .status-badge { background: #064e3b; color: #34d399; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 9999px; display: inline-flex; align-items: center; gap: 6px; }
-        .status-dot { width: 8px; height: 8px; background: #10b981; border-radius: 50%; animation: pulse 2s infinite; }
-        .section-title { font-size: 13px; font-weight: 700; color: #94a3b8; text-transform: uppercase; margin-bottom: 12px; letter-spacing: 0.5px; }
-
-        .storage-box { background: #0f172a; border-radius: 12px; padding: 16px; margin-bottom: 20px; border: 1px solid #1e293b; }
-        .storage-title { font-size: 13px; color: #94a3b8; margin-bottom: 8px; display: flex; justify-content: space-between; }
-        .storage-val { font-size: 24px; font-weight: 800; color: #f8fafc; margin-bottom: 10px; }
-        .progress-bar-bg { width: 100%; height: 10px; background: #334155; border-radius: 6px; overflow: hidden; }
-        .progress-bar-fill { height: 100%; border-radius: 6px; transition: width 0.4s ease; }
-
-        .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px; }
-        .stat-item { background: #1e293b; border: 1px solid #334155; padding: 10px; border-radius: 8px; }
-        .stat-label { font-size: 11px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
-        .stat-num { font-size: 14px; font-weight: 600; color: #f1f5f9; margin-top: 2px; }
-
-        .live-box { background: #0f172a; border-radius: 12px; padding: 16px; margin-bottom: 16px; border: 1px solid #1e293b; min-height: 110px; }
-        .empty-tasks { color: #64748b; font-size: 13px; text-align: center; padding: 24px 0; }
-        .task-card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 12px; margin-bottom: 10px; }
-        .task-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-        .task-name { font-size: 13px; font-weight: 600; color: #f8fafc; }
-        .task-tag { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 6px; text-transform: uppercase; }
-        .tag-download { background: #0284c7; color: #e0f2fe; }
-        .tag-upload { background: #7c3aed; color: #ede9fe; }
-        .tag-album { background: #d97706; color: #fef3c7; }
-        .task-meta { display: flex; justify-content: space-between; font-size: 12px; color: #94a3b8; margin-top: 6px; }
-
-        .btn-clean { display: block; width: 100%; padding: 12px; background: #ef4444; color: white; border: none; border-radius: 10px; font-weight: 600; cursor: pointer; text-align: center; text-decoration: none; transition: 0.2s; }
-        .btn-clean:hover { background: #dc2626; }
-        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <div class="header">
-            <div class="title">⚡ Clipwell Bot</div>
-            <div class="status-badge"><div class="status-dot"></div> ONLINE</div>
-        </div>
-
-        <div class="storage-box">
-            <div class="storage-title">
-                <span>DISK STORAGE</span>
-                <span id="pct-text">--%</span>
-            </div>
-            <div class="storage-val" id="pct-big">0% Full</div>
-            <div class="progress-bar-bg">
-                <div id="prog-fill" class="progress-bar-fill" style="width: 0%; background: #10b981;"></div>
-            </div>
-
-            <div class="stat-grid">
-                <div class="stat-item">
-                    <div class="stat-label">Used Space</div>
-                    <div class="stat-num" id="stat-used">--</div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-label">Free Space</div>
-                    <div class="stat-num" id="stat-free">--</div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-label">Total Disk</div>
-                    <div class="stat-num" id="stat-total">--</div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-label">Temp Cache</div>
-                    <div class="stat-num" id="stat-temp">--</div>
-                </div>
-            </div>
-        </div>
-
-        <div class="section-title">⚡ Live Download & Upload Tasks</div>
-        <div class="live-box" id="tasks-container">
-            <div class="empty-tasks">No active transfers running.</div>
-        </div>
-
-        <button class="btn-clean" onclick="cleanStorage()">🧹 Clean Download Cache</button>
-    </div>
-
-    <script>
-        function humanBytes(bytes) {
-            if (!bytes || bytes === 0) return '0 B';
-            const k = 1024;
-            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-            const i = Math.floor(Math.log(bytes) / Math.log(k));
-            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-        }
-
-        async function fetchStats() {
-            try {
-                const res = await fetch('/api/stats');
-                const d = await res.json();
-                document.getElementById('pct-text').innerText = d.percent.toFixed(1) + '%';
-                document.getElementById('pct-big').innerText = d.percent.toFixed(1) + '% Full';
-
-                const fill = document.getElementById('prog-fill');
-                fill.style.width = Math.min(100, d.percent) + '%';
-                if(d.percent > 85) fill.style.background = '#ef4444';
-                else if(d.percent > 65) fill.style.background = '#f59e0b';
-                else fill.style.background = '#10b981';
-
-                document.getElementById('stat-used').innerText = humanBytes(d.used);
-                document.getElementById('stat-free').innerText = humanBytes(d.free);
-                document.getElementById('stat-total').innerText = humanBytes(d.total);
-                document.getElementById('stat-temp').innerText = humanBytes(d.dl_size) + ' (' + d.dl_files + ' files)';
-
-                const box = document.getElementById('tasks-container');
-                if (!d.tasks || d.tasks.length === 0) {
-                    box.innerHTML = '<div class="empty-tasks">No active transfers running.</div>';
-                } else {
-                    box.innerHTML = d.tasks.map(function (t) {
-                        var tag = 'tag-' + (t.type || 'download');
-                        return '<div class="task-card">' +
-                            '<div class="task-header">' +
-                            '<span class="task-name">' + esc(t.name) + '</span>' +
-                            '<span class="task-tag ' + tag + '">' + esc(t.type) + '</span>' +
-                            '</div>' +
-                            '<div class="progress-bar-bg"><div class="progress-bar-fill" style="width:' +
-                            Math.min(100, t.percent || 0) + '%; background:#38bdf8;"></div></div>' +
-                            '<div class="task-meta"><span>' + (t.percent || 0) + '%</span>' +
-                            '<span>' + humanBytes(t.current) + ' / ' + humanBytes(t.total) + '</span>' +
-                            '<span>' + esc(t.speed) + '</span></div>' +
-                            '</div>';
-                    }).join('');
-                }
-            } catch (e) {}
-        }
-
-        function esc(s) {
-            var d = document.createElement('div');
-            d.textContent = (s === undefined || s === null) ? '' : String(s);
-            return d.innerHTML;
-        }
-
-        async function cleanStorage() {
-            if (!confirm('Delete all temporary download files?')) return;
-            try {
-                const res = await fetch('/api/clean', { method: 'POST' });
-                const d = await res.json();
-                alert('Cleaned ' + humanBytes(d.freed));
-                fetchStats();
-            } catch (e) {
-                alert('Failed to clean cache');
-            }
-        }
-
-        fetchStats();
-        setInterval(fetchStats, 3000);
-    </script>
-</body>
-</html>
-"""
-
-# ----------------- WEB SERVER HANDLERS ----------------- #
-
-def clean_download_dir() -> int:
-    freed = 0
-    if os.path.exists(DOWNLOAD_DIR):
-        for filename in os.listdir(DOWNLOAD_DIR):
-            fp = os.path.join(DOWNLOAD_DIR, filename)
-            try:
-                if os.path.isfile(fp) or os.path.islink(fp):
-                    freed += os.path.getsize(fp)
-                    os.unlink(fp)
-                elif os.path.isdir(fp):
-                    shutil.rmtree(fp)
-            except Exception as e:
-                logger.error(f"Failed to delete {fp}: {e}")
-    return freed
-
-async def web_index(request):
-    return web.Response(text=HTML_DASHBOARD, content_type="text/html")
-
-async def web_health(request):
-    return web.Response(text="OK")
-
-async def api_stats(request):
-    st = await asyncio.to_thread(get_storage_stats)
-    tasks = []
-    for _, t in list(active_tasks.items()):
-        tasks.append({
-            "name": t.get("name", ""),
-            "type": t.get("type", "download"),
-            "current": t.get("current", 0),
-            "total": t.get("total", 0),
-            "percent": t.get("percent", 0),
-            "speed": t.get("speed", "--"),
-        })
-    st["tasks"] = tasks
-    return web.json_response(st)
-
-async def api_clean(request):
-    freed = await asyncio.to_thread(clean_download_dir)
-    return web.json_response({"freed": freed})
-
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", web_index)
-    app.router.add_get("/health", web_health)
-    app.router.add_get("/api/stats", api_stats)
-    app.router.add_post("/api/clean", api_clean)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    logger.info(f"Web dashboard running on port {PORT}")
-
-# ----------------- MAIN ----------------- #
-
-async def main():
-    global BOT_USERNAME
-
-    await asyncio.to_thread(sync_load_settings)
-    await start_web_server()
-
-    await bot.start()
-    me = await bot.get_me()
-    BOT_USERNAME = me.username or ""
-    logger.info(f"Bot started as @{BOT_USERNAME}")
-
-    try:
-        await bot.set_bot_commands([
-            BotCommand("start", "Start the bot"),
-            BotCommand("login", "Connect your Telegram account"),
-            BotCommand("profile", "My profile & credits"),
-            BotCommand("ping", "Check latency"),
-            BotCommand("cancel", "Cancel current operation"),
-        ])
-    except Exception as e:
-        logger.warning(f"set_bot_commands failed: {e}")
-
-    await init_session_pool()
-
-    from hydrogram import idle
-    await idle()
-
-    await bot.stop()
-
-if __name__ == "__main__":
-    bot.run(main())
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Clipwell Control</title>
+<style>
+:root{--bg:#0b1020;--card:#131a2e;--line:#232c47;--tx:#e8ecf8;--mut:#8b96b8;--acc:#6c8cff;--ok:#34d399;--bad:#f87171;--warn:#fbbf24}
+*{margin:0;padding:0;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+body{background:radial-gradient(900px 500px at 10% -10%,#1c2750 0,transparent 60%),var(--bg);color:var(--tx);min-height:100vh;padding:16px}
+.wrap{max-width:760px;margin:0 auto}
+.top{display:flex;justify-content:space-between;align-items:center;margin:6px 0 16px}
+.brand{font-size:20px;font-weight:800;letter-spacing:.3px}
+.badge{font-size:11px;font-weight:700;padding:4px 10px;border-radius:99px;background:#0d3b2e;color:var(--ok)}
+.tabs{display:flex;gap:6px;background:var(--card);border:1px solid var(--line);padding:4px;border-radius:12px;margin-bottom:14px}
+.tab{flex:1;text-align:center;padding:9px;border-radius:9px;font-size:13px;font-weight:700;color:var(--mut);cursor:pointer}
+.tab.on{background:var(--acc);color:#fff}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;margin-bottom:14px}
+.lbl{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.6px}
+.big{font-size:26px;font-weight:800;margin:4px 0 10px}
+.bar{height:10px;background:var(--line);border-radius:6px;overflow:hidden}
+.fill{height:100%;width:0;background:var(--ok);transition:width .4s}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
+.cell{background:#0e1427;border:1px solid var(--line);border-radius:10px;padding:10px}
+.cell b{display:block;font-size:14px;margin-top:2px}
+.task{background:#0e1427;border:1px solid var(--line);border-radius:10px;padding:10px;margin-top:10px}
+.task .r{display:flex;justi
