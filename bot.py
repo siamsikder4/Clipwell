@@ -41,6 +41,7 @@ except ImportError:
 
 # =====================================================================
 # 🎨 CENTRALIZED UI CUSTOM EMOJIS CONFIGURATION
+# 👉 এখান থেকে বা Admin Panel > Emoji Manager থেকে বদলানো যাবে
 # =====================================================================
 UI_EMOJIS = {
     # 📌 General & System Status
@@ -101,6 +102,16 @@ UI_EMOJIS = {
     # 🎁 Referral & 🎨 Colors — চাইলে নিজের Custom Emoji ID বসান (ফাঁকা = সাধারণ ইমোজি)
     "gift": "",
     "palette": "",
+
+    # 🆕 Maintenance / Promo / Leaderboard / Help (ফাঁকা = সাধারণ ইমোজি)
+    "tool": "",       # 🛠️ Maintenance
+    "trophy": "",     # 🏆 Leaderboard
+    "ticket": "",     # 🎟️ Promo / Redeem
+    "book": "",       # 📖 Help Guide
+    "next": "",       # ▶️ Next page
+    "prev": "",       # ◀️ Previous page
+    "emoji": "",      # 😀 Emoji Manager
+    "bell": "",       # 🔔 Download Alerts
 }
 
 FALLBACK_SYMBOLS = {
@@ -115,8 +126,13 @@ FALLBACK_SYMBOLS = {
     "hourglass": "⏳", "chart": "📊", "box": "📦", "cabinet": "🗂️", "antenna": "📡",
     "chat": "💬", "mic": "🎙️", "bulb": "💡", "info": "ℹ️", "wave": "👋",
     "note": "📝", "gear": "⚙️",
-    "gift": "🎁", "palette": "🎨"
+    "gift": "🎁", "palette": "🎨",
+    "tool": "🛠️", "trophy": "🏆", "ticket": "🎟️", "book": "📖",
+    "next": "▶️", "prev": "◀️", "emoji": "😀", "reaction": "🫡", "bell": "🔔",
 }
+
+# রিসেটের জন্য ডিফল্ট কপি (Emoji Manager > Use Default)
+DEFAULT_UI_EMOJIS = dict(UI_EMOJIS)
 
 def ce(name: str) -> str:
     """Renders Telegram Custom Animated Emoji in HTML ParseMode."""
@@ -126,10 +142,16 @@ def ce(name: str) -> str:
         return f'<emoji id="{emoji_id}">{fallback}</emoji>'
     return fallback
 
+def show_emoji(emoji_id: str, fallback: str) -> str:
+    """যেকোনো ID + fallback থেকে প্রিভিউ"""
+    if emoji_id:
+        return f'<emoji id="{emoji_id}">{fallback}</emoji>'
+    return fallback
+
 # =====================================================================
 # ⌨️ BOTTOM (REPLY) KEYBOARD BUTTONS CONFIG
 # 👉 "style" হবে: "primary" (নীল) | "success" (সবুজ) | "danger" (লাল) | "" (ডিফল্ট)
-# 👉 Admin Panel > Button Colors থেকে বদলালে সেটাই প্রাধান্য পাবে
+# 👉 Admin Panel > Button Colors / Emoji Manager থেকে বদলালে সেটাই প্রাধান্য পাবে
 # =====================================================================
 KB_BUTTONS = {
     "admin":     {"text": "Admin Panel",     "emoji_id": "6314576556278685829", "style": "primary", "legacy": FALLBACK_SYMBOLS["panel"]},
@@ -140,7 +162,11 @@ KB_BUTTONS = {
     "latency":   {"text": "Latency",         "emoji_id": "6052973985224728368", "style": "primary", "legacy": FALLBACK_SYMBOLS["rocket"]},
     "howto":     {"text": "How To Use",      "emoji_id": "6314162714704878982", "style": "primary", "legacy": "ℹ️"},
     "profile":   {"text": "Profile",         "emoji_id": UI_EMOJIS["user"],     "style": "primary", "legacy": FALLBACK_SYMBOLS["user"]},
+    "redeem":    {"text": "Redeem Code",     "emoji_id": "",                    "style": "success", "legacy": FALLBACK_SYMBOLS["ticket"]},
 }
+
+# রিসেটের জন্য ডিফল্ট কিবোর্ড ইমোজি
+DEFAULT_KB_EMOJIS = {k: v.get("emoji_id", "") for k, v in KB_BUTTONS.items()}
 
 # ---------------------------------------------------------------------
 # 📐 বাটনের পজিশন (লেআউট) — প্রতিটা [ ] = একটা সারি (row)
@@ -149,11 +175,13 @@ KB_LAYOUT_ADMIN = [
     ["admin", "broadcast"],
     ["storage", "clean"],
     ["connect", "latency"],
-    ["profile"],
+    ["profile", "redeem"],
+    ["howto"],
 ]
 KB_LAYOUT_USER = [
     ["connect", "latency"],
     ["profile", "howto"],
+    ["redeem"],
 ]
 
 # True হলে Admin/Owner একাধিক একাউন্ট কানেক্ট করতে পারবে (সাধারণ ইউজার শুধু ১টা)
@@ -316,12 +344,38 @@ if FIREBASE_KEY_RAW:
 
 # =====================================================================
 # ⚙️ DYNAMIC SETTINGS (Admin Panel থেকে বদলানো যায়, Firebase এ সেভ হয়)
-#   ref_reward → প্রতিটা সফল রেফারে রেফারার কত ক্রেডিট পাবে (0 = বন্ধ)
-#   btn_styles → নিচের কিবোর্ডের বাটনের কালার ওভাররাইড
+#   ref_reward  → প্রতিটা সফল রেফারে রেফারার কত ক্রেডিট পাবে (0 = বন্ধ)
+#   btn_styles  → নিচের কিবোর্ডের বাটনের কালার ওভাররাইড
+#   maintenance → True হলে সাধারণ ইউজার বট ব্যবহার করতে পারবে না
+#   maint_msg   → মেইনটেনেন্স মেসেজ (ফাঁকা = ডিফল্ট)
+#   emojis      → UI/Inline ইমোজি ওভাররাইড  {name: id}
+#   kb_emojis   → নিচের কিবোর্ড বাটনের ইমোজি ওভাররাইড {key: id}
 # =====================================================================
-SETTINGS = {"ref_reward": 10, "btn_styles": {}}
+SETTINGS = {
+    "ref_reward": 10,
+    "btn_styles": {},
+    "maintenance": False,
+    "maint_msg": "",
+    "emojis": {},
+    "kb_emojis": {},
+    "notify": {
+        "on": True,
+        "title": "New Download",
+        "show": {"user": True, "username": True, "id": True, "type": True,
+                 "size": True, "credits": True, "link": True, "time": True},
+    },
+}
+NOTIFY_FIELDS = [
+    ("user", "Name"), ("username", "Username"), ("id", "User ID"), ("type", "Media Type"),
+    ("size", "File Size"), ("credits", "Credits Left"), ("link", "Post Link"), ("time", "Time"),
+]
 STYLE_CYCLE = ["primary", "success", "danger", ""]
 STYLE_DOT = {"primary": "🔵", "success": "🟢", "danger": "🔴", "": "⚪"}
+
+def apply_emoji_overrides():
+    """সেভ করা ইমোজি ওভাররাইড UI_EMOJIS এ বসায় (বটের সব জায়গায় সাথে সাথে কাজ করে)"""
+    for k, v in DEFAULT_UI_EMOJIS.items():
+        UI_EMOJIS[k] = SETTINGS["emojis"].get(k, v)
 
 def sync_load_settings():
     if not db:
@@ -332,6 +386,16 @@ def sync_load_settings():
             data = d.to_dict()
             SETTINGS["ref_reward"] = int(data.get("ref_reward", 10))
             SETTINGS["btn_styles"] = dict(data.get("btn_styles", {}))
+            SETTINGS["maintenance"] = bool(data.get("maintenance", False))
+            SETTINGS["maint_msg"] = str(data.get("maint_msg", ""))
+            SETTINGS["emojis"] = dict(data.get("emojis", {}))
+            SETTINGS["kb_emojis"] = dict(data.get("kb_emojis", {}))
+            n = data.get("notify")
+            if isinstance(n, dict):
+                SETTINGS["notify"]["on"] = bool(n.get("on", True))
+                SETTINGS["notify"]["title"] = str(n.get("title", "New Download")) or "New Download"
+                SETTINGS["notify"]["show"].update(dict(n.get("show", {})))
+            apply_emoji_overrides()
     except Exception as e:
         logger.error(f"Load settings error: {e}")
 
@@ -360,17 +424,19 @@ mem_bot_users = set()
 
 active_tasks = {}
 user_cache = {}
-pending_target = {}        # admin -> যে user কে ম্যানেজ করছে
+pending_target = {}        # admin -> যে user/emoji কে ম্যানেজ করছে
 cancel_requests = set()    # ক্যান্সেল করা টাস্ক
 READ_CACHE = {}            # token -> (doc_id, chat_id, msg_id) — Read Message ফিচারের জন্য
+PROMOS = {}                # code -> {"credits": int, "max_uses": int, "used_by": [ids]}
 
 # ----------------- BOTTOM KEYBOARD BUILDER ----------------- #
 
 def _kb_btn(key: str) -> dict:
     b = KB_BUTTONS[key]
     out = {"text": b["text"]}
-    if b.get("emoji_id"):
-        out["icon_custom_emoji_id"] = str(b["emoji_id"])
+    eid = SETTINGS["kb_emojis"].get(key, b.get("emoji_id", ""))
+    if eid:
+        out["icon_custom_emoji_id"] = str(eid)
     style = SETTINGS["btn_styles"].get(key, b.get("style", ""))
     if style:
         out["style"] = style
@@ -400,6 +466,118 @@ def colors_markup() -> RawMarkup:
     rows.append([{"text": "Back", "callback_data": "btn_refresh_panel",
                   "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "primary"}])
     return create_custom_inline_markup(rows)
+
+# ----------------- 🎨 EMOJI MANAGER HELPERS ----------------- #
+
+EM_PER_PAGE = 10
+
+def emoji_current(scope: str, name: str) -> str:
+    if scope == "k":
+        return SETTINGS["kb_emojis"].get(name, KB_BUTTONS[name].get("emoji_id", ""))
+    return UI_EMOJIS.get(name, "")
+
+def emoji_fallback(scope: str, name: str) -> str:
+    if scope == "k":
+        return KB_BUTTONS[name]["legacy"]
+    return FALLBACK_SYMBOLS.get(name, "✨")
+
+def emoji_valid(scope: str, name: str) -> bool:
+    return (scope == "k" and name in KB_BUTTONS) or (scope == "u" and name in UI_EMOJIS)
+
+def emoji_set(scope: str, name: str, value):
+    """value: str (ID, '' = ফাঁকা) অথবা None (= ডিফল্টে ফেরত)"""
+    if scope == "k":
+        if value is None:
+            SETTINGS["kb_emojis"].pop(name, None)
+        else:
+            SETTINGS["kb_emojis"][name] = value
+    else:
+        if value is None:
+            SETTINGS["emojis"].pop(name, None)
+        else:
+            SETTINGS["emojis"][name] = value
+        apply_emoji_overrides()
+    sync_save_settings()
+
+def emoji_menu_text() -> str:
+    return (
+        f"┌── {ce('emoji')} <b>EMOJI MANAGER</b>\n"
+        f"│\n"
+        f"├ Change the emoji of <b>any button</b> or bot message icon.\n"
+        f"├ <b>1.</b> Pick a category\n"
+        f"├ <b>2.</b> Tap the item you want to change\n"
+        f"├ <b>3.</b> Send a <b>custom emoji</b> (or its numeric ID)\n"
+        f"│\n"
+        f"└─ {ce('bulb')} <i>🟢 = custom emoji set · ⚪ = plain emoji / blank</i>"
+    )
+
+def emoji_main_markup() -> RawMarkup:
+    return create_custom_inline_markup([
+        [{"text": "Bottom Keyboard Buttons", "callback_data": "emcat_k_0",
+          "icon_custom_emoji_id": UI_EMOJIS["panel"], "style": "primary"}],
+        [{"text": "Inline Buttons & Message Icons", "callback_data": "emcat_u_0",
+          "icon_custom_emoji_id": UI_EMOJIS["list"], "style": "primary"}],
+        [{"text": "Reset All Emojis", "callback_data": "emresetall",
+          "icon_custom_emoji_id": UI_EMOJIS["refresh"], "style": "danger"}],
+        [{"text": "Back", "callback_data": "btn_refresh_panel",
+          "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "primary"}],
+    ])
+
+def emoji_list_markup(scope: str, page: int) -> RawMarkup:
+    names = list(KB_BUTTONS.keys()) if scope == "k" else list(DEFAULT_UI_EMOJIS.keys())
+    total_pages = max(1, (len(names) + EM_PER_PAGE - 1) // EM_PER_PAGE)
+    page = max(0, min(page, total_pages - 1))
+    chunk = names[page * EM_PER_PAGE:(page + 1) * EM_PER_PAGE]
+    rows, row = [], []
+    for n in chunk:
+        dot = "🟢" if emoji_current(scope, n) else "⚪"
+        label = KB_BUTTONS[n]["text"] if scope == "k" else n
+        row.append({"text": f"{dot} {emoji_fallback(scope, n)} {label}"[:30],
+                    "callback_data": f"emsel_{scope}_{n}", "style": "primary"})
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    nav = []
+    if page > 0:
+        nav.append({"text": "Prev", "callback_data": f"emcat_{scope}_{page - 1}",
+                    "icon_custom_emoji_id": UI_EMOJIS["prev"]})
+    if page < total_pages - 1:
+        nav.append({"text": "Next", "callback_data": f"emcat_{scope}_{page + 1}",
+                    "icon_custom_emoji_id": UI_EMOJIS["next"]})
+    if nav:
+        rows.append(nav)
+    rows.append([{"text": "Back", "callback_data": "btn_emoji_menu",
+                  "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "primary"}])
+    return create_custom_inline_markup(rows)
+
+def emoji_entry_view(scope: str, name: str, waiting: bool = True):
+    cur = emoji_current(scope, name)
+    fb = emoji_fallback(scope, name)
+    label = KB_BUTTONS[name]["text"] if scope == "k" else name
+    where = "Bottom keyboard button" if scope == "k" else "Inline button / message icon"
+    text = (
+        f"┌── {ce('gear')} <b>EDIT EMOJI</b>\n"
+        f"│\n"
+        f"├ <b>Item:</b> <code>{html.escape(label)}</code> ({where})\n"
+        f"├ <b>Current:</b> {show_emoji(cur, fb)}\n"
+        f"├ <b>ID:</b> <code>{cur or 'blank'}</code>\n"
+        f"│\n"
+        + (f"└─ {ce('pencil')} <b>Now send a custom emoji</b> (or its numeric ID) to replace it."
+           if waiting else f"└─ {ce('check')} <i>Tap another item from the list to continue.</i>")
+    )
+    rows = [[
+        {"text": "Use Default", "callback_data": f"emdef_{scope}_{name}",
+         "icon_custom_emoji_id": UI_EMOJIS["refresh"], "style": "primary"},
+        {"text": "Make Blank", "callback_data": f"emclr_{scope}_{name}",
+         "icon_custom_emoji_id": UI_EMOJIS["trash"], "style": "danger"},
+    ]]
+    if scope == "k":
+        rows.append([{"text": "Apply to my keyboard", "callback_data": "btn_col_apply", "style": "success"}])
+    rows.append([{"text": "Back to List", "callback_data": f"emcat_{scope}_0",
+                  "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "primary"}])
+    return text, create_custom_inline_markup(rows)
 
 # ----------------- STORAGE & PROGRESS HELPERS ----------------- #
 
@@ -712,6 +890,81 @@ async def process_referral(message: Message, user_id: int):
                 pass
     await asyncio.to_thread(sync_save_user, user_id)
 
+def sync_top_referrers(limit: int = 10) -> list:
+    """সবচেয়ে বেশি রেফার করা ইউজারদের লিস্ট"""
+    allu = sync_search_users("", 5000)
+    top = [x for x in allu if x.get("referrals", 0) > 0]
+    top.sort(key=lambda x: x.get("referrals", 0), reverse=True)
+    return top[:limit]
+
+# ----------------- PROMO / REDEEM CODES ----------------- #
+
+def _load_promo(code: str):
+    p = PROMOS.get(code)
+    if p is None and db:
+        try:
+            d = db.collection("promo_codes").document(code).get()
+            if d.exists:
+                p = d.to_dict()
+                PROMOS[code] = p
+        except Exception as e:
+            logger.error(f"Load promo error: {e}")
+    return p
+
+def _save_promo(code: str):
+    if not db or code not in PROMOS:
+        return
+    try:
+        db.collection("promo_codes").document(code).set(PROMOS[code])
+    except Exception as e:
+        logger.error(f"Save promo error: {e}")
+
+def sync_create_promo(code: str, credits: int, max_uses: int):
+    PROMOS[code] = {"credits": credits, "max_uses": max_uses, "used_by": [], "created_at": time.time()}
+    _save_promo(code)
+
+def sync_delete_promo(code: str) -> bool:
+    existed = code in PROMOS
+    PROMOS.pop(code, None)
+    if db:
+        try:
+            ref = db.collection("promo_codes").document(code)
+            if ref.get().exists:
+                existed = True
+                ref.delete()
+        except Exception as e:
+            logger.error(f"Delete promo error: {e}")
+    return existed
+
+def sync_list_promos() -> dict:
+    out = dict(PROMOS)
+    if db:
+        try:
+            for d in db.collection("promo_codes").stream():
+                out.setdefault(d.id, d.to_dict())
+        except Exception as e:
+            logger.error(f"List promos error: {e}")
+    return out
+
+def sync_redeem(user_id: int, code: str):
+    """রিটার্ন: (True, credits) অথবা (False, 'invalid' | 'used' | 'full')"""
+    code = (code or "").strip().upper()
+    p = _load_promo(code)
+    if not p:
+        return False, "invalid"
+    used = p.setdefault("used_by", [])
+    if user_id in used:
+        return False, "used"
+    if p.get("max_uses", 0) and len(used) >= p["max_uses"]:
+        return False, "full"
+    used.append(user_id)
+    amount = int(p.get("credits", 0))
+    u = sync_get_user(user_id)
+    u["credits"] += amount
+    sync_save_user(user_id)
+    _save_promo(code)
+    return True, amount
+
 def sync_get_stats() -> dict:
     users = []
     if db:
@@ -957,7 +1210,125 @@ async def broadcast_to_all_users(source_message: Message, admin_id: int):
         f"└ {ce('cross')} <b>Failed:</b> <code>{failed}</code>"
     )
 
-# ----------------- FORCE SUB + BAN GATE ----------------- #
+# ----------------- 🔔 DOWNLOAD ALERTS (ADMIN NOTIFICATION) ----------------- #
+
+def describe_msg(m):
+    """মেসেজ থেকে (টাইপ, সাইজ) বের করে"""
+    if isinstance(m, (list, tuple)):
+        m = m[0] if m else None
+    if not m:
+        return "Unknown", 0
+    for attr, label in (("video", "Video"), ("photo", "Photo"), ("audio", "Audio"),
+                        ("voice", "Voice"), ("animation", "GIF"), ("document", "Document"),
+                        ("sticker", "Sticker")):
+        o = getattr(m, attr, None)
+        if o:
+            return label, (getattr(o, "file_size", 0) or 0)
+    if getattr(m, "text", None):
+        return "Text", 0
+    return "Other", 0
+
+def build_notify_text(name: str, username: str, uid: int, credits, link: str, kind: str, size: int) -> str:
+    cfg = SETTINGS["notify"]
+    show = cfg["show"]
+    title = html.escape((cfg.get("title") or "New Download")[:60])
+    lines = []
+    if show.get("user"):
+        lines.append(f"{ce('user')} <b>User:</b> {html.escape(name or 'User')}")
+    if show.get("username"):
+        lines.append(f"{ce('pencil')} <b>Username:</b> {'@' + html.escape(username) if username else '—'}")
+    if show.get("id"):
+        lines.append(f"{ce('lock')} <b>ID:</b> <code>{uid}</code>")
+    if show.get("type"):
+        lines.append(f"{ce('media')} <b>Type:</b> <code>{html.escape(kind)}</code>")
+    if show.get("size") and size:
+        lines.append(f"{ce('box')} <b>Size:</b> <code>{human_bytes(size)}</code>")
+    if show.get("credits"):
+        lines.append(f"{ce('spark')} <b>Credits Left:</b> <code>{credits}</code>")
+    if show.get("link"):
+        lines.append(f"{ce('download')} <b>Link:</b> <code>{html.escape(link)}</code>")
+    if show.get("time"):
+        lines.append(f"{ce('timer')} <b>Time:</b> <code>{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())} UTC</code>")
+    out = f"┌── {ce('bell')} <b>{title}</b>"
+    if lines:
+        out += "\n│\n" + "\n".join(("├ " if i < len(lines) - 1 else "└ ") + ln for i, ln in enumerate(lines))
+    return out
+
+def notify_markup(uid: int, link: str) -> RawMarkup:
+    rows = []
+    if SETTINGS["notify"]["show"].get("link") and link.startswith("https://"):
+        rows.append([{"text": "Open Post", "url": link,
+                      "icon_custom_emoji_id": UI_EMOJIS["download"], "style": "primary"}])
+    rows.append([{"text": "Manage User", "callback_data": f"uv_{uid}",
+                  "icon_custom_emoji_id": UI_EMOJIS["user"], "style": "success"}])
+    return create_custom_inline_markup(rows)
+
+async def notify_admins(uid: int, name: str, username: str, link: str, kind: str, size: int):
+    """সফল ডাউনলোডের পর অ্যাডমিনদের (Manage Users পারমিশন আছে এমন) নোটিফিকেশন পাঠায়"""
+    if not SETTINGS["notify"].get("on"):
+        return
+    try:
+        u = await asyncio.to_thread(sync_get_user, uid)
+        credits = "∞" if has_unlimited(uid) else u.get("credits", 0)
+        text = build_notify_text(name, username, uid, credits, link, kind, size)
+        markup = notify_markup(uid, link)
+        recipients = {OWNER_ID} | {a for a in list(loaded_admins) if has_perm(a, "users")}
+        for r in recipients:
+            if r == uid:
+                continue
+            try:
+                await bot.send_message(r, text, reply_markup=markup)
+            except Exception:
+                pass
+    except Exception as e:
+        logger.error(f"notify_admins error: {e}")
+
+def notify_menu_text() -> str:
+    cfg = SETTINGS["notify"]
+    state = f"{ce('online')} ON" if cfg.get("on") else f"{ce('offline')} OFF"
+    return (
+        f"┌── {ce('bell')} <b>DOWNLOAD ALERTS</b>\n"
+        f"│\n"
+        f"├ <b>Status:</b> {state}\n"
+        f"├ <b>Title:</b> <code>{html.escape(cfg.get('title') or 'New Download')}</code>\n"
+        f"│\n"
+        f"└─ {ce('bulb')} <i>Choose which details appear in the alert. 🟢 = shown · ⚪ = hidden</i>"
+    )
+
+def notify_menu_markup() -> RawMarkup:
+    cfg = SETTINGS["notify"]
+    on = bool(cfg.get("on"))
+    rows = [[{"text": "Alerts: ON" if on else "Alerts: OFF", "callback_data": "ntf_toggle",
+              "icon_custom_emoji_id": UI_EMOJIS["bell"], "style": "success" if on else "danger"}]]
+    row = []
+    for key, label in NOTIFY_FIELDS:
+        dot = "🟢" if cfg["show"].get(key) else "⚪"
+        row.append({"text": f"{dot} {label}", "callback_data": f"ntf_f_{key}", "style": "primary"})
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([
+        {"text": "Edit Title", "callback_data": "ntf_title",
+         "icon_custom_emoji_id": UI_EMOJIS["pencil"], "style": "primary"},
+        {"text": "Send Test", "callback_data": "ntf_test",
+         "icon_custom_emoji_id": UI_EMOJIS["rocket"], "style": "success"},
+    ])
+    rows.append([{"text": "Back", "callback_data": "btn_refresh_panel",
+                  "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "primary"}])
+    return create_custom_inline_markup(rows)
+
+# ----------------- MAINTENANCE + FORCE SUB + BAN GATE ----------------- #
+
+def maintenance_text() -> str:
+    custom = (SETTINGS.get("maint_msg") or "").strip()
+    body = html.escape(custom) if custom else "We are upgrading the bot right now. Please try again in a little while."
+    return (
+        f"┌── {ce('tool')} <b>UNDER MAINTENANCE</b>\n"
+        f"│\n"
+        f"└─ {body}"
+    )
 
 async def check_subscribed(user_id: int) -> bool:
     if not FORCE_SUB_CHANNEL:
@@ -991,6 +1362,9 @@ async def global_gate(_, message: Message):
     if u["banned"]:
         await message.reply_text(f"{ce('cross')} <b>You are banned from using this bot.</b>")
         message.stop_propagation()
+    if SETTINGS.get("maintenance"):
+        await message.reply_text(maintenance_text())
+        message.stop_propagation()
     if not await check_subscribed(uid):
         await message.reply_text(
             f"┌── {ce('lock')} <b>JOIN REQUIRED</b>\n"
@@ -1009,9 +1383,132 @@ async def callback_gate(_, query: CallbackQuery):
     if u["banned"]:
         await query.answer("You are banned.", show_alert=True)
         query.stop_propagation()
+    if SETTINGS.get("maintenance"):
+        await query.answer("Bot is under maintenance. Please try again later.", show_alert=True)
+        query.stop_propagation()
     if not await check_subscribed(uid):
         await query.answer("Join the channel first!", show_alert=True)
         query.stop_propagation()
+
+# ----------------- 📖 USER GUIDE (HOW TO USE) ----------------- #
+
+HELP_TOTAL = 4
+
+def help_page(n: int):
+    n = max(1, min(HELP_TOTAL, n))
+    pages = {
+        1: (
+            f"┌── {ce('book')} <b>HOW TO USE · 1/{HELP_TOTAL}</b>\n"
+            f"│\n"
+            f"├ {ce('download')} <b>Download any Telegram post</b>\n"
+            f"│\n"
+            f"├ <b>Step 1:</b> Open a channel post you want.\n"
+            f"├ <b>Step 2:</b> Tap <b>Share → Copy Link</b>.\n"
+            f"├ <b>Step 3:</b> Paste the link here and send.\n"
+            f"│\n"
+            f"└─ {ce('spark')} <i>Example:</i> <code>https://t.me/channel/123</code>"
+        ),
+        2: (
+            f"┌── {ce('book')} <b>HOW TO USE · 2/{HELP_TOTAL}</b>\n"
+            f"│\n"
+            f"├ {ce('lock')} <b>Private / restricted channels</b>\n"
+            f"│\n"
+            f"├ <b>Step 1:</b> Tap <b>Connect Account</b> below.\n"
+            f"├ <b>Step 2:</b> Send your phone number (with country code).\n"
+            f"├ <b>Step 3:</b> Enter the OTP (and 2FA password if you have one).\n"
+            f"├ <b>Step 4:</b> Now send the private post link as usual.\n"
+            f"│\n"
+            f"└─ {ce('bulb')} <i>Your account must be a member of that channel.</i>"
+        ),
+        3: (
+            f"┌── {ce('book')} <b>HOW TO USE · 3/{HELP_TOTAL}</b>\n"
+            f"│\n"
+            f"├ {ce('spark')} <b>Credits</b>\n"
+            f"│\n"
+            f"├ Every successful download costs <b>1 credit</b>.\n"
+            f"├ You get <code>{DAILY_CREDITS}</code> free credits every day (reset 00:00 UTC).\n"
+            f"├ Check your balance anytime in <b>Profile</b>.\n"
+            f"├ Got a promo code? Tap <b>Redeem Code</b> for bonus credits.\n"
+            f"│\n"
+            f"└─ {ce('timer')} <i>Delivered files auto-delete after {AUTO_DELETE_TIME}s — save them quickly!</i>"
+        ),
+        4: (
+            f"┌── {ce('book')} <b>HOW TO USE · 4/{HELP_TOTAL}</b>\n"
+            f"│\n"
+            f"├ {ce('gift')} <b>Earn free credits</b>\n"
+            f"│\n"
+            f"├ Open <b>Profile → Refer & Earn</b> and share your link.\n"
+            f"├ You get <code>{SETTINGS['ref_reward']}</code> credits for every new user who joins.\n"
+            f"├ Top referrers appear on the leaderboard.\n"
+            f"│\n"
+            f"├ <b>Commands:</b> /start · /help · /profile · /login · /redeem · /ping\n"
+            f"└─ {ce('check')} <i>That's all — send a link and enjoy!</i>"
+        ),
+    }
+    nav = []
+    if n > 1:
+        nav.append({"text": "Prev", "callback_data": f"help_{n - 1}",
+                    "icon_custom_emoji_id": UI_EMOJIS["prev"], "style": "primary"})
+    if n < HELP_TOTAL:
+        nav.append({"text": "Next", "callback_data": f"help_{n + 1}",
+                    "icon_custom_emoji_id": UI_EMOJIS["next"], "style": "primary"})
+    rows = [nav] if nav else []
+    if n == 2:
+        rows.append([{"text": "Connect Account", "callback_data": "btn_connect_start",
+                      "icon_custom_emoji_id": UI_EMOJIS["phone"], "style": "success"}])
+    if n == 4:
+        rows.append([{"text": "Refer & Earn", "callback_data": "btn_refer",
+                      "icon_custom_emoji_id": UI_EMOJIS["gift"], "style": "success"}])
+    rows.append([{"text": "Close", "callback_data": "help_close",
+                  "icon_custom_emoji_id": UI_EMOJIS["cross"], "style": "danger"}])
+    return pages[n], create_custom_inline_markup(rows)
+
+def help_hint_markup() -> RawMarkup:
+    return create_custom_inline_markup([[{
+        "text": "How To Use", "callback_data": "help_1",
+        "icon_custom_emoji_id": UI_EMOJIS["info"], "style": "primary"
+    }]])
+
+@bot.on_message(filters.command("help") & filters.private & filters.incoming)
+async def help_handler(_, message: Message):
+    text, markup = help_page(1)
+    await message.reply_text(text, reply_markup=markup)
+
+# ----------------- 🎟️ REDEEM ----------------- #
+
+async def ask_redeem(message: Message):
+    user_states[message.from_user.id] = "WAIT_REDEEM_CODE"
+    await message.reply_text(
+        f"{ce('ticket')} <b>Send your promo code:</b>",
+        reply_markup=ForceReply(selective=True)
+    )
+
+async def do_redeem(message: Message, code: str):
+    uid = message.from_user.id
+    ok, res = await asyncio.to_thread(sync_redeem, uid, code)
+    if ok:
+        u = await asyncio.to_thread(sync_get_user, uid)
+        return await message.reply_text(
+            f"┌── {ce('check')} <b>CODE REDEEMED!</b>\n"
+            f"│\n"
+            f"├ {ce('spark')} <b>Added:</b> <code>+{res}</code> credits\n"
+            f"└─ {ce('user')} <b>Balance:</b> <code>{u['credits']}</code>",
+            reply_markup=get_bottom_keyboard(uid)
+        )
+    msg = {
+        "invalid": "Invalid code. Please check and try again.",
+        "used": "You have already redeemed this code.",
+        "full": "This code has been fully claimed.",
+    }.get(res, "Could not redeem the code.")
+    await message.reply_text(f"{ce('cross')} <b>{msg}</b>", reply_markup=get_bottom_keyboard(uid))
+
+@bot.on_message(filters.command("redeem") & filters.private & filters.incoming)
+async def redeem_cmd(_, message: Message):
+    await asyncio.to_thread(sync_register_user, message.from_user.id,
+                            message.from_user.first_name, message.from_user.username)
+    if message.command and len(message.command) >= 2:
+        return await do_redeem(message, message.command[1])
+    await ask_redeem(message)
 
 # ----------------- USER PROFILE ----------------- #
 
@@ -1050,7 +1547,10 @@ def build_profile(user_id: int, first_name: str):
     rows = [[{"text": f"Cancel Download #{i}", "callback_data": f"cancel_{b}",
               "icon_custom_emoji_id": UI_EMOJIS["cross"], "style": "danger"}]
             for i, b in enumerate(bases, 1)]
-    rows.append([{"text": "Refer & Earn", "callback_data": "btn_refer", "style": "primary"}])
+    rows.append([{"text": "Refer & Earn", "callback_data": "btn_refer",
+                  "icon_custom_emoji_id": UI_EMOJIS["gift"], "style": "primary"}])
+    rows.append([{"text": "How To Use", "callback_data": "help_1",
+                  "icon_custom_emoji_id": UI_EMOJIS["info"], "style": "primary"}])
     rows.append([{"text": "Refresh", "callback_data": "btn_profile_refresh",
                   "icon_custom_emoji_id": UI_EMOJIS["refresh"], "style": "success"}])
     return text, create_custom_inline_markup(rows)
@@ -1155,6 +1655,7 @@ async def addcredit_cmd(_, message: Message):
 
 def get_role_based_markup(user_id: int, session_count: int, total_users: int):
     """icon_custom_emoji_id এবং style প্যারামিটার ব্যবহার করে বাটন তৈরি"""
+    maint_on = bool(SETTINGS.get("maintenance"))
     raw_buttons = [
         [
             {
@@ -1226,11 +1727,49 @@ def get_role_based_markup(user_id: int, session_count: int, total_users: int):
             {
                 "text": f"Referral Reward ({SETTINGS['ref_reward']})",
                 "callback_data": "btn_ref_reward",
+                "icon_custom_emoji_id": UI_EMOJIS["gift"],
                 "style": "primary"
             },
             {
                 "text": "Button Colors",
                 "callback_data": "btn_colors",
+                "icon_custom_emoji_id": UI_EMOJIS["palette"],
+                "style": "primary"
+            }
+        ],
+        [
+            {
+                "text": "Emoji Manager",
+                "callback_data": "btn_emoji_menu",
+                "icon_custom_emoji_id": UI_EMOJIS["emoji"],
+                "style": "primary"
+            },
+            {
+                "text": "Promo Codes",
+                "callback_data": "btn_promo",
+                "icon_custom_emoji_id": UI_EMOJIS["ticket"],
+                "style": "success"
+            }
+        ],
+        [
+            {
+                "text": "Download Alerts: ON" if SETTINGS["notify"].get("on") else "Download Alerts: OFF",
+                "callback_data": "btn_notify",
+                "icon_custom_emoji_id": UI_EMOJIS["bell"],
+                "style": "success" if SETTINGS["notify"].get("on") else "danger"
+            }
+        ],
+        [
+            {
+                "text": "Maintenance: ON" if maint_on else "Maintenance: OFF",
+                "callback_data": "btn_toggle_maint",
+                "icon_custom_emoji_id": UI_EMOJIS["tool"],
+                "style": "danger" if maint_on else "success"
+            },
+            {
+                "text": "Maint. Message",
+                "callback_data": "btn_maint_msg",
+                "icon_custom_emoji_id": UI_EMOJIS["pencil"],
                 "style": "primary"
             }
         ]
@@ -1267,6 +1806,30 @@ def get_role_based_markup(user_id: int, session_count: int, total_users: int):
 
     return create_custom_inline_markup(raw_buttons)
 
+async def build_panel(user_id: int, note: str = "Manage operations via the buttons below:"):
+    sessions = await asyncio.to_thread(sync_get_all_sessions)
+    all_users = await asyncio.to_thread(sync_get_all_bot_users)
+
+    role_str = f"{ce('crown')} Master Owner" if user_id == OWNER_ID else f"{ce('shield')} Sub-Admin"
+    db_str = f"Connected {ce('online')}" if db else f"Disconnected {ce('offline')}"
+    maint_str = f"ON {ce('offline')}" if SETTINGS.get("maintenance") else f"OFF {ce('online')}"
+
+    text = (
+        f"┌── {ce('panel')} <b>ADMIN CONTROL SYSTEM</b>\n"
+        f"│\n"
+        f"├ {ce('user')} <b>Account Role:</b> {role_str}\n"
+        f"├ {ce('antenna')} <b>Database:</b> {db_str}\n"
+        f"├ {ce('users')} <b>Total Registered:</b> <code>{len(all_users)} Users</code>\n"
+        f"├ {ce('folder')} <b>Userbot Session Pool:</b> <code>{len(sessions)} Active</code>\n"
+        f"├ {ce('timer')} <b>Auto-Delete Delay:</b> <code>{AUTO_DELETE_TIME}s</code>\n"
+        f"├ {ce('gift')} <b>Referral Reward:</b> <code>{SETTINGS['ref_reward']} credits</code>\n"
+        f"├ {ce('tool')} <b>Maintenance:</b> {maint_str}\n"
+        f"├ {ce('bell')} <b>Download Alerts:</b> {'ON ' + ce('online') if SETTINGS['notify'].get('on') else 'OFF ' + ce('offline')}\n"
+        f"│\n"
+        f"└─ {ce('spark')} <i>{note}</i>"
+    )
+    return text, get_role_based_markup(user_id, len(sessions), len(all_users))
+
 def perm_markup(target_uid: int) -> RawMarkup:
     perms = loaded_admins.get(target_uid, {})
     s_tag = FALLBACK_SYMBOLS['online'] if perms.get("sessions") else FALLBACK_SYMBOLS['offline']
@@ -1288,26 +1851,42 @@ async def admin_panel_handler(_, message: Message):
             f"{ce('cross')} <b>Access Denied: You do not have admin permissions.</b>",
             reply_markup=get_bottom_keyboard(user_id)
         )
+    text, markup = await build_panel(user_id)
+    await message.reply_text(text, reply_markup=markup)
 
-    sessions = await asyncio.to_thread(sync_get_all_sessions)
-    all_users = await asyncio.to_thread(sync_get_all_bot_users)
+# ----------------- LOGIN FLOW STARTER ----------------- #
 
-    role_str = f"{ce('crown')} Master Owner" if user_id == OWNER_ID else f"{ce('shield')} Sub-Admin"
-    db_str = f"Connected {ce('online')}" if db else f"Disconnected {ce('offline')}"
+async def begin_login(user_id: int):
+    """/login, Connect Account বাটন এবং Help গাইড — তিন জায়গা থেকেই এটা চলবে"""
+    # আগে একাউন্ট কানেক্ট করা থাকলে আবার লগইন করতে দেবে না
+    if not (ADMINS_CAN_ADD_MULTIPLE and is_any_admin(user_id)):
+        existing = await asyncio.to_thread(sync_get_user_session, user_id)
+        if existing:
+            user_states.pop(user_id, None)
+            acc_name = html.escape(str(existing.get("account_name", "Unknown")))
+            return await bot.send_message(
+                user_id,
+                f"┌── {ce('warning')} <b>ACCOUNT ALREADY CONNECTED</b>\n"
+                f"│\n"
+                f"├ {ce('user')} <b>Connected:</b> <code>{acc_name}</code>\n"
+                f"└─ {ce('check')} <i>You have already connected an account. No need to connect again.</i>",
+                reply_markup=get_bottom_keyboard(user_id)
+            )
 
-    text = (
-        f"┌── {ce('panel')} <b>ADMIN CONTROL SYSTEM</b>\n"
+    user_states[user_id] = "WAIT_PHONE"
+    markup = create_custom_inline_markup([
+        [{"text": "Cancel", "callback_data": "btn_cancel_login", "icon_custom_emoji_id": UI_EMOJIS["cross"], "style": "danger"}]
+    ])
+    await bot.send_message(
+        user_id,
+        f"┌── {ce('phone')} <b>CONNECT YOUR TELEGRAM ACCOUNT</b>\n"
         f"│\n"
-        f"├ {ce('user')} <b>Account Role:</b> {role_str}\n"
-        f"├ {ce('antenna')} <b>Database:</b> {db_str}\n"
-        f"├ {ce('users')} <b>Total Registered:</b> <code>{len(all_users)} Users</code>\n"
-        f"├ {ce('folder')} <b>Userbot Session Pool:</b> <code>{len(sessions)} Active</code>\n"
-        f"├ {ce('timer')} <b>Auto-Delete Delay:</b> <code>{AUTO_DELETE_TIME}s</code>\n"
-        f"├ {ce('gift')} <b>Referral Reward:</b> <code>{SETTINGS['ref_reward']} credits</code>\n"
+        f"├ Send your phone number with country code:\n"
+        f"├ <i>(Example: <code>+8801700000000</code>)</i>\n"
         f"│\n"
-        f"└─ {ce('spark')} <i>Manage operations via the buttons below:</i>"
+        f"└─ <i>Connecting lets the bot access restricted channel files.</i>",
+        reply_markup=markup
     )
-    await message.reply_text(text, reply_markup=get_role_based_markup(user_id, len(sessions), len(all_users)))
 
 # ----------------- CALLBACK BUTTONS ROUTING ----------------- #
 
@@ -1335,6 +1914,24 @@ async def callback_handler(_, query: CallbackQuery):
             return await query.answer("Verified")
         return await query.answer("You haven't joined yet!", show_alert=True)
 
+    # ---------- 📖 Help Guide ---------- #
+    if data.startswith("help_"):
+        arg = data[len("help_"):]
+        if arg == "close":
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            return await query.answer()
+        page = int(arg) if arg.isdigit() else 1
+        text, markup = help_page(page)
+        await query.message.edit_text(text, reply_markup=markup)
+        return await query.answer()
+
+    if data == "btn_connect_start":
+        await begin_login(user_id)
+        return await query.answer()
+
     if data == "btn_profile_refresh":
         text, markup = await asyncio.to_thread(build_profile, user_id, query.from_user.first_name)
         await query.message.edit_text(text, reply_markup=markup)
@@ -1354,9 +1951,32 @@ async def callback_handler(_, query: CallbackQuery):
         markup = create_custom_inline_markup([
             [{"text": "Share Link", "style": "success",
               "url": f"https://t.me/share/url?url={quote(link)}&text={quote('Download Telegram media with this bot!')}"}],
+            [{"text": "Top Referrers", "callback_data": "btn_leaderboard",
+              "icon_custom_emoji_id": UI_EMOJIS["trophy"], "style": "primary"}],
             [{"text": "Back", "callback_data": "btn_profile_refresh",
               "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "primary"}]
         ])
+        await query.message.edit_text(text, reply_markup=markup)
+        return await query.answer()
+
+    if data == "btn_leaderboard":
+        top = await asyncio.to_thread(sync_top_referrers, 10)
+        medals = ["🥇", "🥈", "🥉"]
+        lines = []
+        for i, x in enumerate(top):
+            mark = medals[i] if i < 3 else f"{i + 1}."
+            nm = html.escape((x.get("name") or "User")[:12])
+            lines.append(f"├ {mark} <b>{nm}</b> — <code>{x.get('referrals', 0)}</code> referrals")
+        body = "\n".join(lines) if lines else "├ <i>No referrals yet. Be the first!</i>"
+        text = (
+            f"┌── {ce('trophy')} <b>TOP REFERRERS</b>\n"
+            f"│\n"
+            f"{body}\n"
+            f"│\n"
+            f"└─ {ce('gift')} <i>Invite friends and climb the board!</i>"
+        )
+        markup = create_custom_inline_markup([[{"text": "Back", "callback_data": "btn_refer",
+                                                "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "primary"}]])
         await query.message.edit_text(text, reply_markup=markup)
         return await query.answer()
 
@@ -1373,24 +1993,9 @@ async def callback_handler(_, query: CallbackQuery):
         return await query.answer("Access Denied", show_alert=True)
 
     if data == "btn_refresh_panel":
-        sessions = await asyncio.to_thread(sync_get_all_sessions)
-        all_users = await asyncio.to_thread(sync_get_all_bot_users)
-        role_str = f"{ce('crown')} Master Owner" if user_id == OWNER_ID else f"{ce('shield')} Sub-Admin"
-        db_str = f"Connected {ce('online')}" if db else f"Disconnected {ce('offline')}"
-
-        text = (
-            f"┌── {ce('panel')} <b>ADMIN CONTROL SYSTEM</b>\n"
-            f"│\n"
-            f"├ {ce('user')} <b>Account Role:</b> {role_str}\n"
-            f"├ {ce('antenna')} <b>Database:</b> {db_str}\n"
-            f"├ {ce('users')} <b>Total Registered:</b> <code>{len(all_users)} Users</code>\n"
-            f"├ {ce('folder')} <b>Userbot Session Pool:</b> <code>{len(sessions)} Active</code>\n"
-            f"├ {ce('timer')} <b>Auto-Delete Delay:</b> <code>{AUTO_DELETE_TIME}s</code>\n"
-            f"├ {ce('gift')} <b>Referral Reward:</b> <code>{SETTINGS['ref_reward']} credits</code>\n"
-            f"│\n"
-            f"└─ {ce('spark')} <i>Dashboard Refreshed.</i>"
-        )
-        await query.message.edit_text(text, reply_markup=get_role_based_markup(user_id, len(sessions), len(all_users)))
+        user_states.pop(user_id, None)
+        text, markup = await build_panel(user_id, "Dashboard Refreshed.")
+        await query.message.edit_text(text, reply_markup=markup)
         await query.answer("Dashboard Refreshed")
 
     elif data == "btn_start_broadcast":
@@ -1726,9 +2331,184 @@ async def callback_handler(_, query: CallbackQuery):
         )
         await query.answer()
 
+    # ---------- 🛠️ Maintenance Mode ---------- #
+    elif data == "btn_toggle_maint":
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        SETTINGS["maintenance"] = not SETTINGS.get("maintenance", False)
+        await asyncio.to_thread(sync_save_settings)
+        on = SETTINGS["maintenance"]
+        await query.answer("Maintenance ON — users are blocked" if on else "Maintenance OFF — bot is live", show_alert=True)
+        text, markup = await build_panel(
+            user_id,
+            "Maintenance is ON. Only admins can use the bot." if on else "Maintenance is OFF. Bot is live for everyone."
+        )
+        await query.message.edit_text(text, reply_markup=markup)
+
+    elif data == "btn_maint_msg":
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        user_states[user_id] = "WAIT_MAINT_MSG"
+        cur = (SETTINGS.get("maint_msg") or "").strip()
+        await query.message.reply_text(
+            f"┌── {ce('tool')} <b>MAINTENANCE MESSAGE</b>\n"
+            f"│\n"
+            f"├ <b>Current:</b> {html.escape(cur) if cur else '<i>default</i>'}\n"
+            f"│\n"
+            f"└─ Send the new message users will see.\n<i>Send <code>-</code> to reset to default.</i>",
+            reply_markup=ForceReply(selective=True)
+        )
+        await query.answer()
+
+    # ---------- 😀 Emoji Manager ---------- #
+    elif data == "btn_emoji_menu":
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        user_states.pop(user_id, None)
+        pending_target.pop(user_id, None)
+        await query.message.edit_text(emoji_menu_text(), reply_markup=emoji_main_markup())
+        await query.answer()
+
+    elif data.startswith("emcat_"):
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        user_states.pop(user_id, None)
+        pending_target.pop(user_id, None)
+        _, scope, page = data.split("_")
+        title = "BOTTOM KEYBOARD BUTTONS" if scope == "k" else "INLINE BUTTONS & MESSAGE ICONS"
+        await query.message.edit_text(
+            f"┌── {ce('emoji')} <b>{title}</b>\n"
+            f"│\n"
+            f"└─ Tap an item to change its emoji.\n<i>🟢 = custom emoji set · ⚪ = plain / blank</i>",
+            reply_markup=emoji_list_markup(scope, int(page))
+        )
+        await query.answer()
+
+    elif data.startswith("emsel_"):
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        _, scope, name = data.split("_", 2)
+        if not emoji_valid(scope, name):
+            return await query.answer("Unknown item", show_alert=True)
+        pending_target[user_id] = (scope, name)
+        user_states[user_id] = "WAIT_EMOJI_VALUE"
+        text, markup = emoji_entry_view(scope, name, waiting=True)
+        await query.message.edit_text(text, reply_markup=markup)
+        await query.answer()
+
+    elif data.startswith("emdef_") or data.startswith("emclr_"):
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        _, scope, name = data.split("_", 2)
+        if not emoji_valid(scope, name):
+            return await query.answer("Unknown item", show_alert=True)
+        to_default = data.startswith("emdef_")
+        await asyncio.to_thread(emoji_set, scope, name, None if to_default else "")
+        await query.answer("Reset to default" if to_default else "Emoji removed")
+        pending_target[user_id] = (scope, name)
+        user_states[user_id] = "WAIT_EMOJI_VALUE"
+        text, markup = emoji_entry_view(scope, name, waiting=True)
+        await query.message.edit_text(text, reply_markup=markup)
+
+    elif data == "emresetall":
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        SETTINGS["emojis"] = {}
+        SETTINGS["kb_emojis"] = {}
+        apply_emoji_overrides()
+        await asyncio.to_thread(sync_save_settings)
+        await query.answer("All emojis reset to default", show_alert=True)
+        await query.message.edit_text(emoji_menu_text(), reply_markup=emoji_main_markup())
+
+    # ---------- 🔔 Download Alerts ---------- #
+    elif data == "btn_notify":
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        user_states.pop(user_id, None)
+        await query.message.edit_text(notify_menu_text(), reply_markup=notify_menu_markup())
+        await query.answer()
+
+    elif data == "ntf_toggle":
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        SETTINGS["notify"]["on"] = not SETTINGS["notify"].get("on", True)
+        await asyncio.to_thread(sync_save_settings)
+        await query.answer("Alerts ON" if SETTINGS["notify"]["on"] else "Alerts OFF")
+        await query.message.edit_text(notify_menu_text(), reply_markup=notify_menu_markup())
+
+    elif data.startswith("ntf_f_"):
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        key = data[len("ntf_f_"):]
+        if key in SETTINGS["notify"]["show"]:
+            SETTINGS["notify"]["show"][key] = not SETTINGS["notify"]["show"][key]
+            await asyncio.to_thread(sync_save_settings)
+        await query.answer("Updated")
+        await query.message.edit_text(notify_menu_text(), reply_markup=notify_menu_markup())
+
+    elif data == "ntf_title":
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        user_states[user_id] = "WAIT_NOTIFY_TITLE"
+        await query.message.reply_text(
+            f"┌── {ce('bell')} <b>ALERT TITLE</b>\n"
+            f"│\n"
+            f"├ <b>Current:</b> <code>{html.escape(SETTINGS['notify'].get('title') or 'New Download')}</code>\n"
+            f"└─ Send the new title (max 60 chars).\n<i>Send <code>-</code> to reset.</i>",
+            reply_markup=ForceReply(selective=True)
+        )
+        await query.answer()
+
+    elif data == "ntf_test":
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        sample = "https://t.me/example_channel/123"
+        text = build_notify_text(query.from_user.first_name, query.from_user.username or "",
+                                 user_id, 29, sample, "Video", 25 * 1024 * 1024)
+        await bot.send_message(user_id, text, reply_markup=notify_markup(user_id, sample))
+        await query.answer("Test alert sent")
+
+    # ---------- 🎟️ Promo Codes ---------- #
+    elif data == "btn_promo":
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        promos = await asyncio.to_thread(sync_list_promos)
+        lines = []
+        for code, p in list(promos.items())[:25]:
+            mx = p.get("max_uses", 0)
+            lines.append(f"├ <code>{html.escape(code)}</code> · +{p.get('credits', 0)} · "
+                         f"{len(p.get('used_by', []))}/{mx if mx else '∞'} used")
+        body = "\n".join(lines) if lines else "├ <i>No promo codes yet.</i>"
+        markup = create_custom_inline_markup([
+            [{"text": "Create / Delete Code", "callback_data": "btn_promo_new",
+              "icon_custom_emoji_id": UI_EMOJIS["pencil"], "style": "success"}],
+            [{"text": "Back", "callback_data": "btn_refresh_panel",
+              "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "primary"}]
+        ])
+        await query.message.edit_text(
+            f"┌── {ce('ticket')} <b>PROMO CODES</b>\n│\n{body}\n│\n"
+            f"└─ <i>Users redeem with the Redeem Code button or /redeem CODE</i>",
+            reply_markup=markup
+        )
+        await query.answer()
+
+    elif data == "btn_promo_new":
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        user_states[user_id] = "WAIT_PROMO_CREATE"
+        await query.message.reply_text(
+            f"┌── {ce('ticket')} <b>NEW PROMO CODE</b>\n"
+            f"│\n"
+            f"├ Format: <code>CODE credits max_uses</code>\n"
+            f"├ Example: <code>WELCOME50 50 100</code> (<code>0</code> = unlimited uses)\n"
+            f"└─ To remove: <code>delete WELCOME50</code>",
+            reply_markup=ForceReply(selective=True)
+        )
+        await query.answer()
+
 # ----------------- MESSAGE ROUTER & BROADCAST INTAKE ----------------- #
 
-@bot.on_message(filters.private & filters.incoming & ~filters.command(["start", "help", "admin", "panel", "ping", "storage", "clean", "login", "cancel", "profile", "ban", "unban", "addcredit"]))
+@bot.on_message(filters.private & filters.incoming & ~filters.command(["start", "help", "admin", "panel", "ping", "storage", "clean", "login", "cancel", "profile", "ban", "unban", "addcredit", "redeem"]))
 async def message_input_router(_, message: Message):
     user_id = message.from_user.id
     await asyncio.to_thread(sync_register_user, user_id,
@@ -1746,6 +2526,8 @@ async def message_input_router(_, message: Message):
         return await admin_panel_handler(_, message)
     elif is_btn(text_input, "profile"):
         return await profile_handler(_, message)
+    elif is_btn(text_input, "redeem"):
+        return await ask_redeem(message)
     elif is_btn(text_input, "broadcast"):
         if not has_perm(user_id, "broadcast"):
             return await message.reply_text(f"{ce('cross')} <b>Permission Denied.</b>", reply_markup=get_bottom_keyboard(user_id))
@@ -1765,24 +2547,20 @@ async def message_input_router(_, message: Message):
     elif is_btn(text_input, "clean"):
         return await clean_cmd_handler(_, message)
     elif is_btn(text_input, "howto"):
-        return await message.reply_text(
-            f"┌── {ce('info')} <b>HOW TO OPERATE VAULT BOT</b>\n"
-            f"│\n"
-            f"├ <b>1.</b> Send any public channel or restricted post link.\n"
-            f"├ <b>2.</b> Connect your Telegram account via <code>/login</code> for private channels.\n"
-            f"├ <b>3.</b> Each download costs 1 credit ({DAILY_CREDITS} free credits daily).\n"
-            f"├ <b>4.</b> Delivered files automatically purge in <code>{AUTO_DELETE_TIME}s</code>.\n"
-            f"├ <b>5.</b> Invite friends from <b>Profile → Refer & Earn</b> to get bonus credits.\n"
-            f"│\n"
-            f"└─ {ce('spark')} <i>Fast, persistent and cloud-integrated.</i>",
-            reply_markup=get_bottom_keyboard(user_id)
-        )
+        return await help_handler(_, message)
 
     # Broadcast Payload Receiver
     if state == "WAIT_BROADCAST_PAYLOAD" and has_perm(user_id, "broadcast"):
         user_states.pop(user_id, None)
         asyncio.create_task(broadcast_to_all_users(message, user_id))
         return
+
+    # Redeem Code
+    if state == "WAIT_REDEEM_CODE":
+        user_states.pop(user_id, None)
+        if not text_input:
+            return await message.reply_text(f"{ce('cross')} <b>Please send the code as text.</b>", reply_markup=get_bottom_keyboard(user_id))
+        return await do_redeem(message, text_input.split()[0])
 
     # Referral Reward Amount (Admin Panel)
     if state == "WAIT_REF_REWARD" and has_perm(user_id, "users"):
@@ -1793,6 +2571,82 @@ async def message_input_router(_, message: Message):
         await asyncio.to_thread(sync_save_settings)
         return await message.reply_text(
             f"{ce('check')} <b>Referral reward set to <code>{SETTINGS['ref_reward']}</code> credits.</b>",
+            reply_markup=get_bottom_keyboard(user_id)
+        )
+
+    # Maintenance Message (Admin Panel)
+    if state == "WAIT_MAINT_MSG" and has_perm(user_id, "users"):
+        user_states.pop(user_id, None)
+        if not text_input:
+            return await message.reply_text(f"{ce('cross')} <b>Please send text.</b>", reply_markup=get_bottom_keyboard(user_id))
+        SETTINGS["maint_msg"] = "" if text_input == "-" else text_input[:500]
+        await asyncio.to_thread(sync_save_settings)
+        return await message.reply_text(
+            f"{ce('check')} <b>Maintenance message updated.</b>\n\n{maintenance_text()}",
+            reply_markup=get_bottom_keyboard(user_id)
+        )
+
+    # Emoji Manager: নতুন কাস্টম ইমোজি / ID নেওয়া
+    if state == "WAIT_EMOJI_VALUE" and has_perm(user_id, "users"):
+        tgt = pending_target.get(user_id)
+        if not tgt:
+            user_states.pop(user_id, None)
+            return
+        ents = message.entities or message.caption_entities or []
+        ids = [str(e.custom_emoji_id) for e in ents if getattr(e, "custom_emoji_id", None)]
+        if not ids and text_input.isdigit():
+            ids = [text_input]
+        if not ids:
+            return await message.reply_text(
+                f"{ce('cross')} <b>Send a custom emoji</b> (or its numeric ID). "
+                f"Send <code>/cancel</code> to stop."
+            )
+        scope, name = tgt
+        await asyncio.to_thread(emoji_set, scope, name, ids[0])
+        user_states.pop(user_id, None)
+        pending_target.pop(user_id, None)
+        text, markup = emoji_entry_view(scope, name, waiting=False)
+        return await message.reply_text(f"{ce('check')} <b>Saved!</b>\n\n{text}", reply_markup=markup)
+
+    # Download Alert Title
+    if state == "WAIT_NOTIFY_TITLE" and has_perm(user_id, "users"):
+        user_states.pop(user_id, None)
+        if not text_input:
+            return await message.reply_text(f"{ce('cross')} <b>Please send text.</b>", reply_markup=get_bottom_keyboard(user_id))
+        SETTINGS["notify"]["title"] = "New Download" if text_input == "-" else text_input[:60]
+        await asyncio.to_thread(sync_save_settings)
+        return await message.reply_text(
+            f"{ce('check')} <b>Alert title updated.</b>",
+            reply_markup=notify_menu_markup()
+        )
+
+    # Promo Codes: তৈরি / ডিলিট
+    if state == "WAIT_PROMO_CREATE" and has_perm(user_id, "users"):
+        user_states.pop(user_id, None)
+        parts = text_input.split()
+        if len(parts) == 2 and parts[0].lower() == "delete":
+            ok = await asyncio.to_thread(sync_delete_promo, parts[1].upper())
+            return await message.reply_text(
+                f"{ce('check') if ok else ce('cross')} <b>{'Code deleted.' if ok else 'Code not found.'}</b>",
+                reply_markup=get_bottom_keyboard(user_id)
+            )
+        code = parts[0].upper() if parts else ""
+        if (len(parts) < 2 or not parts[1].isdigit() or not re.fullmatch(r"[A-Z0-9_-]{3,20}", code)
+                or (len(parts) > 2 and not parts[2].isdigit())):
+            return await message.reply_text(
+                f"{ce('cross')} <b>Invalid format.</b>\n"
+                f"<i>Example: <code>WELCOME50 50 100</code> (code: 3-20 letters/numbers)</i>",
+                reply_markup=get_bottom_keyboard(user_id)
+            )
+        credits = int(parts[1])
+        max_uses = int(parts[2]) if len(parts) > 2 else 0
+        await asyncio.to_thread(sync_create_promo, code, credits, max_uses)
+        return await message.reply_text(
+            f"┌── {ce('check')} <b>PROMO CODE CREATED</b>\n"
+            f"│\n"
+            f"├ <b>Code:</b> <code>{code}</code>\n"
+            f"├ <b>Credits:</b> <code>+{credits}</code>\n"
+            f"└─ <b>Max uses:</b> <code>{max_uses if max_uses else 'unlimited'}</code>",
             reply_markup=get_bottom_keyboard(user_id)
         )
 
@@ -2011,9 +2865,16 @@ async def message_input_router(_, message: Message):
         if len(text_input) > 2 and ("t.me/" in text_input or "telegram.me/" in text_input):
             return await message.reply_text(
                 f"{ce('warning')} <b>Invalid post link format.</b>\n<i>Example: <code>https://t.me/channel/123</code></i>",
-                reply_markup=get_bottom_keyboard(user_id)
+                reply_markup=help_hint_markup()
             )
-        return
+        # লিংক ছাড়া অন্য কিছু পাঠালে ইউজারকে গাইড দেখাবে
+        return await message.reply_text(
+            f"┌── {ce('info')} <b>SEND A POST LINK</b>\n"
+            f"│\n"
+            f"├ Paste a Telegram post link to download it.\n"
+            f"└─ {ce('spark')} <i>Example:</i> <code>https://t.me/channel/123</code>",
+            reply_markup=help_hint_markup()
+        )
 
     # ক্রেডিট চেক
     if not has_unlimited(user_id):
@@ -2023,7 +2884,8 @@ async def message_input_router(_, message: Message):
                 f"┌── {ce('warning')} <b>NO CREDITS LEFT</b>\n"
                 f"│\n"
                 f"├ Your daily <code>{DAILY_CREDITS}</code> credits are used up. They reset at 00:00 UTC.\n"
-                f"└─ {ce('gift')} <i>Want more? Refer friends from Profile → Refer & Earn.</i>",
+                f"├ {ce('gift')} <i>Refer friends from Profile → Refer & Earn.</i>\n"
+                f"└─ {ce('ticket')} <i>Have a promo code? Tap Redeem Code.</i>",
                 reply_markup=get_bottom_keyboard(user_id)
             )
 
@@ -2039,11 +2901,17 @@ async def message_input_router(_, message: Message):
         chat_id = pub_match.group(1)
         msg_id = int(pub_match.group(2))
 
+    post_link = (f"https://t.me/c/{p_match.group(1)}/{p_match.group(2)}" if p_match
+                 else f"https://t.me/{pub_match.group(1)}/{pub_match.group(2)}")
+    _fu = message.from_user
+
     # Fast Server Copy Bypass
     try:
         copied = await bot.copy_message(chat_id=message.chat.id, from_chat_id=chat_id, message_id=msg_id)
         if copied:
             await asyncio.to_thread(sync_charge, user_id)
+            _k, _sz = describe_msg(copied)
+            asyncio.create_task(notify_admins(_fu.id, _fu.first_name, _fu.username or "", post_link, _k, _sz))
             asyncio.create_task(silent_auto_delete(message.chat.id, [copied.id, message.id]))
             return
     except Exception:
@@ -2079,7 +2947,10 @@ async def message_input_router(_, message: Message):
         fwd = await working_client.forward_messages(message.chat.id, chat_id, msg_id)
         if fwd:
             await asyncio.to_thread(sync_charge, user_id)
-            asyncio.create_task(silent_auto_delete(message.chat.id, [fwd.id, message.id]))
+            _k, _sz = describe_msg(fwd)
+            asyncio.create_task(notify_admins(_fu.id, _fu.first_name, _fu.username or "", post_link, _k, _sz))
+            _fid = fwd[0].id if isinstance(fwd, (list, tuple)) else fwd.id
+            asyncio.create_task(silent_auto_delete(message.chat.id, [_fid, message.id]))
             return
     except Exception:
         pass
@@ -2154,6 +3025,9 @@ async def message_input_router(_, message: Message):
                 res = await bot.send_media_group(message.chat.id, input_media[i:i + 10])
                 sent_msgs.extend(res)
             await asyncio.to_thread(sync_charge, user_id)
+            _tot = sum((getattr(m.video or m.document or m.audio or m.photo, "file_size", 0) or 0) for m in media_group)
+            asyncio.create_task(notify_admins(_fu.id, _fu.first_name, _fu.username or "", post_link,
+                                              f"Album ({len(input_media)} files)", _tot))
             await status.delete()
             asyncio.create_task(silent_auto_delete(message.chat.id, [m.id for m in sent_msgs] + [message.id]))
         else:
@@ -2279,6 +3153,8 @@ async def message_input_router(_, message: Message):
 
     if sent and not cancelled:
         await asyncio.to_thread(sync_charge, user_id)
+        _k, _sz = describe_msg(target_msg)
+        asyncio.create_task(notify_admins(_fu.id, _fu.first_name, _fu.username or "", post_link, _k, _sz))
         asyncio.create_task(silent_auto_delete(message.chat.id, [sent.id, message.id]))
 
     for f in [file_path, thumb_path]:
@@ -2335,6 +3211,8 @@ async def start_handler(_, message: Message):
     user_id = message.from_user.id
     await asyncio.to_thread(sync_register_user, user_id,
                             message.from_user.first_name, message.from_user.username)
+    _u = await asyncio.to_thread(sync_get_user, user_id)
+    is_new = bool(_u.get("fresh"))
     await process_referral(message, user_id)
     await message.reply_text(
         f"┌── {ce('wave')} <b>WELCOME, {html.escape(message.from_user.first_name.upper())}!</b>\n"
@@ -2343,42 +3221,19 @@ async def start_handler(_, message: Message):
         f"├ {ce('lock')} Use <code>/login</code> or the button below to link your account.\n"
         f"├ {ce('user')} Daily free credits: <code>{DAILY_CREDITS}</code> (check <code>/profile</code>)\n"
         f"├ {ce('gift')} Invite friends from your profile to earn bonus credits.\n"
+        f"├ {ce('book')} Need help? Tap <b>How To Use</b> or send <code>/help</code>.\n"
         f"│\n"
         f"└─ <i>All downloads will automatically self-delete after {AUTO_DELETE_TIME}s.</i>",
         reply_markup=get_bottom_keyboard(user_id)
     )
+    # নতুন ইউজারকে সাথে সাথে স্টেপ-বাই-স্টেপ গাইড দেখানো
+    if is_new:
+        text, markup = help_page(1)
+        await message.reply_text(text, reply_markup=markup)
 
 @bot.on_message(filters.command("login") & filters.private & filters.incoming)
 async def public_login_cmd(_, message: Message):
-    user_id = message.from_user.id
-
-    # আগে একাউন্ট কানেক্ট করা থাকলে আবার লগইন করতে দেবে না
-    if not (ADMINS_CAN_ADD_MULTIPLE and is_any_admin(user_id)):
-        existing = await asyncio.to_thread(sync_get_user_session, user_id)
-        if existing:
-            user_states.pop(user_id, None)
-            acc_name = html.escape(str(existing.get("account_name", "Unknown")))
-            return await message.reply_text(
-                f"┌── {ce('warning')} <b>ACCOUNT ALREADY CONNECTED</b>\n"
-                f"│\n"
-                f"├ {ce('user')} <b>Connected:</b> <code>{acc_name}</code>\n"
-                f"└─ {ce('check')} <i>You have already connected an account. No need to connect again.</i>",
-                reply_markup=get_bottom_keyboard(user_id)
-            )
-
-    user_states[user_id] = "WAIT_PHONE"
-    markup = create_custom_inline_markup([
-        [{"text": "Cancel", "callback_data": "btn_cancel_login", "icon_custom_emoji_id": UI_EMOJIS["cross"], "style": "danger"}]
-    ])
-    await message.reply_text(
-        f"┌── {ce('phone')} <b>CONNECT YOUR TELEGRAM ACCOUNT</b>\n"
-        f"│\n"
-        f"├ Send your phone number with country code:\n"
-        f"├ <i>(Example: <code>+8801700000000</code>)</i>\n"
-        f"│\n"
-        f"└─ <i>Connecting lets the bot access restricted channel files.</i>",
-        reply_markup=markup
-    )
+    await begin_login(message.from_user.id)
 
 @bot.on_message(filters.command("cancel") & filters.private & filters.incoming)
 async def cancel_handler(_, message: Message):
@@ -2692,8 +3547,10 @@ async def main():
     try:
         await bot.set_bot_commands([
             BotCommand("start", "Start the bot"),
+            BotCommand("help", "How to use the bot"),
             BotCommand("login", "Connect your Telegram account"),
             BotCommand("profile", "My profile & credits"),
+            BotCommand("redeem", "Redeem a promo code"),
             BotCommand("ping", "Check latency"),
             BotCommand("cancel", "Cancel current operation"),
         ])
