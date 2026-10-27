@@ -6,8 +6,10 @@ import shutil
 import asyncio
 import logging
 import html
+import hmac
+import hashlib
 import aiohttp
-from urllib.parse import quote
+from urllib.parse import quote, parse_qsl
 from aiohttp import web
 from hydrogram import Client, filters
 from hydrogram.enums import ParseMode, ChatMemberStatus
@@ -233,6 +235,8 @@ def create_custom_inline_markup(rows: list) -> RawMarkup:
                 b["callback_data"] = btn["callback_data"]
             if btn.get("url"):
                 b["url"] = btn["url"]
+            if btn.get("web_app"):
+                b["web_app"] = {"url": btn["web_app"]}
             if btn.get("icon_custom_emoji_id"):
                 b["icon_custom_emoji_id"] = str(btn["icon_custom_emoji_id"])
             if btn.get("style"):
@@ -350,6 +354,7 @@ if FIREBASE_KEY_RAW:
 #   maint_msg   → মেইনটেনেন্স মেসেজ (ফাঁকা = ডিফল্ট)
 #   emojis      → UI/Inline ইমোজি ওভাররাইড  {name: id}
 #   kb_emojis   → নিচের কিবোর্ড বাটনের ইমোজি ওভাররাইড {key: id}
+#   ads         → Adsgram Mini App ad-গেট সেটিংস
 # =====================================================================
 SETTINGS = {
     "ref_reward": 10,
@@ -363,6 +368,18 @@ SETTINGS = {
         "title": "New Download",
         "show": {"user": True, "username": True, "id": True, "type": True,
                  "size": True, "credits": True, "link": True, "time": True},
+    },
+    "ads": {
+        "on": False,
+        "provider": "test",        # "test" (ডেমো) | "adsgram"
+        "block_id": "",
+        "every_n": 8,              # প্রতি কয়টা ডাউনলোড পর পর ad
+        "first_time": True,        # প্রথম ডাউনলোডেই ad
+        "skip_admins": True,       # Admin/Owner কে ad দেখাবে না
+        "fail_open": True,         # ad না এলে (no-fill) ইউজারকে ছেড়ে দেবে
+        "min_seconds": 5,          # এর কমে ad শেষ হলে ফেক ধরা হবে
+        "title": "Watch a short ad",
+        "text": "Watch one short ad to unlock your download. It only takes a few seconds!",
     },
 }
 NOTIFY_FIELDS = [
@@ -395,6 +412,9 @@ def sync_load_settings():
                 SETTINGS["notify"]["on"] = bool(n.get("on", True))
                 SETTINGS["notify"]["title"] = str(n.get("title", "New Download")) or "New Download"
                 SETTINGS["notify"]["show"].update(dict(n.get("show", {})))
+            ad = data.get("ads")
+            if isinstance(ad, dict):
+                SETTINGS["ads"].update(ad)
             apply_emoji_overrides()
     except Exception as e:
         logger.error(f"Load settings error: {e}")
@@ -417,6 +437,8 @@ bot = Client(
 )
 
 user_states = {}
+pending_ads = {}           # uid -> যে মেসেজের ডাউনলোড ad এর জন্য থেমে আছে
+ad_started = {}            # uid -> কখন ad পেজ খুলেছে (ফেক চেকের জন্য)
 login_clients = {}
 loaded_user_clients = []
 loaded_admins = {}
@@ -789,7 +811,8 @@ def sync_get_user(user_id: int) -> dict:
                     data = d.to_dict()
                     for k in ("credits", "last_reset", "banned", "joined", "downloads",
                               "referred_by", "referrals", "fresh",
-                              "name", "username", "last_active"):
+                              "name", "username", "last_active",
+                              "since_ad", "ads_seen", "ad_pass"):
                         if k in data:
                             u[k] = data[k]
             except Exception:
@@ -810,6 +833,7 @@ def sync_charge(user_id: int):
     """সফল ডাউনলোডের পর ১ ক্রেডিট কাটে"""
     u = sync_get_user(user_id)
     u["downloads"] = u.get("downloads", 0) + 1
+    u["since_ad"] = u.get("since_ad", 0) + 1
     if not has_unlimited(user_id):
         u["credits"] = max(0, u["credits"] - 1)
     sync_save_user(user_id)
@@ -1319,6 +1343,49 @@ def notify_menu_markup() -> RawMarkup:
                   "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "primary"}])
     return create_custom_inline_markup(rows)
 
+def ads_menu_text() -> str:
+    a = SETTINGS["ads"]
+    state = f"{ce('online')} ON" if a["on"] else f"{ce('offline')} OFF"
+    blk = html.escape(str(a["block_id"])) if a["block_id"] else "—"
+    ready = "" if DASH_URL else f"\n├ {ce('warning')} <b>DASH_URL env is not set!</b>"
+    return (
+        f"┌── {ce('rocket')} <b>ADS CONTROL</b>\n"
+        f"│\n"
+        f"├ <b>Status:</b> {state}\n"
+        f"├ <b>Provider:</b> <code>{a['provider']}</code>\n"
+        f"├ <b>Block ID:</b> <code>{blk}</code>\n"
+        f"├ <b>Show every:</b> <code>{a['every_n']}</code> downloads\n"
+        f"├ <b>First download ad:</b> {'🟢' if a['first_time'] else '⚪'}\n"
+        f"├ <b>Skip admins:</b> {'🟢' if a['skip_admins'] else '⚪'}\n"
+        f"├ <b>No-ad fallback:</b> {'🟢' if a['fail_open'] else '⚪'}\n"
+        f"├ <b>Title:</b> {html.escape(a['title'])}"
+        f"{ready}\n"
+        f"│\n"
+        f"└─ {ce('bulb')} <i>Use provider <b>test</b> for a demo ad, <b>adsgram</b> for real ads.</i>"
+    )
+
+def ads_menu_markup() -> RawMarkup:
+    a = SETTINGS["ads"]
+    on = bool(a["on"])
+    def tog(label, key):
+        return {"text": f"{'🟢' if a[key] else '⚪'} {label}", "callback_data": f"ad_t_{key}", "style": "primary"}
+    rows = [
+        [{"text": "Ads: ON" if on else "Ads: OFF", "callback_data": "ad_t_on",
+          "icon_custom_emoji_id": UI_EMOJIS["rocket"], "style": "success" if on else "danger"}],
+        [{"text": f"Provider: {a['provider']}", "callback_data": "ad_prov", "style": "primary"},
+         {"text": "Block ID", "callback_data": "ad_block", "style": "primary"}],
+        [{"text": f"Every {a['every_n']} downloads", "callback_data": "ad_every", "style": "primary"},
+         {"text": "Edit Message", "callback_data": "ad_text",
+          "icon_custom_emoji_id": UI_EMOJIS["pencil"], "style": "primary"}],
+        [tog("First download", "first_time"), tog("Skip admins", "skip_admins")],
+        [tog("No-ad fallback", "fail_open")],
+        [{"text": "Preview Ad", "callback_data": "ad_preview",
+          "icon_custom_emoji_id": UI_EMOJIS["check"], "style": "success"}],
+        [{"text": "Back", "callback_data": "btn_refresh_panel",
+          "icon_custom_emoji_id": UI_EMOJIS["back"], "style": "primary"}],
+    ]
+    return create_custom_inline_markup(rows)
+
 # ----------------- MAINTENANCE + FORCE SUB + BAN GATE ----------------- #
 
 def maintenance_text() -> str:
@@ -1509,6 +1576,73 @@ async def redeem_cmd(_, message: Message):
     if message.command and len(message.command) >= 2:
         return await do_redeem(message, message.command[1])
     await ask_redeem(message)
+
+# ----------------- 📺 ADS GATE ----------------- #
+
+def verify_init_data(init_data: str):
+    """Telegram Mini App initData যাচাই করে user id রিটার্ন করে (ফেক হলে None)"""
+    try:
+        d = dict(parse_qsl(init_data or "", keep_blank_values=True))
+        h = d.pop("hash", "")
+        if not h:
+            return None
+        check = "\n".join(f"{k}={v}" for k, v in sorted(d.items()))
+        secret = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
+        calc = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(calc, h):
+            return None
+        if time.time() - int(d.get("auth_date", 0)) > 86400:
+            return None
+        return int(json.loads(d["user"])["id"])
+    except Exception:
+        return None
+
+def ad_button_markup() -> RawMarkup:
+    return create_custom_inline_markup([[{
+        "text": "Watch Ad", "style": "success",
+        "icon_custom_emoji_id": UI_EMOJIS["rocket"],
+        "web_app": f"{DASH_URL}/ad"
+    }]])
+
+async def ad_gate(message: Message, user_id: int) -> bool:
+    """True = ad দেখাতে হবে (ডাউনলোড আপাতত থামবে). False = এগিয়ে যাও"""
+    a = SETTINGS["ads"]
+    if not a.get("on") or not DASH_URL:
+        return False
+    if a.get("skip_admins") and is_any_admin(user_id):
+        return False
+    u = await asyncio.to_thread(sync_get_user, user_id)
+
+    # ad দেখা শেষ (১০ মিনিটের মধ্যে) → একবার ছেড়ে দাও
+    if time.time() - u.get("ad_pass", 0) < 600:
+        u["ad_pass"] = 0
+        await asyncio.to_thread(sync_save_user, user_id)
+        return False
+
+    first = a.get("first_time") and not u.get("ads_seen") and u.get("downloads", 0) == 0
+    due = u.get("since_ad", 0) >= int(a.get("every_n", 8))
+    if not (first or due):
+        return False
+
+    pending_ads[user_id] = message
+    await message.reply_text(
+        f"┌── {ce('spark')} <b>{html.escape(a.get('title') or 'Watch a short ad')}</b>\n"
+        f"│\n"
+        f"└─ {html.escape(a.get('text') or '')}",
+        reply_markup=ad_button_markup()
+    )
+    return True
+
+async def resume_pending(uid: int):
+    """Ad শেষ হলে আগের লিংকের ডাউনলোড নিজে থেকেই চালু করে"""
+    m = pending_ads.pop(uid, None)
+    try:
+        if not m:
+            return await bot.send_message(uid, f"{ce('check')} <b>Ad completed!</b> Now send your link again.")
+        await bot.send_message(uid, f"{ce('check')} <b>Ad completed!</b> Starting your download...")
+        await message_input_router(bot, m)
+    except Exception as e:
+        logger.error(f"resume_pending error: {e}")
 
 # ----------------- USER PROFILE ----------------- #
 
@@ -1757,6 +1891,14 @@ def get_role_based_markup(user_id: int, session_count: int, total_users: int):
                 "callback_data": "btn_notify",
                 "icon_custom_emoji_id": UI_EMOJIS["bell"],
                 "style": "success" if SETTINGS["notify"].get("on") else "danger"
+            }
+        ],
+        [
+            {
+                "text": "Ads: ON" if SETTINGS["ads"]["on"] else "Ads: OFF",
+                "callback_data": "btn_ads",
+                "icon_custom_emoji_id": UI_EMOJIS["rocket"],
+                "style": "success" if SETTINGS["ads"]["on"] else "danger"
             }
         ],
         [
@@ -2468,6 +2610,58 @@ async def callback_handler(_, query: CallbackQuery):
         await bot.send_message(user_id, text, reply_markup=notify_markup(user_id, sample))
         await query.answer("Test alert sent")
 
+    # ---------- 📺 Ads Control ---------- #
+    elif data == "btn_ads":
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        user_states.pop(user_id, None)
+        await query.message.edit_text(ads_menu_text(), reply_markup=ads_menu_markup())
+        await query.answer()
+
+    elif data.startswith("ad_t_"):
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        key = data[len("ad_t_"):]
+        if key in ("on", "first_time", "skip_admins", "fail_open"):
+            SETTINGS["ads"][key] = not SETTINGS["ads"][key]
+            await asyncio.to_thread(sync_save_settings)
+        await query.answer("Updated")
+        await query.message.edit_text(ads_menu_text(), reply_markup=ads_menu_markup())
+
+    elif data == "ad_prov":
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        a = SETTINGS["ads"]
+        a["provider"] = "adsgram" if a["provider"] == "test" else "test"
+        await asyncio.to_thread(sync_save_settings)
+        await query.answer(f"Provider: {a['provider']}")
+        await query.message.edit_text(ads_menu_text(), reply_markup=ads_menu_markup())
+
+    elif data in ("ad_every", "ad_block", "ad_text"):
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        user_states[user_id] = {"ad_every": "WAIT_AD_EVERY", "ad_block": "WAIT_AD_BLOCK", "ad_text": "WAIT_AD_TEXT"}[data]
+        prompt = {
+            "ad_every": "Send how many downloads between ads (e.g. <code>8</code>):",
+            "ad_block": "Send your Adsgram <b>Block ID</b> (send <code>-</code> to clear):",
+            "ad_text": "Send the ad message as <code>Title | Description</code>:",
+        }[data]
+        await query.message.reply_text(f"{ce('rocket')} {prompt}", reply_markup=ForceReply(selective=True))
+        await query.answer()
+
+    elif data == "ad_preview":
+        if not has_perm(user_id, "users"):
+            return await query.answer("Permission Denied", show_alert=True)
+        if not DASH_URL:
+            return await query.answer("Set the DASH_URL env first.", show_alert=True)
+        a = SETTINGS["ads"]
+        await bot.send_message(
+            user_id,
+            f"┌── {ce('spark')} <b>{html.escape(a['title'])}</b>\n│\n└─ {html.escape(a['text'])}",
+            reply_markup=ad_button_markup()
+        )
+        await query.answer("Preview sent")
+
     # ---------- 🎟️ Promo Codes ---------- #
     elif data == "btn_promo":
         if not has_perm(user_id, "users"):
@@ -2619,6 +2813,27 @@ async def message_input_router(_, message: Message):
             f"{ce('check')} <b>Alert title updated.</b>",
             reply_markup=notify_menu_markup()
         )
+
+    # Ads settings input
+    if state in ("WAIT_AD_EVERY", "WAIT_AD_BLOCK", "WAIT_AD_TEXT") and has_perm(user_id, "users"):
+        user_states.pop(user_id, None)
+        a = SETTINGS["ads"]
+        if state == "WAIT_AD_EVERY":
+            if not text_input.isdigit() or int(text_input) < 1:
+                return await message.reply_text(f"{ce('cross')} <b>Send a number (1 or more).</b>")
+            a["every_n"] = int(text_input)
+        elif state == "WAIT_AD_BLOCK":
+            a["block_id"] = "" if text_input == "-" else text_input.strip()[:40]
+        else:
+            if not text_input:
+                return await message.reply_text(f"{ce('cross')} <b>Please send text.</b>")
+            if "|" in text_input:
+                t, b = text_input.split("|", 1)
+                a["title"], a["text"] = t.strip()[:60], b.strip()[:300]
+            else:
+                a["title"] = text_input.strip()[:60]
+        await asyncio.to_thread(sync_save_settings)
+        return await message.reply_text(f"{ce('check')} <b>Saved.</b>", reply_markup=ads_menu_markup())
 
     # Promo Codes: তৈরি / ডিলিট
     if state == "WAIT_PROMO_CREATE" and has_perm(user_id, "users"):
@@ -2888,6 +3103,10 @@ async def message_input_router(_, message: Message):
                 f"└─ {ce('ticket')} <i>Have a promo code? Tap Redeem Code.</i>",
                 reply_markup=get_bottom_keyboard(user_id)
             )
+
+    # 📺 Ad গেট (প্রথম ডাউনলোড / প্রতি N ডাউনলোড)
+    if await ad_gate(message, user_id):
+        return
 
     try:
         await message.react("🫡")
@@ -3450,6 +3669,119 @@ stats(); setInterval(stats, 3000);
 </html>
 """
 
+# ----------------- 📺 ADS MINI APP PAGE ----------------- #
+
+HTML_AD = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Watch Ad</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://sad.adsgram.ai/js/sad.min.js"></script>
+<style>
+:root{--bg:#0b1020;--card:#131a2e;--line:#232c47;--tx:#e8ecf8;--mut:#8b96b8;--acc:#6c8cff;--ok:#34d399;--bad:#f87171}
+*{margin:0;padding:0;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+body{background:radial-gradient(800px 480px at 50% -10%,#1f2c5e 0,transparent 60%),var(--bg);color:var(--tx);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.card{width:100%;max-width:380px;background:var(--card);border:1px solid var(--line);border-radius:24px;padding:30px 22px;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.45)}
+.ico{width:88px;height:88px;margin:0 auto 18px;border-radius:50%;background:linear-gradient(135deg,var(--acc),#a66cff);display:flex;align-items:center;justify-content:center;font-size:40px;box-shadow:0 0 0 9px rgba(108,140,255,.12)}
+h1{font-size:21px;font-weight:800;margin-bottom:8px}
+p{font-size:14px;line-height:1.55;color:var(--mut);margin-bottom:22px}
+.bar{height:8px;background:var(--line);border-radius:6px;overflow:hidden;margin-bottom:16px;display:none}
+.fill{height:100%;width:0;background:linear-gradient(90deg,#4f7bff,#34d399);transition:width .3s}
+.btn{width:100%;padding:15px;border:0;border-radius:14px;font-size:16px;font-weight:800;color:#fff;background:linear-gradient(135deg,#4f7bff,#8a5cff);cursor:pointer}
+.btn:disabled{opacity:.55}
+.btn.alt{background:#232c47;margin-top:10px}
+.msg{font-size:13px;margin-top:14px;min-height:18px;color:var(--mut)}
+.msg.ok{color:var(--ok)}.msg.bad{color:var(--bad)}
+.hide{display:none}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="ico" id="ico">🎬</div>
+  <h1 id="title">Loading...</h1>
+  <p id="text">Please wait a moment.</p>
+  <div class="bar" id="bar"><div class="fill" id="fill"></div></div>
+  <button class="btn" id="go" disabled>Watch Ad</button>
+  <button class="btn alt hide" id="skip">Continue anyway</button>
+  <div class="msg" id="msg"></div>
+</div>
+<script>
+var tg = window.Telegram.WebApp; tg.ready(); tg.expand();
+var $ = function (id) { return document.getElementById(id); };
+var cfg = null, busy = false;
+
+async function post(p, b) {
+  var r = await fetch(p, {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(Object.assign({initData: tg.initData}, b || {}))});
+  var j = {}; try { j = await r.json(); } catch (e) {}
+  j._ok = r.ok; return j;
+}
+function say(t, cls) { var m = $('msg'); m.textContent = t || ''; m.className = 'msg ' + (cls || ''); }
+
+async function init() {
+  var c = await post('/api/ad_config');
+  if (!c._ok) { $('title').textContent = 'Oops'; $('text').textContent = 'Please open this page from the bot.'; return; }
+  cfg = c;
+  $('title').textContent = c.title;
+  $('text').textContent = c.text;
+  $('go').disabled = false;
+}
+
+async function finish(failed) {
+  say('Unlocking your download...');
+  var r = await post('/api/ad_done', {failed: !!failed});
+  if (r.ok) {
+    $('ico').textContent = '✅'; $('title').textContent = 'Done!';
+    $('text').textContent = 'Your download is starting in the chat.';
+    $('go').classList.add('hide'); $('skip').classList.add('hide');
+    say('', 'ok'); setTimeout(function () { tg.close(); }, 1200);
+  } else {
+    busy = false; $('go').disabled = false;
+    say(r.error === 'too_fast' ? 'Please watch the full ad.' : 'Something went wrong. Try again.', 'bad');
+  }
+}
+
+function runTest() {
+  var total = Math.max(5, (cfg.min_seconds || 5) + 1), left = total;
+  $('bar').style.display = 'block'; $('go').textContent = 'Ad playing... ' + left + 's';
+  var t = setInterval(function () {
+    left--; $('fill').style.width = ((total - left) / total * 100) + '%';
+    $('go').textContent = 'Ad playing... ' + Math.max(left, 0) + 's';
+    if (left <= 0) { clearInterval(t); finish(false); }
+  }, 1000);
+}
+
+async function watch() {
+  if (busy || !cfg) return;
+  busy = true; $('go').disabled = true; say('');
+  if (cfg.provider !== 'adsgram') return runTest();
+  try {
+    if (!window.Adsgram || !cfg.block_id) throw {state: 'load', description: 'not configured'};
+    var ctl = window.Adsgram.init({blockId: String(cfg.block_id)});
+    var res = await ctl.show();
+    if (res && res.done === false) throw res;
+    await finish(false);
+  } catch (e) {
+    busy = false; $('go').disabled = false;
+    var noFill = e && (e.state === 'load' || /no ?ad|not ?found|not ?configured/i.test(e.description || ''));
+    if (noFill && cfg.fail_open) {
+      say('No ad available right now.', 'bad'); $('skip').classList.remove('hide');
+    } else {
+      say('Please watch the full ad to continue.', 'bad');
+    }
+  }
+}
+$('go').onclick = watch;
+$('skip').onclick = function () { finish(true); };
+init();
+</script>
+</body>
+</html>
+"""
+
 # ----------------- WEB SERVER HANDLERS ----------------- #
 
 def clean_download_dir() -> int:
@@ -3478,6 +3810,49 @@ async def web_index(request):
 
 async def web_health(request):
     return web.Response(text="OK")
+
+async def web_ad(request):
+    return web.Response(text=HTML_AD, content_type="text/html")
+
+async def api_ad_config(request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    uid = verify_init_data(body.get("initData", ""))
+    if not uid:
+        return _unauth()
+    ad_started[uid] = time.time()
+    a = SETTINGS["ads"]
+    return web.json_response({
+        "provider": a["provider"], "block_id": a["block_id"],
+        "title": a["title"], "text": a["text"],
+        "min_seconds": a["min_seconds"], "fail_open": a["fail_open"],
+    })
+
+async def api_ad_done(request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    uid = verify_init_data(body.get("initData", ""))
+    if not uid:
+        return _unauth()
+    a = SETTINGS["ads"]
+    started = ad_started.pop(uid, 0)
+    if not started or time.time() - started < a["min_seconds"]:
+        return web.json_response({"ok": False, "error": "too_fast"}, status=400)
+    failed = bool(body.get("failed"))
+    if failed and not a["fail_open"]:
+        return web.json_response({"ok": False, "error": "no_fallback"}, status=400)
+    u = await asyncio.to_thread(sync_get_user, uid)
+    u["ad_pass"] = time.time()
+    u["since_ad"] = 0
+    if not failed:
+        u["ads_seen"] = u.get("ads_seen", 0) + 1
+    await asyncio.to_thread(sync_save_user, uid)
+    asyncio.create_task(resume_pending(uid))
+    return web.json_response({"ok": True})
 
 async def api_stats(request):
     if not _authed(request):
@@ -3525,6 +3900,9 @@ async def start_web_server():
     app.router.add_get("/api/stats", api_stats)
     app.router.add_get("/api/users", api_users)
     app.router.add_post("/api/clean", api_clean)
+    app.router.add_get("/ad", web_ad)
+    app.router.add_post("/api/ad_config", api_ad_config)
+    app.router.add_post("/api/ad_done", api_ad_done)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
